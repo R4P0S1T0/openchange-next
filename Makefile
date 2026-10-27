@@ -17,6 +17,13 @@ default: all
 # Until we add proper dependencies for all the C files:
 .NOTPARALLEL:
 
+# Keep generated intermediate NDR C files for incremental builds. Do not mark
+# all targets secondary: fresh builds must still generate mapicodes_enum.h.
+.SECONDARY: gen_ndr/ndr_exchange.c gen_ndr/ndr_exchange_c.c \
+	gen_ndr/ndr_exchange_debug.c gen_ndr/ndr_exchange_debug_c.c \
+	gen_ndr/ndr_asyncemsmdb.c gen_ndr/ndr_asyncemsmdb_c.c gen_ndr/ndr_property.c \
+	gen_ndr/exchange.h gen_ndr/property.h gen_ndr/asyncemsmdb.h gen_ndr/exchange_debug.h
+
 config.mk: config.status config.mk.in
 	./config.status
 
@@ -112,7 +119,7 @@ re:: clean install
 
 .SUFFIXES: .c .o .h .po .idl .cpp
 
-.idl.h:
+gen_ndr/%.h: %.idl | gen_ndr
 	@echo "Generating $@"
 	@$(PIDL) --outputdir=gen_ndr --header -- $<
 
@@ -144,11 +151,11 @@ gen_ndr:
 	@echo "Creating the gen_ndr directory"
 	mkdir -p gen_ndr
 
-gen_ndr/ndr_%.h gen_ndr/ndr_%.c: %.idl %.h
+gen_ndr/ndr_%.h gen_ndr/ndr_%.c: %.idl gen_ndr/%.h
 	@echo "Generating $@"
 	@$(PIDL) --outputdir=gen_ndr --ndr-parser -- $<
 
-gen_ndr/ndr_%_c.h gen_ndr/ndr_%_c.c: %.idl %.h
+gen_ndr/ndr_%_c.h gen_ndr/ndr_%_c.c: %.idl gen_ndr/%.h
 	@echo "Generating $@"
 	@$(PIDL) --outputdir=gen_ndr --client -- $<
 
@@ -795,6 +802,8 @@ distclean::libmapiproxy-distclean
 
 mapiproxy/libmapiproxy/modules.o mapiproxy/libmapiproxy/modules.po: CFLAGS+=-DMODULESDIR=\"${modulesdir}\"
 
+$(patsubst %.c,%.po,$(wildcard mapiproxy/libmapiproxy/openchangedb*.c mapiproxy/libmapiproxy/backends/*.c)): mapiproxy/libmapiproxy/backends/openchangedb_backends.h
+
 mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION):	mapiproxy/libmapiproxy/dcesrv_mapiproxy_module.po	\
 							mapiproxy/libmapiproxy/dcesrv_mapiproxy_server.po	\
 							mapiproxy/libmapiproxy/dcesrv_mapiproxy_session.po	\
@@ -814,7 +823,7 @@ mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION):	mapiproxy/libmapiproxy/dc
 							mapiproxy/util/ccan/htable/htable.po			\
 							libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) $^ -L. $(LIBS) $(TDB_LIBS) $(DL_LIBS) $(MYSQL_LIBS) $(PYTHON_LIBS)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS) $(DL_LIBS) $(MYSQL_LIBS) $(PYTHON_LIBS)
 
 libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION): mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 	ln -fs $< $@
@@ -1692,6 +1701,30 @@ check-python:
 	PYTHONPATH=$(pythonscriptdir):$(PYTHONPATH) trial openchange
 
 check:: check-python
+
+.PHONY: check-ndr-modernization
+check-ndr-modernization: libmapi bin/ndr-modernization
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/ndr-modernization
+
+bin/ndr-modernization: testsuite/modernization/ndr_smoke.c libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
+
+.PHONY: check-libmapi-modernization
+check-libmapi-modernization: check-ndr-modernization bin/libmapi-modernization
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/libmapi-modernization
+
+bin/libmapi-modernization: testsuite/modernization/libmapi_runner.c testsuite/libmapi/mapi_property.c testsuite/libmapi/mapi_idset.c libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(CHECK_CFLAGS) -Itestsuite -o $@ $(filter %.c,$^) $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(CHECK_LIBS)
+
+.PHONY: check-mapiproxy-registries
+check-mapiproxy-registries: libmapi bin/mapiproxy-registries
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mapiproxy-registries
+
+bin/mapiproxy-registries: testsuite/modernization/registry_smoke.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_module.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_server.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_session.c mapiproxy/libmapistore/mapistore_backend.c mapiproxy/libmapistore/gen_ndr/mapistore_notification.h libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $(filter %.c,$^) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_memdup -Wl,--wrap=talloc_strdup -Wl,--wrap=_talloc_realloc_array libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(TDB_LIBS) $(SAMBASERVER_LIBS)
 
 clean-python:
 	rm -f pymapi/*.o

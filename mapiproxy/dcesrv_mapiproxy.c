@@ -227,14 +227,15 @@ static NTSTATUS mapiproxy_op_bind(struct dcesrv_call_state *dce_call, const stru
 	bool					ndrdump;
 	char					*server_id_printable = NULL;
 	
-	server_id_printable = server_id_str(NULL, &(dce_call->conn->server_id));
+	struct server_id connection_id = mapiproxy_connection_server_id(dce_call->conn);
+	server_id_printable = server_id_str(NULL, &connection_id);
 	OC_DEBUG(5, "[session = 0x%x] [session server id = %s]\n",
 		  dce_call->context->context_id,
 		  server_id_printable);
 	talloc_free(server_id_printable);
 
 	OC_DEBUG(5, "mapiproxy::mapiproxy_op_bind: [session = 0x%x] [session server id = 0x%"PRIx64" 0x%x 0x%x]", dce_call->context->context_id,
-		  dce_call->conn->server_id.pid, dce_call->conn->server_id.task_id, dce_call->conn->server_id.vnn);
+		  connection_id.pid, connection_id.task_id, connection_id.vnn);
 
 	/* Retrieve server mode parametric option */
 	server_mode = lpcfg_parm_bool(dce_call->conn->dce_ctx->lp_ctx, NULL, "dcerpc_mapiproxy", "server", true);
@@ -279,8 +280,8 @@ static void mapiproxy_op_unbind(struct dcesrv_connection_context *context, const
 
 	OC_DEBUG(5, "mapiproxy::mapiproxy_op_unbind\n");
 
-	mapiproxy_module_unbind(context->conn->server_id, context->context_id);
-	mapiproxy_server_unbind(context->conn->server_id, context->context_id);
+	mapiproxy_module_unbind(mapiproxy_connection_server_id(context->conn), context->context_id);
+	mapiproxy_server_unbind(mapiproxy_connection_server_id(context->conn), context->context_id);
 
 	if (private) {
 		talloc_free(private->c_pipe);

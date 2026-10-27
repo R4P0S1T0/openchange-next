@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # OpenChange provisioning
@@ -76,7 +76,7 @@ class TextProgressReporter(AbstractProgressReporter):
     """A concrete example of a progress reporter - just provides text output
     for each new step."""
     def doReporting(self, stepName):
-        print "[+] Step %d: %s" % (self.currentStep, stepName)
+        print("[+] Step %d: %s" % (self.currentStep, stepName))
 
 
 class ProvisionNames(object):
@@ -154,7 +154,7 @@ def guess_names_from_smbconf(lp, creds=None, firstorg=None, firstou=None):
     names.hostname = hostname
     names.sitename = sitename
 
-    db = get_local_samdb(names, lp, creds)
+    db = get_local_samdb(names, lp, creds) if not firstorg or not firstou else None
     exchangedn = 'CN=Microsoft Exchange,CN=Services,%s' % configdn
     if not firstorg:
         ret = db.search(base=exchangedn,
@@ -162,7 +162,7 @@ def guess_names_from_smbconf(lp, creds=None, firstorg=None, firstou=None):
                         expression='(objectclass=msExchOrganizationContainer)',
                         attrs=['name'])
         if len(ret):
-            firstorg = ret[0]['name'][0]
+            firstorg = ret[0]['name'].text[0]
         if not firstorg:
             raise Exception("Cannot find first exchange organization in %s", exchangedn)
     firstorgdn = "CN=%s,%s" % (firstorg, exchangedn)
@@ -235,7 +235,7 @@ def provision_schema(sam_db, setup_path, names, reporter, ldif, msg,
             if not element:
                 continue
             # this match is to assure we have a legit element
-            match = re.search('^\s*dn:\s+(.*)$', element, flags=re.M)
+            match = re.search(r'^\s*dn:\s+(.*)$', element, flags=re.M)
             if match:
                 dn = match.group(1)
                 if ignore_already_exists and exists_dn(sam_db, dn):
@@ -244,13 +244,13 @@ def provision_schema(sam_db, setup_path, names, reporter, ldif, msg,
                 elements_to_add.append(element)
 
         if not elements_to_add:
-            print 'No elements to add found in ' + full_path
+            print('No elements to add found in ' + full_path)
 
         for el in elements_to_add:
             try:
                 ldif_apply_method(el, ['relax:0'])
             except Exception as ex:
-                print 'Error: "' + str(ex) + '" when adding element:\n' + el + '\n'
+                print('Error: "' + str(ex) + '" when adding element:\n' + el + '\n')
                 raise
     except:
         sam_db.transaction_cancel()
@@ -361,11 +361,12 @@ def deprovision_schema(setup_path, names, lp, creds, reporter, ldif, msg, modify
                         ret = db.search(dn, scope=ldb.SCOPE_BASE)
                         if len(ret) != 0:
                             db.delete(line[4:], ["tree_delete:0"])
-                    except ldb.LdbError, (enum, estr):
+                    except ldb.LdbError as error:
+                        enum, estr = error.args
                         if enum == ldb.ERR_NO_SUCH_OBJECT:
                             pass
                         else:
-                            print "[!] error: %s" % estr
+                            print("[!] error: %s" % estr)
 
     except:
         db.transaction_cancel()
@@ -418,8 +419,8 @@ def install_schemas(setup_path, names, lp, creds, reporter,
         for ent in current:
             schema_ldif += sam_db.write_ldif(ent, ldb.CHANGETYPE_NONE)
 
-            prefixmap_data = open(setup_path("AD/prefixMap.txt"), 'r').read()
-            prefixmap_data = b64encode(prefixmap_data)
+            with open(setup_path("AD/prefixMap.txt"), "rb") as prefixmap_file:
+                prefixmap_data = b64encode(prefixmap_file.read()).decode("ascii")
 
             # We don't actually add this ldif, just parse it
             prefixmap_ldif = "dn: %s\nprefixMap:: %s\n\n" % (schemadn, prefixmap_data)
@@ -468,7 +469,7 @@ def install_schemas(setup_path, names, lp, creds, reporter,
             provision_schema(sam_db, setup_path, names, reporter, schema['path'],
                              schema['description'], schema['modify_mode'],
                              ignore_already_exists=ignore_already_exists)
-        except LdbError, ldb_error:
+        except LdbError as ldb_error:
             print ("[!] error while provisioning the Exchange"
                    " schema classes (%d): %s"
                    % ldb_error.args)
@@ -479,7 +480,7 @@ def install_schemas(setup_path, names, lp, creds, reporter,
                          "AD/oc_provision_configuration.ldif",
                          "Generic Exchange configuration objects",
                          ignore_already_exists=ignore_already_exists)
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
         print ("[!] error while provisioning the Exchange configuration"
                " objects (%d): %s" % ldb_error.args)
         raise
@@ -505,7 +506,7 @@ def provision_organization(setup_path, names, lp, creds, reporter=None,
                          "AD/oc_provision_configuration_org.ldif",
                          "Exchange Organization objects",
                          ignore_already_exists=ignore_already_exists)
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
             print ("[!] error while provisioning the Exchange organization objects"
                    " objects (%d): %s" % ldb_error.args)
             return False
@@ -515,7 +516,7 @@ def provision_organization(setup_path, names, lp, creds, reporter=None,
                       "AD/oc_provision_configuration_finalize.ldif",
                       "Update generic Exchange configuration objects",
                       ignore_already_exists=ignore_already_exists)
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
         print ("[!] error while provisioning the Exchange organization"
                " objects (%d): %s" % ldb_error.args)
         return False
@@ -538,7 +539,7 @@ def deprovision_organization(setup_path, names, lp, creds, reporter=None):
         deprovision_schema(setup_path, names, lp, creds, reporter,
                            "AD/oc_provision_configuration_org.ldif",
                            "Exchange Organization objects")
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
             print ("[!] error while deprovisioning the Exchange organization objects"
                    " objects (%d): %s" % ldb_error.args)
             return False
@@ -548,7 +549,7 @@ def deprovision_organization(setup_path, names, lp, creds, reporter=None):
                            "AD/oc_provision_configuration_finalize.ldif",
                            "Update generic Exchange configuration objects",
                            modify_mode=True)
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
         print ("[!] error while deprovisioning the Exchange organization"
                " objects (%d): %s" % ldb_error.args)
         return False
@@ -586,7 +587,7 @@ def _get_element_dn(ldb, basedn, ldb_filter):
     if n_res == 1:
         dn = res[0].dn.get_linearized()
     elif n_res > 1:
-        raise "More than one result for search %s with base %s" % (ldb_filter, basedn)
+        raise RuntimeError("More than one result for search %s with base %s" % (ldb_filter, basedn))
 
     return dn
 
@@ -607,14 +608,14 @@ def exists_dn(sam_db, dn):
 
 def get_schema_master(db):
     res = db.search(base="", scope=ldb.SCOPE_BASE, attrs=["schemaNamingContext"])
-    schemaNamingContext = res[0]["schemaNamingContext"][0]
+    schemaNamingContext = res[0]["schemaNamingContext"].text[0]
     res = db.search(base=schemaNamingContext, scope=ldb.SCOPE_BASE, attrs=["fSMORoleOwner"])
     if len(res) == 0:
         raise Exception("No schema master found")
     elif len(res) > 1:
         raise Exception("More than one schema master found")
 
-    owner = res[0]['fSMORoleOwner'][0]
+    owner = res[0]['fSMORoleOwner'].text[0]
     # remove prefix, to get the server owner
     server_owner = owner.split(',', 1)[1]
 
@@ -623,7 +624,7 @@ def get_schema_master(db):
 
 def get_dns_owner(db, ntds_owner):
     res = db.search(base=ntds_owner, scope=ldb.SCOPE_BASE, attrs=["dnsHostname"])
-    dns_hostname = res[0]['dnsHostname'][0]
+    dns_hostname = res[0]['dnsHostname'].text[0]
     return dns_hostname.lower()
 
 
@@ -722,9 +723,9 @@ msExchOmaAdminWirelessEnable: 0
             extended_user = "dn: %s\nadd: mail\nmail: %s\n" % (user_dn, smtp_user)
             db.modify_ldif(extended_user)
 
-        print "[+] User %s extended and enabled" % username
+        print("[+] User %s extended and enabled" % username)
     else:
-        print "[!] User '%s' not found" % username
+        print("[!] User '%s' not found" % username)
 
 
 def delete_user(names, lp, creds, username=None):
@@ -732,7 +733,7 @@ def delete_user(names, lp, creds, username=None):
     basedn = "CN=Users,%s" % names.domaindn
     user_dn = get_user_dn(db, basedn, username)
     if not user_dn:
-        print "[!] User '%s' not found" % username
+        print("[!] User '%s' not found" % username)
         return
 
     to_delete = ['mailNickName', 'homeMDB', 'homeMTA', 'legacyExchangeDN',
@@ -741,7 +742,7 @@ def delete_user(names, lp, creds, username=None):
                  'msExchRecipientTypeDetails', 'msExchRecipientDisplayType']
     _delete_attrs_ignore_nonexistent(db, user_dn, to_delete)
 
-    print "[+] Removed all OpenChange LDAP attributes from account %s " % username
+    print("[+] Removed all OpenChange LDAP attributes from account %s " % username)
 
 
 def accountcontrol(names, lp, creds, username, value=0):
@@ -764,9 +765,9 @@ msExchUserAccountControl: %d
 """ % (dn, value)
     db.modify_ldif(ldif)
     if value == 2:
-        print "[+] Account %s disabled" % username
+        print("[+] Account %s disabled" % username)
     else:
-        print "[+] Account %s enabled" % username
+        print("[+] Account %s enabled" % username)
 
 
 def newgroup(names, lp, creds, groupname, mail=None):
@@ -783,9 +784,9 @@ def newgroup(names, lp, creds, groupname, mail=None):
     group_dn = get_group_dn(db, names.domaindn, groupname)
     if group_dn:
         _enable_group(db, names, group_dn, groupname, mail)
-        print "[+] Group %s extended and enabled" % groupname
+        print("[+] Group %s extended and enabled" % groupname)
     else:
-        print "[!] Group '%s' not found" % groupname
+        print("[!] Group '%s' not found" % groupname)
 
 
 def enable_all_groups_in_organization(names, lp, creds, org_name):
@@ -808,8 +809,8 @@ def enable_all_groups_in_organization(names, lp, creds, org_name):
                     attrs=['cn', 'mail'])
     for entry in res:
         dn = entry.dn.get_linearized()
-        cn = entry['cn'][0]
-        mail = entry['mail'][0]
+        cn = entry['cn'].text[0]
+        mail = entry['mail'].text[0]
         _enable_group(db, names, dn, cn, mail)
 
 
@@ -873,7 +874,7 @@ def delete_group(names, lp, creds, groupname):
                  'msExchRecipientTypeDetails', 'msExchRecipientDisplayType']
     _delete_attrs_ignore_nonexistent(db, group_dn, to_delete)
 
-    print "[+] Removed all OpenChange LDAP attributes from group account %s " % groupname
+    print("[+] Removed all OpenChange LDAP attributes from group account %s " % groupname)
 
 
 def _delete_attrs_ignore_nonexistent(db, dn, to_delete):
@@ -934,7 +935,7 @@ def _group_recipient_type_details(db, group_dn):
     """
     res = db.search(base=group_dn, scope=SCOPE_BASE, attrs=['groupType'])
     if len(res) == 1:
-        groupType = int(res[0]['groupType'][0])
+        groupType = int(res[0]['groupType'].text[0])
         universal = groupType & 0x8
         security = groupType & 0x80000000
     else:
@@ -996,7 +997,7 @@ def checkusage(names, lp, creds):
                                                         names.firstorgdn)
             ret = samdb.search(base=dn, scope=ldb.SCOPE_BASE, attrs=['siteFolderServer'])
             assert len(ret) == 1
-            siteFolderName = ret[0]["siteFolderServer"][0]
+            siteFolderName = ret[0]["siteFolderServer"].text[0]
             if our_siteFolderName.lower() == siteFolderName.lower():
                 server_uses.append("primary folder store server")
 
@@ -1005,7 +1006,7 @@ def checkusage(names, lp, creds):
             dn = "CN=Recipient Update Service (%s),CN=Recipient Update Services,CN=Address Lists Container,%s" % (names.domain, names.firstorgdn)
             ret = samdb.search(base=dn, scope=ldb.SCOPE_BASE, attrs=['msExchAddressListServiceLink'])
             assert len(ret) == 1
-            addressListServiceLink = ret[0]['msExchAddressListServiceLink'][0]
+            addressListServiceLink = ret[0]['msExchAddressListServiceLink'].text[0]
             if our_addressListServiceLink.lower() == addressListServiceLink.lower():
                 server_uses.append("primary receipt update service server")
 
@@ -1020,19 +1021,19 @@ def checkusage(names, lp, creds):
             expression="(homeMDB=*)")
         mailboxes_handled = 0
         for user_mailbox in mailboxes:
-            if (user_mailbox['homeMDB'][0] == our_mailbox_store and
-               user_mailbox['msExchUserAccountControl'][0] != '2'):
+            if (user_mailbox['homeMDB'].text[0] == our_mailbox_store and
+               user_mailbox['msExchUserAccountControl'].text[0] != '2'):
                 mailboxes_handled += 1
 
         if mailboxes_handled > 0:
             server_uses.append("handling %d mailboxes" % mailboxes_handled)
 
         return server_uses
-    except LdbError, ldb_error:
-        print >> sys.stderr, "[!] error while checking whether this server is being used (%d): %s" % ldb_error.args
+    except LdbError as ldb_error:
+        print("[!] error while checking whether this server is being used (%d): %s" % ldb_error.args, file=sys.stderr)
         raise ldb_error
     except RuntimeError as err:
-        print >> sys.stderr, "[!] error while checking whether this server is being used: %s" % err
+        print("[!] error while checking whether this server is being used: %s" % err, file=sys.stderr)
         raise err
 
 
@@ -1049,7 +1050,7 @@ def provision(setup_path, names, lp, creds, reporter=None,
 
     If a progress reporter is not provided, a text output reporter is provided
     """
-    print "NOTE: This operation can take several minutes"
+    print("NOTE: This operation can take several minutes")
 
     if reporter is None:
         reporter = TextProgressReporter()
@@ -1065,7 +1066,7 @@ def provision(setup_path, names, lp, creds, reporter=None,
     provision_organization(setup_path, names, lp, creds, reporter,
                            ignore_already_exists=ignore_already_exists)
 
-    print "[SUCCESS] Done!"
+    print("[SUCCESS] Done!")
 
 
 def deprovision(setup_path, names, lp, creds, reporter=None):
@@ -1089,7 +1090,7 @@ def deprovision(setup_path, names, lp, creds, reporter=None):
         deprovision_schema(setup_path, names, lp, creds, reporter, "AD/oc_provision_configuration.ldif", "Remove Exchange configuration objects")
         # NOTE: AD schema objects cannot be deleted (it's a feature!)
         # So we can't remove all object added on provision
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
         print ("[!] error while deprovisioning the Exchange configuration"
                " objects (%d): %s" % ldb_error.args)
         raise ldb_error
@@ -1122,8 +1123,8 @@ def register(setup_path, names, lp, creds, reporter=None,
                          "AD/oc_provision_configuration_new_server.ldif",
                          "Exchange Samba registration",
                          ignore_already_exists=ignore_already_exists)
-        print "[SUCCESS] Done!"
-    except LdbError, ldb_error:
+        print("[SUCCESS] Done!")
+    except LdbError as ldb_error:
         print ("[!] error while registering Openchange Samba configuration"
                " objects (%d): %s" % ldb_error.args)
 
@@ -1158,7 +1159,7 @@ def unregister(setup_path, names, lp, creds, reporter=None):
         deprovision_schema(setup_path, names, lp, creds, reporter,
                            "AD/oc_provision_configuration_new_server.ldif",
                            "Unregistering Openchange server")
-    except LdbError, ldb_error:
+    except LdbError as ldb_error:
         print ("[!] error while unregistering the Openchange configuration"
                " objects (%d): %s" % ldb_error.args)
         raise ldb_error
@@ -1191,8 +1192,8 @@ def registerasmain(setup_path, names, lp, creds, reporter=None,
                       "AD/oc_provision_configuration_as_main.ldif",
                       "Register Exchange Samba as the main server",
                       ignore_already_exists=ignore_already_exists)
-        print "[SUCCESS] Done!"
-    except LdbError, ldb_error:
+        print("[SUCCESS] Done!")
+    except LdbError as ldb_error:
         print ("[!] error while registering Openchange Samba configuration"
                " objects (%d): %s" % ldb_error.args)
 
@@ -1205,7 +1206,7 @@ def openchangedb_deprovision(names, lp, mapistore=None):
     :param mapistore: The public folder store type (fsocpf, sqlite, etc)
     """
 
-    print "Removing openchange db"
+    print("Removing openchange db")
     uri = openchangedb_url(lp)
     if uri.startswith('mysql:'):
         openchangedb = mailbox.OpenChangeDBWithMysqlBackend(uri)
@@ -1232,11 +1233,11 @@ def directory_migrate(uri=None, version=None, **kwargs):
     if uri.startswith('mysql:'):
         directory = mailbox.Directory(uri)
         if directory.migrate(version, **kwargs):
-            print "Migration of openchange directory done"
+            print("Migration of openchange directory done")
         else:
-            print "Nothing to migrate"
+            print("Nothing to migrate")
     else:
-        print "We need MySQL to manage directory migrations"
+        print("We need MySQL to manage directory migrations")
 
 
 def directory_list_migrations(lp, uri):
@@ -1247,7 +1248,7 @@ def directory_list_migrations(lp, uri):
         migrations = openchange_directory.list_migrations()
         print_migrations(migrations)
     else:
-        print "Only Openchange_Directory with MySQL as backend has migration capability"
+        print("Only Openchange_Directory with MySQL as backend has migration capability")
 
 
 def directory_fake_migration(lp, uri, target_version):
@@ -1256,9 +1257,9 @@ def directory_fake_migration(lp, uri, target_version):
     if uri.startswith('mysql:'):
         openchange_directory = mailbox.Directory(uri)
         if openchange_directory.fake_migration(target_version):
-            print "%d is now the current version" % target_version
+            print("%d is now the current version" % target_version)
     else:
-        print "Only OpenchangeDB with MySQL as backend has migration capability"
+        print("Only OpenchangeDB with MySQL as backend has migration capability")
 
 
 def openchangedb_migrate(lp, uri=None, version=None):
@@ -1267,11 +1268,11 @@ def openchangedb_migrate(lp, uri=None, version=None):
     if uri.startswith('mysql:'):
         openchangedb = mailbox.OpenChangeDBWithMysqlBackend(uri)
         if openchangedb.migrate(version):
-            print "Migration openchange db done"
+            print("Migration openchange db done")
         else:
-            print "Nothing to migrate"
+            print("Nothing to migrate")
     else:
-        print "Only OpenchangeDB with MySQL as backend has migration capability"
+        print("Only OpenchangeDB with MySQL as backend has migration capability")
 
 
 def openchangedb_list_migrations(lp, uri):
@@ -1282,7 +1283,7 @@ def openchangedb_list_migrations(lp, uri):
         migrations = openchangedb.list_migrations()
         print_migrations(migrations)
     else:
-        print "Only OpenchangeDB with MySQL as backend has migration capability"
+        print("Only OpenchangeDB with MySQL as backend has migration capability")
 
 
 def openchangedb_fake_migration(lp, uri, target_version):
@@ -1291,9 +1292,9 @@ def openchangedb_fake_migration(lp, uri, target_version):
     if uri.startswith('mysql:'):
         openchangedb = mailbox.OpenChangeDBWithMysqlBackend(uri)
         if openchangedb.fake_migration(target_version):
-            print "%d is now the current version" % target_version
+            print("%d is now the current version" % target_version)
     else:
-        print "Only OpenchangeDB with MySQL as backend has migration capability"
+        print("Only OpenchangeDB with MySQL as backend has migration capability")
 
 
 def openchangedb_provision(names, lp, uri):
@@ -1305,13 +1306,13 @@ def openchangedb_provision(names, lp, uri):
         string like mysql://user:passwd@host/db_name to use openchangedb with
         mysql backend or ldb: for LDB.
     """
-    print "Setting up openchange db"
+    print("Setting up openchange db")
     if uri.startswith('ldb:'):  # LDB backend
         openchangedb = mailbox.OpenChangeDB(openchangedb_url(lp))
     elif uri.startswith('mysql:'):  # MySQL backend
         openchangedb = mailbox.OpenChangeDBWithMysqlBackend(uri, find_setup_dir())
     else:
-        print "[!] error provisioning openchangedb: Unknown uri `%s`" % uri
+        print("[!] error provisioning openchangedb: Unknown uri `%s`" % uri)
         return
     openchangedb.setup(names)
     openchangedb.add_server(names)
@@ -1364,7 +1365,7 @@ def check_not_provisioned(names, lp, creds):
         expression='(objectclass=msExchOrganizationContainer)',
         scope=ldb.SCOPE_SUBTREE)
     if len(ret) > 0:
-        firstorg = ret[0]['name'][0]
+        firstorg = ret[0]['name'].text[0]
         raise Exception(
             'There is already, at least, one provisioned organization: %(name)s' % {'name': firstorg})
 
@@ -1376,11 +1377,11 @@ def indexing_migrate(lp, uri=None, version=None):
     if uri.startswith('mysql:'):
         indexing = mailbox.IndexingWithMysqlBackend(uri)
         if indexing.migrate(version):
-            print "Migration MAPIStore indexing backend done"
+            print("Migration MAPIStore indexing backend done")
         else:
-            print "Nothing to migrate"
+            print("Nothing to migrate")
     else:
-        print "Only indexing backend with MySQL as backend has migration capability"
+        print("Only indexing backend with MySQL as backend has migration capability")
 
 
 def indexing_list_migrations(lp, uri):
@@ -1391,7 +1392,7 @@ def indexing_list_migrations(lp, uri):
         migrations = indexing.list_migrations()
         print_migrations(migrations)
     else:
-        print "Only indexing backend with MySQL as backend has migration capability"
+        print("Only indexing backend with MySQL as backend has migration capability")
 
 
 def indexing_fake_migration(lp, uri, target_version):
@@ -1400,9 +1401,9 @@ def indexing_fake_migration(lp, uri, target_version):
     if uri.startswith('mysql:'):
         indexing = mailbox.IndexingWithMysqlBackend(uri)
         if indexing.fake_migration(target_version):
-            print "%d is now the current version" % target_version
+            print("%d is now the current version" % target_version)
     else:
-        print "Only indexing backend with MySQL as backend has migration capability"
+        print("Only indexing backend with MySQL as backend has migration capability")
 
 
 # Named properties related procedures
@@ -1412,11 +1413,11 @@ def named_props_migrate(lp, uri=None, version=None):
     if uri.startswith('mysql:'):
         named_properties = mailbox.NamedPropertiesWithMysqlBackend(uri)
         if named_properties.migrate(version):
-            print "Migration MAPIStore named properties backend done"
+            print("Migration MAPIStore named properties backend done")
         else:
-            print "Nothing to migrate"
+            print("Nothing to migrate")
     else:
-        print "Only named properties backend with MySQL as backend has migration capability"
+        print("Only named properties backend with MySQL as backend has migration capability")
 
 
 def named_props_list_migrations(lp, uri):
@@ -1427,7 +1428,7 @@ def named_props_list_migrations(lp, uri):
         migrations = named_properties.list_migrations()
         print_migrations(migrations)
     else:
-        print "Only named properties backend with MySQL as backend has migration capability"
+        print("Only named properties backend with MySQL as backend has migration capability")
 
 
 def named_props_fake_migration(lp, uri, target_version):
@@ -1436,9 +1437,9 @@ def named_props_fake_migration(lp, uri, target_version):
     if uri.startswith('mysql:'):
         named_properties = mailbox.NamedPropertiesWithMysqlBackend(uri)
         if named_properties.fake_migration(target_version):
-            print "%d is now the current version" % target_version
+            print("%d is now the current version" % target_version)
     else:
-        print "Only named properties backend with MySQL as backend has migration capability"
+        print("Only named properties backend with MySQL as backend has migration capability")
 
 
 # Helper procedures
@@ -1448,9 +1449,9 @@ def print_migrations(migrations):
     :param dict migrations: indexed by version. It has a value a dict with these keys:
                             applied, class
     """
-    for ver, migration in migrations.iteritems():
-        print '[{applied}] {version} {name} {applied_date}'.format(
+    for ver, migration in migrations.items():
+        print('[{applied}] {version} {name} {applied_date}'.format(
             applied='X' if migration['applied'] is not None else ' ',
             version=ver,
             name=migration['class'].description,
-            applied_date="- %s" % migration['applied'] if migration['applied'] else "")
+            applied_date="- %s" % migration['applied'] if migration['applied'] else ""))

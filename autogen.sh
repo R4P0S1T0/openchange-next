@@ -1,84 +1,47 @@
 #!/bin/sh
 
-# Run this script to build openchange from Git
+# Generate the top-level, hand-maintained Autoconf build.
+# Tool overrides are executable names or paths (without extra arguments).
+set -eu
 
-## insert all possible names (only works with
-## autoconf 2.x
-TESTAUTOHEADER="autoheader autoheader-2.53 autoheader2.50 autoheader259 autoheader253"
-TESTAUTOCONF="autoconf autoconf-2.53 autoconf2.50 autoconf259 autoconf253"
-TESTACLOCAL="aclocal aclocal19"
+: "${AUTOCONF:=autoconf}"
+: "${AUTOHEADER:=autoheader}"
+: "${ACLOCAL:=aclocal}"
 
-AUTOHEADERFOUND="0"
-AUTOCONFFOUND="0"
-ACLOCALFOUND="0"
-
-##
-## Look for autoheader
-##
-for i in $TESTAUTOHEADER; do
-        if which $i > /dev/null 2>&1; then
-                if test `$i --version | head -n 1 | cut -d.  -f 2 | tr -d [:alpha:]` -ge 53; then
-                        AUTOHEADER=$i
-                        AUTOHEADERFOUND="1"
-                        break
-                fi
-        fi
-done
-
-##
-## Look for autoconf
-##
-
-for i in $TESTAUTOCONF; do
-        if which $i > /dev/null 2>&1; then
-                if test `$i --version | head -n 1 | cut -d.  -f 2 | tr -d [:alpha:]` -ge 53; then
-                        AUTOCONF=$i
-                        AUTOCONFFOUND="1"
-                        break
-                fi
-        fi
-done
-
-##
-## Look for aclocal
-##
-for i in $TESTACLOCAL; do
-        if which $i > /dev/null 2>&1; then
-                ACLOCAL=$i              
-                ACLOCALFOUND="1"
-                break
-        fi
-done
-
-
-##
-## do we have it?
-##
-if test "$AUTOCONFFOUND" = "0" -o "$AUTOHEADERFOUND" = "0"; then
-        echo "$0: need autoconf 2.53 or later to build openchange from Git" >&2
+for tool in "$AUTOCONF" "$AUTOHEADER" "$ACLOCAL"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$0: required tool not found: $tool" >&2
         exit 1
-fi
+    fi
+done
 
-if test "$ACLOCALFOUND" = "0"; then
-        echo "$0: aclocal not found" >&2
+# Compare major as well as minor so a future 3.x is not mistaken for 2.0.
+for tool in "$AUTOCONF" "$AUTOHEADER"; do
+    if ! "$tool" --version | awk '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9]+\.[0-9]+/) {
+                    split($i, version, ".")
+                    if (version[1] > 2 || (version[1] == 2 && version[2] >= 57))
+                        valid = 1
+                    break
+                }
+            }
+        }
+        END { exit !valid }
+    '; then
+        echo "$0: $tool must be version 2.57 or later" >&2
         exit 1
-fi
+    fi
+done
 
-
-rm -rf autom4te*.cache
-rm -f configure include/config.h*
-
+# pkg.m4 is provided by pkg-config/pkgconf development tooling.
+# aclocal honours ACLOCAL_PATH for dependencies installed in a custom prefix.
 echo "$0: running $ACLOCAL"
-$ACLOCAL || exit 1
-
+"$ACLOCAL"
 echo "$0: running $AUTOHEADER"
-$AUTOHEADER || exit 1
-
+"$AUTOHEADER" --force
 echo "$0: running $AUTOCONF"
-$AUTOCONF || exit 1
+"$AUTOCONF" --force
 
-
-rm -rf autom4te*.cache
-
-echo "Now run ./configure and gmake"
-exit 0
+echo "Now run ./configure and make"

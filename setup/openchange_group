@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # OpenChange provision script
 #
 # Copyright (C) Javier Amor Garcia <jamor@zentyal.com> 2015
@@ -18,10 +18,11 @@
 #
 
 import optparse
+import os
 import sys
 
 # To allow running from the source directory
-sys.path.append("python")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 
 import samba.getopt as options
 import openchange.provision as provision
@@ -55,7 +56,7 @@ if len(args) != 1 and not opts.enable_all_groups:
     parser.print_usage()
     sys.exit(1)
 
-action_options = filter(lambda(x): x, [opts.create, opts.delete, opts.update, opts.enable_all_groups])
+action_options = [option for option in (opts.create, opts.delete, opts.update, opts.enable_all_groups) if option]
 if len(action_options) == 0:
     parser.error("missing action option: --create, --delete, --update or --enable-all-groups")
 elif len(action_options) > 1:

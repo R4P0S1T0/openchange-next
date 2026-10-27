@@ -26,8 +26,12 @@ def test_suite():
         test_provision,
         test_mailbox,
         test_migration,
+        test_schema,
+        test_cli,
         )
     suite.addTests(loader.loadTestsFromModule(test_provision))
     suite.addTests(loader.loadTestsFromModule(test_mailbox))
     suite.addTests(loader.loadTestsFromModule(test_migration))
+    suite.addTests(loader.loadTestsFromModule(test_schema))
+    suite.addTests(loader.loadTestsFromModule(test_cli))
     return suite

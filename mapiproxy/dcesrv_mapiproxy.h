@@ -22,6 +22,9 @@
 #ifndef	__DCESRV_MAPIPROXY_H__
 #define	__DCESRV_MAPIPROXY_H__
 
+#include "config.h"
+#include "mapiproxy/samba_compat.h"
+
 #include <sys/types.h>
 
 #include <stdio.h>
@@ -42,6 +45,15 @@
 #include "gen_ndr/exchange.h"
 #include "gen_ndr/ndr_exchange.h"
 #include "mapiproxy/libmapiproxy/libmapiproxy.h"
+
+static inline struct server_id mapiproxy_connection_server_id(struct dcesrv_connection *conn)
+{
+#if HAVE_DECL_DCESRV_SERVER_ID
+	return dcesrv_server_id(conn);
+#else
+	return conn->server_id;
+#endif
+}
 
 struct dcesrv_mapiproxy_private {
 	struct dcerpc_pipe			*c_pipe;

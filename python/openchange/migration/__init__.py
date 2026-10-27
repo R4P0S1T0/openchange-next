@@ -20,7 +20,7 @@
 """
 Schema migration management for OpenChange "apps" with SQL based backends
 """
-import MySQLdb
+import re
 
 
 __docformat__ = 'restructuredText'
@@ -56,7 +56,11 @@ class MigrationManager(object):
         """
         self.db = db
         self.db_name = db_name
-        self.table_name = MySQLdb.escape_string(table_name)
+        # SQL identifiers cannot be escaped as SQL string values. In Python 3
+        # driver escape functions also return bytes, corrupting formatted SQL.
+        if not isinstance(table_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table_name):
+            raise ValueError("migration table name must be a simple SQL identifier")
+        self.table_name = table_name
         self.db.select_db(self.db_name)
         self._version = {app: None for app in self.migrations.keys()}
         self._setup()
@@ -65,7 +69,9 @@ class MigrationManager(object):
         """Create the table_name table if not exists
         """
         cur = self.db.cursor()
-        cur.execute("""SHOW TABLES LIKE %s""", (self.table_name,))
+        cur.execute("""SELECT TABLE_NAME FROM information_schema.TABLES
+                       WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s""",
+                    (self.db_name, self.table_name))
         row = cur.fetchone()
         if row is None or row[0] is None:
             cur.execute("""CREATE TABLE IF NOT EXISTS `{0}` (
@@ -86,7 +92,7 @@ class MigrationManager(object):
 
         if self._version[app] is None:
             cur = self.db.cursor()
-            cur.execute('SELECT MAX(version) FROM {0} WHERE app = %s'.format(self.table_name),
+            cur.execute('SELECT MAX(version) FROM `{0}` WHERE app = %s'.format(self.table_name),
                         (app,))
             row = cur.fetchone()
             if row and row[0]:
@@ -101,7 +107,7 @@ class MigrationManager(object):
         :param int version: the new migration version
         """
         cur = self.db.cursor()
-        cur.execute('INSERT INTO {} (app, version) VALUES (%s, %s)'.format(self.table_name),
+        cur.execute('INSERT INTO `{}` (app, version) VALUES (%s, %s)'.format(self.table_name),
                     (app, version))
         self.db.commit()
         self._version[app] = None  # To reload the value
@@ -113,7 +119,7 @@ class MigrationManager(object):
         :param int version: the unapplied migration version
         """
         cur = self.db.cursor()
-        cur.execute('DELETE FROM {} WHERE app = %s AND version = %s'.format(self.table_name),
+        cur.execute('DELETE FROM `{}` WHERE app = %s AND version = %s'.format(self.table_name),
                     (app, version))
         self.db.commit()
         self._version[app] = None  # To reload the value
@@ -133,17 +139,19 @@ class MigrationManager(object):
         if target_version is None:
             target_version = max(self.migrations[app].keys())
 
-        go_forward = target_version >= self.version(app)
+        # Python 2 ordered int and None; Python 3 rejects that comparison.
+        current_version = self.version(app) or 0
+        go_forward = target_version >= current_version
 
         # 1) Get migrations sorted
         # 2) Keep only the migrations to apply/unapply
         # 3) Call these migrations objects with the cursor as parameter
         if go_forward:
             migrations = sorted(self.migrations[app].items())
-            migrations = [m for m in migrations if m[0] <= target_version and m[0] > self.version(app)]
+            migrations = [m for m in migrations if m[0] <= target_version and m[0] > current_version]
         else:
             migrations = sorted(self.migrations[app].items(), reverse=True)
-            migrations = [m for m in migrations if m[0] > target_version and m[0] <= self.version(app)]
+            migrations = [m for m in migrations if m[0] > target_version and m[0] <= current_version]
 
         for version, migration in migrations:
             # Migrate inside a transaction
@@ -204,7 +212,7 @@ class MigrationManager(object):
         :returns: None if the version does not have been applied
         """
         cursor = self.db.cursor()
-        cursor.execute("""SELECT applied FROM {0}
+        cursor.execute("""SELECT applied FROM `{0}`
                           WHERE app = %s AND version = %s""".format(self.table_name),
                        (app, version))
         row = cursor.fetchone()
@@ -223,9 +231,9 @@ class MigrationManager(object):
         """
         if app not in self.migrations:
             return {}
-        migrations = {version: {'class': cls, 'applied': None} for version, cls in self.migrations[app].iteritems()}
+        migrations = {version: {'class': cls, 'applied': None} for version, cls in self.migrations[app].items()}
         cursor = self.db.cursor()
-        cursor.execute("""SELECT version, applied FROM {0}
+        cursor.execute("""SELECT version, applied FROM `{0}`
                           WHERE app = %s""".format(self.table_name),
                        (app,))
         rows = cursor.fetchall()

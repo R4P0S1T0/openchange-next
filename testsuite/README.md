@@ -4,6 +4,24 @@ openchange-testsuite
 Openchange unit tests testsuite utility.
 It is using check library for unit testing.
 
+Modernization checks
+--------------------
+
+The recovered library tests can run without building the server modules:
+
+    ./autogen.sh
+    ./configure --with-samba=/usr
+    make check-libmapi-modernization
+    make check-mapiproxy-registries
+
+This runs the existing libmapi property/IDSET suites and native NDR request/reply,
+array-bound and union-switch regression checks. Python-only tooling checks are:
+
+    python3 -m unittest discover -s testsuite/modernization -v
+
+For the Python runtime tests and isolated SQL database options, see
+[the modernization guide](../doc/MODERNIZATION.md).
+
 Usage
 -----
 

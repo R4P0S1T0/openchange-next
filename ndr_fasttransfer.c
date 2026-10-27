@@ -652,7 +652,7 @@ _PUBLIC_ void ndr_print_SyncUploadStateStreamContinue_req(struct ndr_print *ndr,
 }
 
 /* Debug interface */
-_PUBLIC_ void ndr_print_FastTransferSourceGetBuffer(struct ndr_print *ndr, const char *name, int flags, const struct FastTransferSourceGetBuffer *r)
+_PUBLIC_ void ndr_print_FastTransferSourceGetBuffer(struct ndr_print *ndr, const char *name, ndr_flags_type flags, const struct FastTransferSourceGetBuffer *r)
 {
 	ndr_print_struct(ndr, name, "FastTransferSourceGetBuffer");
 	if (r == NULL) { ndr_print_null(ndr); return; }

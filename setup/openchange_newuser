@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # OpenChange provision script
 #
 # Copyright (C) Jelmer Vernooij <jelmer@openchange.org> 2008
@@ -18,10 +18,11 @@
 #
 
 import optparse
+import os
 import sys
 
 # To allow running from the source directory
-sys.path.append("python")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 
 import samba.getopt as options
 import openchange.provision as provision
@@ -75,7 +76,7 @@ elif opts.delete:
     provision.delete_user(provisionnames, lp, creds, username=username)
 
 if opts.mailbox:
-    print "Mailbox provisioning is now performed automatically at user logon"
+    print("Mailbox provisioning is now performed automatically at user logon")
 
 if opts.enable:
     provision.accountcontrol(provisionnames, lp, creds, username=username, value=0)

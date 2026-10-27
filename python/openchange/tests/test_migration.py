@@ -22,54 +22,49 @@ OpenChangeDB migration framework functional tests.
 It requires having a MySQL daemon running where smb.conf says
 """
 from datetime import datetime
+import os
 import MySQLdb
 import unittest
-from warnings import filterwarnings
+import uuid
 
 
 from openchange.migration import migration, Migration, MigrationManager
-from samba import param
 
 
-# Borrowed from testsuite/testsuite_common.h
-OC_TESTSUITE_MYSQL = {'HOST': '127.0.0.1',
-                      'USER': 'root',
-                      'PASS': "",
-                      'DB': 'openchange_test'}
-
-
+@unittest.skipUnless(os.environ.get('OPENCHANGE_TEST_MYSQL_SOCKET') or
+                     os.environ.get('OPENCHANGE_TEST_MYSQL_HOST'),
+                     'set OPENCHANGE_TEST_MYSQL_SOCKET or OPENCHANGE_TEST_MYSQL_HOST')
 class MigrationDBTests(unittest.TestCase):
     """Tests for OpenChangeDB migration framework"""
 
     def setUp(self):
-        # Load MySQL configuration from default, if it does not work, try with Samba Conf
-        try:
-            self.db = MySQLdb.connect(host=OC_TESTSUITE_MYSQL['HOST'],
-                                      user=OC_TESTSUITE_MYSQL['USER'],
-                                      passwd=OC_TESTSUITE_MYSQL['PASS'])
-            self.db_name = OC_TESTSUITE_MYSQL['DB']
-        except:
-            lp = param.LoadParm()
-            lp.load_default()
-            self.db = MySQLdb.connect(host=lp.get('namedproperties:mysql_host'),
-                                      user=lp.get('namedproperties:mysql_user'),
-                                      passwd=lp.get('namedproperties:mysql_pass'))
-            self.db_name = lp.get('namedproperties:mysql_db')
-
+        original_migrations = MigrationManager.migrations
+        self.builtin_migrations = original_migrations
+        MigrationManager.migrations = {}
+        self.addCleanup(setattr, MigrationManager, 'migrations', original_migrations)
+        options = {
+            'user': os.environ.get('OPENCHANGE_TEST_MYSQL_USER', 'root'),
+            'passwd': os.environ.get('OPENCHANGE_TEST_MYSQL_PASSWORD', ''),
+        }
+        if os.environ.get('OPENCHANGE_TEST_MYSQL_SOCKET'):
+            options['unix_socket'] = os.environ['OPENCHANGE_TEST_MYSQL_SOCKET']
+        else:
+            options['host'] = os.environ['OPENCHANGE_TEST_MYSQL_HOST']
+            options['port'] = int(os.environ.get('OPENCHANGE_TEST_MYSQL_PORT', '3306'))
+        self.db = MySQLdb.connect(**options)
+        self.addCleanup(self.db.close)
+        self.db_name = 'openchange_test_' + uuid.uuid4().hex
         cur = self.db.cursor()
-        # Ignore database exists warnings
-        filterwarnings(
-            action="ignore",
-            category=MySQLdb.Warning,
-            message="Can't create database '{}'; database exists".format(self.db_name))
         cur.execute('CREATE DATABASE IF NOT EXISTS {}'.format(self.db_name))
         self.db.commit()
         cur.close()
+        self.addCleanup(self.drop_database)
         self.app = 'test'
 
-    def tearDown(self):
+    def drop_database(self):
         cur = self.db.cursor()
-        cur.execute('DROP TABLE IF EXISTS test_migrations')
+        cur.execute('DROP DATABASE `{}`'.format(self.db_name))
+        cur.close()
 
     def _register_do_nothing_migrations(self, app):
         # Register a do-nothing migration into app
@@ -94,19 +89,57 @@ class MigrationDBTests(unittest.TestCase):
         row = cur.fetchone()
         self.assertIsNotNone(row)
 
+    def test_invalid_table_names_are_rejected(self):
+        for name in ('', 'bad`name', 'bad;name', 'x' * 65, b'migrations'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                MigrationManager(self.db, self.db_name, name)
+
+    def test_reserved_table_name_is_quoted(self):
+        manager = MigrationManager(self.db, self.db_name, 'select')
+        self._register_do_nothing_migrations(self.app)
+        manager.apply_version(self.app, 1)
+        self.assertEqual(manager.version(self.app), 1)
+        self.assertIsNotNone(manager.applied_migration(self.app, 1))
+        self.assertIsNotNone(manager.list_migrations(self.app)[1]['applied'])
+        manager.unapply_version(self.app, 1)
+        self.assertIsNone(manager.version(self.app))
+
+    def test_setup_does_not_treat_underscores_as_wildcards(self):
+        MigrationManager(self.db, self.db_name, 'testXmigrations')
+        MigrationManager(self.db, self.db_name, 'test_migrations')
+        cur = self.db.cursor()
+        cur.execute('DESCRIBE test_migrations')
+        self.assertIsNotNone(cur.fetchone())
+
+    def test_builtin_sql_schemas_upgrade_and_rollback(self):
+        MigrationManager.migrations = self.builtin_migrations
+        manager = MigrationManager(self.db, self.db_name, 'test_migrations')
+        for app in ('openchangedb', 'indexing', 'named_properties'):
+            with self.subTest(app=app):
+                self.assertTrue(manager.migrate(app))
+                self.assertEqual(manager.version(app), max(manager.migrations[app]))
+                self.assertFalse(manager.migrate(app))
+                if app == 'named_properties':
+                    cursor = self.db.cursor()
+                    cursor.execute('SELECT COUNT(*) FROM named_properties')
+                    self.assertGreater(cursor.fetchone()[0], 0)
+                    cursor.close()
+                self.assertTrue(manager.migrate(app, 0))
+                self.assertIsNone(manager.version(app))
+
     def test_version(self):
         manager = MigrationManager(self.db, self.db_name, 'test_migrations')
         self.assertIsNone(manager.version(self.app))
 
         manager.apply_version(self.app, 1)
         self.assertIsNotNone(manager.version(self.app))
-        self.assertEquals(manager.version(self.app), 1)
+        self.assertEqual(manager.version(self.app), 1)
 
         manager.apply_version(self.app, 3)
-        self.assertEquals(manager.version(self.app), 3)
+        self.assertEqual(manager.version(self.app), 3)
 
         manager.unapply_version(self.app, 3)
-        self.assertEquals(manager.version(self.app), 1)
+        self.assertEqual(manager.version(self.app), 1)
 
         manager.unapply_version(self.app, 1)
         self.assertIsNone(manager.version(self.app))
@@ -118,12 +151,12 @@ class MigrationDBTests(unittest.TestCase):
 
         migrated = manager.migrate(self.app, target_version=1)
         self.assertTrue(migrated)
-        self.assertEquals(manager.version(self.app), 1)
+        self.assertEqual(manager.version(self.app), 1)
         self.assertLessEqual(manager.applied_migration(self.app, 1), datetime.now())
 
         migrated = manager.migrate(self.app)
         self.assertTrue(migrated)
-        self.assertEquals(manager.version(self.app), 2)
+        self.assertEqual(manager.version(self.app), 2)
         self.assertLessEqual(manager.applied_migration(self.app, 2), datetime.now())
 
         migrated = manager.migrate(self.app)
@@ -145,7 +178,7 @@ class MigrationDBTests(unittest.TestCase):
         migrated = manager.migrate(self.app, target_version=0)
         self.assertFalse(migrated)
 
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]
 
     def test_fake_migrations(self):
@@ -157,32 +190,32 @@ class MigrationDBTests(unittest.TestCase):
         self.assertFalse(manager.fake_migration(self.app, None))
 
         self.assertTrue(manager.fake_migration(self.app, 3))
-        self.assertEquals(manager.version(self.app), 2)
+        self.assertEqual(manager.version(self.app), 2)
 
         self.assertFalse(manager.fake_migration(self.app, 2))
 
         self.assertTrue(manager.fake_migration(self.app, 1))
-        self.assertEquals(manager.version(self.app), 1)
+        self.assertEqual(manager.version(self.app), 1)
 
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]
 
     def test_list_migrations(self):
         manager = MigrationManager(self.db, self.db_name, 'test_migrations')
 
-        self.assertEquals(len(manager.list_migrations(self.app).keys()), 0)
+        self.assertEqual(len(manager.list_migrations(self.app).keys()), 0)
         self._register_do_nothing_migrations(self.app)
 
-        self.assertEquals(len(manager.list_migrations(self.app).keys()), 2)
-        self.assertTrue(all([m['applied'] is None for m in manager.list_migrations(self.app).itervalues()]))
-        self.assertTrue(all(['class' in m for m in manager.list_migrations(self.app).itervalues()]))
+        self.assertEqual(len(manager.list_migrations(self.app).keys()), 2)
+        self.assertTrue(all([m['applied'] is None for m in manager.list_migrations(self.app).values()]))
+        self.assertTrue(all(['class' in m for m in manager.list_migrations(self.app).values()]))
 
         manager.migrate(self.app)
-        for m in manager.list_migrations(self.app).itervalues():
+        for m in manager.list_migrations(self.app).values():
             self.assertTrue(m['applied'])
             self.assertTrue(len(m['class'].description))
 
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]
 
     def test_multiapp(self):
@@ -198,28 +231,28 @@ class MigrationDBTests(unittest.TestCase):
         migrated = manager.migrate(new_app)
         self.assertTrue(migrated)
 
-        self.assertEquals(manager.version(self.app), 1)
-        self.assertEquals(manager.version(new_app), 2)
+        self.assertEqual(manager.version(self.app), 1)
+        self.assertEqual(manager.version(new_app), 2)
 
         self.assertLessEqual(manager.applied_migration(self.app, 1), datetime.now())
         self.assertLessEqual(manager.applied_migration(new_app, 2), datetime.now())
 
-        self.assertEquals(len(manager.list_migrations(self.app).keys()), 2)
-        self.assertEquals(len(manager.list_migrations(new_app).keys()), 2)
+        self.assertEqual(len(manager.list_migrations(self.app).keys()), 2)
+        self.assertEqual(len(manager.list_migrations(new_app).keys()), 2)
 
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]
 
     def test_apps(self):
         manager = MigrationManager(self.db, self.db_name, 'test_migrations')
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]
 
-        self.assertEquals(manager.apps(), [])
+        self.assertEqual(manager.apps(), [])
         self._register_do_nothing_migrations(self.app)
         self._register_do_nothing_migrations('la_cena')
 
-        self.assertEquals(manager.apps(), ['la_cena', self.app])
+        self.assertEqual(manager.apps(), ['la_cena', self.app])
 
-        for v in manager.migrations.keys():
+        for v in list(manager.migrations):
             del manager.migrations[v]

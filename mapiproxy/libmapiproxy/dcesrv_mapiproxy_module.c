@@ -23,6 +23,7 @@
 #include "mapiproxy/dcesrv_mapiproxy.h"
 #include "utils/dlinklist.h"
 #include "libmapiproxy.h"
+#include <limits.h>
 
 /**
    \file dcesrv_mapiproxy_module.c
@@ -151,39 +152,63 @@ NTSTATUS mapiproxy_module_unbind(struct server_id server_id, uint32_t context_id
 }
 
 
-extern NTSTATUS mapiproxy_module_register(const void *_mp_module)
+NTSTATUS mapiproxy_module_register(const void *_mp_module)
 {
-	const struct mapiproxy_module	*mp_module = (const struct mapiproxy_module *) _mp_module;
+	const struct mapiproxy_module *mp_module = _mp_module;
+	struct mapiproxy_module *copy;
+	struct mp_module *grown;
 
-	mp_modules = realloc_p(mp_modules, struct mp_module, num_mp_modules + 1);
-	if (!mp_modules) {
-		smb_panic("out of memory in mapiproxy_register");
+	if (mp_module == NULL || mp_module->name == NULL || mp_module->name[0] == '\0') {
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	mp_modules[num_mp_modules].mp_module = (struct mapiproxy_module *) smb_xmemdup(mp_module, sizeof (*mp_module));
-	mp_modules[num_mp_modules].mp_module->name = smb_xstrdup(mp_module->name);
-
+	if (num_mp_modules == INT_MAX) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	copy = talloc_memdup(NULL, mp_module, sizeof(*copy));
+	if (copy == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	copy->name = talloc_strdup(copy, mp_module->name);
+	if (copy->name == NULL) {
+		talloc_free(copy);
+		return NT_STATUS_NO_MEMORY;
+	}
+	grown = talloc_realloc(NULL, mp_modules, struct mp_module, (size_t)num_mp_modules + 1);
+	if (grown == NULL) {
+		talloc_free(copy);
+		return NT_STATUS_NO_MEMORY;
+	}
+	mp_modules = grown;
+	mp_modules[num_mp_modules].mp_module = talloc_steal(mp_modules, copy);
 	num_mp_modules++;
-
-	OC_DEBUG(3, "MAPIPROXY module '%s' registered", mp_module->name);
-
+	OC_DEBUG(3, "MAPIPROXY module '%s' registered", copy->name);
 	return NT_STATUS_OK;
 }
 
 
 static NTSTATUS mapiproxy_module_load(struct dcesrv_context *dce_ctx)
 {
-	char				**modules;
+	const char			**modules;
+	const char			*configured;
 	struct mapiproxy_module_list	*module;
 	int				i;
 	NTSTATUS			status;
 
 	/* Fetch the module list from smb.conf */
-	modules = str_list_make(dce_ctx, lpcfg_parm_string(dce_ctx->lp_ctx, NULL, "dcerpc_mapiproxy", "modules"), NULL);
+	configured = lpcfg_parm_string(dce_ctx->lp_ctx, NULL, "dcerpc_mapiproxy", "modules");
+	if (configured == NULL || configured[0] == '\0') {
+		return NT_STATUS_OK;
+	}
+	modules = lpcfg_parm_string_list(dce_ctx, dce_ctx->lp_ctx, NULL,
+									"dcerpc_mapiproxy", "modules", NULL);
+	if (modules == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	/* Add modules to the list */
 	for (i = 0; modules[i]; i++) {
 		module = talloc_zero(dce_ctx, struct mapiproxy_module_list);
+		if (module == NULL) return NT_STATUS_NO_MEMORY;
 		module->module = mapiproxy_module_byname(modules[i]);
 		if (module->module) {
 			DLIST_ADD_END(mpm_list, module, struct mapiproxy_module_list *);
@@ -194,6 +219,7 @@ static NTSTATUS mapiproxy_module_load(struct dcesrv_context *dce_ctx)
 			}
 		} else {
 			oc_log(OC_LOG_WARNING, "MAPIPROXY module '%s' not found", modules[i]);
+			talloc_free(module);
 		}
 	}
 

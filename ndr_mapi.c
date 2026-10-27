@@ -26,6 +26,29 @@
 #include "gen_ndr/ndr_exchange.h"
 #include "gen_ndr/ndr_property.h"
 
+/* Preserve the status return on current Samba while retaining the historical
+ * accessors for reference builds. Never treat a missing array token as size 0.
+ */
+static enum ndr_err_code oc_ndr_array_size(struct ndr_pull *ndr, const void *key, uint32_t *value)
+{
+#ifdef HAVE_NDR_ARRAY_OUTPUT_ARGUMENT
+    return ndr_get_array_size(ndr, key, value);
+#else
+    *value = ndr_get_array_size(ndr, key);
+    return NDR_ERR_SUCCESS;
+#endif
+}
+
+static enum ndr_err_code oc_ndr_array_length(struct ndr_pull *ndr, const void *key, uint32_t *value)
+{
+#ifdef HAVE_NDR_ARRAY_OUTPUT_ARGUMENT
+    return ndr_get_array_length(ndr, key, value);
+#else
+    *value = ndr_get_array_length(ndr, key);
+    return NDR_ERR_SUCCESS;
+#endif
+}
+
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
 _PUBLIC_ void obfuscate_data(uint8_t *data, uint32_t size, uint8_t salt)
@@ -208,7 +231,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_lzxpress_compress(struct ndr_push *subndr,
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_request(struct ndr_pull *ndr, int ndr_flags, struct mapi2k7_request *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_request(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi2k7_request *r)
 {
 	if (ndr_flags & NDR_SCALARS) {
 		NDR_CHECK(ndr_pull_align(ndr, 4));
@@ -259,7 +282,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_request(struct ndr_pull *ndr, int nd
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_response(struct ndr_pull *ndr, int ndr_flags, struct mapi2k7_response *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_response(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi2k7_response *r)
 {
 	if (ndr_flags & NDR_SCALARS) {
 		NDR_CHECK(ndr_pull_RPC_HEADER_EXT(ndr, NDR_SCALARS, &r->header));
@@ -324,7 +347,7 @@ _PUBLIC_ void ndr_print_AUX_HEADER(struct ndr_print *ndr, const char *name, cons
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_pull_AUX_HEADER(struct ndr_pull *ndr, int ndr_flags, struct AUX_HEADER *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_AUX_HEADER(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct AUX_HEADER *r)
 {
 	struct ndr_pull	*_ndr_buffer;
 	uint32_t	_flags_save_STRUCT = ndr->flags;
@@ -359,7 +382,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_AUX_HEADER(struct ndr_pull *ndr, int ndr_fla
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_push_AUX_HEADER(struct ndr_push *ndr, int ndr_flags, const struct AUX_HEADER *r)
+_PUBLIC_ enum ndr_err_code ndr_push_AUX_HEADER(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct AUX_HEADER *r)
 {
 	uint32_t _flags_save_STRUCT = ndr->flags;
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
@@ -405,7 +428,7 @@ _PUBLIC_ void ndr_print_mapi2k7_AuxInfo(struct ndr_print *ndr, const char *name,
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_AuxInfo(struct ndr_pull *ndr, int ndr_flags, struct mapi2k7_AuxInfo *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_AuxInfo(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi2k7_AuxInfo *r)
 {
 	if (ndr_flags & NDR_SCALARS) {
 
@@ -478,7 +501,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_mapi2k7_AuxInfo(struct ndr_pull *ndr, int nd
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_push_mapi2k7_AuxInfo(struct ndr_push *ndr, int ndr_flags, const struct mapi2k7_AuxInfo *r)
+_PUBLIC_ enum ndr_err_code ndr_push_mapi2k7_AuxInfo(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi2k7_AuxInfo *r)
 {
 	uint32_t	i;
 
@@ -595,7 +618,7 @@ void ndr_print_mapi_response(struct ndr_print *ndr, const char *name, const stru
   (uint16_t) and next subtract when pushing the content blob
 */
 
-enum ndr_err_code ndr_push_mapi_request(struct ndr_push *ndr, int ndr_flags, const struct mapi_request *r)
+enum ndr_err_code ndr_push_mapi_request(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi_request *r)
 {
 	uint32_t		cntr_mapi_req_0;
 	uint32_t		count;
@@ -615,7 +638,7 @@ enum ndr_err_code ndr_push_mapi_request(struct ndr_push *ndr, int ndr_flags, con
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_mapi_response(struct ndr_push *ndr, int ndr_flags, const struct mapi_response *r)
+enum ndr_err_code ndr_push_mapi_response(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi_response *r)
 {
 	uint32_t	cntr_mapi_repl_0;
 	uint32_t	count;
@@ -641,7 +664,7 @@ enum ndr_err_code ndr_push_mapi_response(struct ndr_push *ndr, int ndr_flags, co
   pull mapi_request / mapi_response from the wire
 */
 
-enum ndr_err_code ndr_pull_mapi_request(struct ndr_pull *ndr, int ndr_flags, struct mapi_request *r)
+enum ndr_err_code ndr_pull_mapi_request(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi_request *r)
 {
 	uint32_t length,count;
 	uint32_t cntr_mapi_req_0;
@@ -688,7 +711,7 @@ enum ndr_err_code ndr_pull_mapi_request(struct ndr_pull *ndr, int ndr_flags, str
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_mapi_response(struct ndr_pull *ndr, int ndr_flags, struct mapi_response *r)
+enum ndr_err_code ndr_pull_mapi_response(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi_response *r)
 {
 	uint32_t length,count;
 	uint32_t cntr_mapi_repl_0;
@@ -737,7 +760,7 @@ enum ndr_err_code ndr_pull_mapi_response(struct ndr_pull *ndr, int ndr_flags, st
   We stop processing the IDL if MAPISTATUS is different from MAPI_E_SUCCESS
  */
 
-_PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc_MAPI_REPL(struct ndr_push *ndr, int ndr_flags, const struct EcDoRpc_MAPI_REPL *r)
+_PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc_MAPI_REPL(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct EcDoRpc_MAPI_REPL *r)
 {
 	if (r->opnum != op_MAPI_Release)
 	{
@@ -791,7 +814,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc_MAPI_REPL(struct ndr_push *ndr, int 
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_EcDoRpc_MAPI_REPL(struct ndr_pull *ndr, int ndr_flags, struct EcDoRpc_MAPI_REPL *r)
+enum ndr_err_code ndr_pull_EcDoRpc_MAPI_REPL(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct EcDoRpc_MAPI_REPL *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -914,7 +937,7 @@ void ndr_print_EcDoRpc_MAPI_REPL(struct ndr_print *ndr, const char *name, const 
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_pull_EcDoRpc(struct ndr_pull *ndr, int flags, struct EcDoRpc *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_EcDoRpc(struct ndr_pull *ndr, ndr_flags_type flags, struct EcDoRpc *r)
 {
 	TALLOC_CTX *_mem_save_handle_0;
 	TALLOC_CTX *_mem_save_mapi_request_0;
@@ -1007,7 +1030,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoRpc(struct ndr_pull *ndr, int flags, str
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc(struct ndr_push *ndr, int flags, const struct EcDoRpc *r)
+_PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc(struct ndr_push *ndr, ndr_flags_type flags, const struct EcDoRpc *r)
 {
 	if (flags & NDR_IN) {
 		if (r->in.handle == NULL) {
@@ -1069,7 +1092,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_EcDoRpc(struct ndr_push *ndr, int flags, con
 }
 
 
-_PUBLIC_ enum ndr_err_code ndr_push_EcDoConnectEx(struct ndr_push *ndr, int flags, const struct EcDoConnectEx *r)
+_PUBLIC_ enum ndr_err_code ndr_push_EcDoConnectEx(struct ndr_push *ndr, ndr_flags_type flags, const struct EcDoConnectEx *r)
 {
 	uint32_t	cntr_rgwClientVersion_0;
 	uint32_t	cntr_rgwServerVersion_0;
@@ -1214,8 +1237,12 @@ _PUBLIC_ enum ndr_err_code ndr_push_EcDoConnectEx(struct ndr_push *ndr, int flag
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flags, struct EcDoConnectEx *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, ndr_flags_type flags, struct EcDoConnectEx *r)
 {
+	uint32_t size_user_dn, length_user_dn;
+	uint32_t size_dn_prefix, length_dn_prefix;
+	uint32_t size_display_name, length_display_name;
+	uint32_t size_aux_out, length_aux_out;
 	uint32_t	_ptr_szDNPrefix;
 	uint32_t	_ptr_szDisplayName;
 	uint32_t	cntr_rgwClientVersion_0;
@@ -1240,11 +1267,13 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 
 		NDR_CHECK(ndr_pull_array_size(ndr, &r->in.szUserDN));
 		NDR_CHECK(ndr_pull_array_length(ndr, &r->in.szUserDN));
-		if (ndr_get_array_length(ndr, &r->in.szUserDN) > ndr_get_array_size(ndr, &r->in.szUserDN)) {
-			return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", ndr_get_array_size(ndr, &r->in.szUserDN), ndr_get_array_length(ndr, &r->in.szUserDN));
+		NDR_CHECK(oc_ndr_array_size(ndr, &r->in.szUserDN, &size_user_dn));
+		NDR_CHECK(oc_ndr_array_length(ndr, &r->in.szUserDN, &length_user_dn));
+		if (length_user_dn > size_user_dn) {
+			return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", size_user_dn, length_user_dn);
 		}
-		NDR_CHECK(ndr_check_string_terminator(ndr, ndr_get_array_length(ndr, &r->in.szUserDN), sizeof(uint8_t)));
-		NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, &r->in.szUserDN, ndr_get_array_length(ndr, &r->in.szUserDN), sizeof(uint8_t), CH_DOS));
+		NDR_CHECK(ndr_check_string_terminator(ndr, length_user_dn, sizeof(uint8_t)));
+		NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, &r->in.szUserDN, length_user_dn, sizeof(uint8_t), CH_DOS));
 		NDR_CHECK(ndr_pull_uint32(ndr, NDR_SCALARS, &r->in.ulFlags));
 		NDR_CHECK(ndr_pull_uint32(ndr, NDR_SCALARS, &r->in.ulConMod));
 		NDR_CHECK(ndr_pull_uint32(ndr, NDR_SCALARS, &r->in.cbLimit));
@@ -1351,6 +1380,9 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 		NDR_CHECK(ndr_pull_uint32(ndr, NDR_SCALARS, r->out.picxr));
 		NDR_PULL_SET_MEM_CTX(ndr, _mem_save_picxr_0, LIBNDR_FLAG_REF_ALLOC);
 
+		if (ndr->flags & LIBNDR_FLAG_REF_ALLOC) {
+			NDR_PULL_ALLOC(ndr, r->out.szDNPrefix);
+		}
 		_mem_save_szDNPrefix_0 = NDR_PULL_GET_MEM_CTX(ndr);
 		NDR_PULL_SET_MEM_CTX(ndr, r->out.szDNPrefix, LIBNDR_FLAG_REF_ALLOC);
 		NDR_CHECK(ndr_pull_generic_ptr(ndr, &_ptr_szDNPrefix));
@@ -1364,15 +1396,20 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 			NDR_PULL_SET_MEM_CTX(ndr, *r->out.szDNPrefix, 0);
 			NDR_CHECK(ndr_pull_array_size(ndr, r->out.szDNPrefix));
 			NDR_CHECK(ndr_pull_array_length(ndr, r->out.szDNPrefix));
-			if (ndr_get_array_length(ndr, r->out.szDNPrefix) > ndr_get_array_size(ndr, r->out.szDNPrefix)) {
-				return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", ndr_get_array_size(ndr, r->out.szDNPrefix), ndr_get_array_length(ndr, r->out.szDNPrefix));
+			NDR_CHECK(oc_ndr_array_size(ndr, r->out.szDNPrefix, &size_dn_prefix));
+			NDR_CHECK(oc_ndr_array_length(ndr, r->out.szDNPrefix, &length_dn_prefix));
+			if (length_dn_prefix > size_dn_prefix) {
+				return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", size_dn_prefix, length_dn_prefix);
 			}
-			NDR_CHECK(ndr_check_string_terminator(ndr, ndr_get_array_length(ndr, r->out.szDNPrefix), sizeof(uint8_t)));
-			NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, r->out.szDNPrefix, ndr_get_array_length(ndr, r->out.szDNPrefix), sizeof(uint8_t), CH_DOS));
+			NDR_CHECK(ndr_check_string_terminator(ndr, length_dn_prefix, sizeof(uint8_t)));
+			NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, r->out.szDNPrefix, length_dn_prefix, sizeof(uint8_t), CH_DOS));
 			NDR_PULL_SET_MEM_CTX(ndr, _mem_save_szDNPrefix_1, 0);
 		}
 		NDR_PULL_SET_MEM_CTX(ndr, _mem_save_szDNPrefix_0, LIBNDR_FLAG_REF_ALLOC);
 
+		if (ndr->flags & LIBNDR_FLAG_REF_ALLOC) {
+			NDR_PULL_ALLOC(ndr, r->out.szDisplayName);
+		}
 		if (ndr->flags & LIBNDR_FLAG_REF_ALLOC) {
 			NDR_PULL_ALLOC(ndr, r->out.szDisplayName);
 		}
@@ -1389,11 +1426,13 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 			NDR_PULL_SET_MEM_CTX(ndr, *r->out.szDisplayName, 0);
 			NDR_CHECK(ndr_pull_array_size(ndr, r->out.szDisplayName));
 			NDR_CHECK(ndr_pull_array_length(ndr, r->out.szDisplayName));
-			if (ndr_get_array_length(ndr, r->out.szDisplayName) > ndr_get_array_size(ndr, r->out.szDisplayName)) {
-				return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", ndr_get_array_size(ndr, r->out.szDisplayName), ndr_get_array_length(ndr, r->out.szDisplayName));
+			NDR_CHECK(oc_ndr_array_size(ndr, r->out.szDisplayName, &size_display_name));
+			NDR_CHECK(oc_ndr_array_length(ndr, r->out.szDisplayName, &length_display_name));
+			if (length_display_name > size_display_name) {
+				return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", size_display_name, length_display_name);
 			}
-			NDR_CHECK(ndr_check_string_terminator(ndr, ndr_get_array_length(ndr, r->out.szDisplayName), sizeof(uint8_t)));
-			NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, r->out.szDisplayName, ndr_get_array_length(ndr, r->out.szDisplayName), sizeof(uint8_t), CH_DOS));
+			NDR_CHECK(ndr_check_string_terminator(ndr, length_display_name, sizeof(uint8_t)));
+			NDR_CHECK(ndr_pull_charset(ndr, NDR_SCALARS, r->out.szDisplayName, length_display_name, sizeof(uint8_t), CH_DOS));
 			NDR_PULL_SET_MEM_CTX(ndr, _mem_save_szDisplayName_1, 0);
 		}
 		NDR_PULL_SET_MEM_CTX(ndr, _mem_save_szDisplayName_0, LIBNDR_FLAG_REF_ALLOC);
@@ -1413,14 +1452,16 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 		NDR_PULL_SET_MEM_CTX(ndr, _mem_save_pulTimeStamp_0, LIBNDR_FLAG_REF_ALLOC);
 		NDR_CHECK(ndr_pull_array_size(ndr, &r->out.rgbAuxOut));
 		NDR_CHECK(ndr_pull_array_length(ndr, &r->out.rgbAuxOut));
-		if (ndr_get_array_length(ndr, &r->out.rgbAuxOut) > ndr_get_array_size(ndr, &r->out.rgbAuxOut)) {
-			return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", ndr_get_array_size(ndr, &r->out.rgbAuxOut), ndr_get_array_length(ndr, &r->out.rgbAuxOut));
+		NDR_CHECK(oc_ndr_array_size(ndr, &r->out.rgbAuxOut, &size_aux_out));
+		NDR_CHECK(oc_ndr_array_length(ndr, &r->out.rgbAuxOut, &length_aux_out));
+		if (length_aux_out > size_aux_out) {
+			return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE, "Bad array size %u should exceed array length %u", size_aux_out, length_aux_out);
 		}
 		if (ndr->flags & LIBNDR_FLAG_REF_ALLOC) {
-			NDR_PULL_ALLOC_N(ndr, r->out.rgbAuxOut, ndr_get_array_size(ndr, &r->out.rgbAuxOut));
+			NDR_PULL_ALLOC_N(ndr, r->out.rgbAuxOut, size_aux_out);
 		}
 		/* Only try to pull rgbAuxOut if the fake array size is > 0 */
-		if (ndr_get_array_size(ndr, &r->out.rgbAuxOut)) {
+		if (size_aux_out) {
 			_mem_save_rgbAuxOut_1 = NDR_PULL_GET_MEM_CTX(ndr);
 			NDR_PULL_SET_MEM_CTX(ndr, r->out.rgbAuxOut, 0);
 			NDR_CHECK(ndr_pull_mapi2k7_AuxInfo(ndr, NDR_SCALARS, r->out.rgbAuxOut));
@@ -1441,7 +1482,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_EcDoConnectEx(struct ndr_pull *ndr, int flag
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ void ndr_print_EcDoConnectEx(struct ndr_print *ndr, const char *name, int flags, const struct EcDoConnectEx *r)
+_PUBLIC_ void ndr_print_EcDoConnectEx(struct ndr_print *ndr, const char *name, ndr_flags_type flags, const struct EcDoConnectEx *r)
 {
 	uint32_t	cntr_rgwClientVersion_0;
 	uint32_t	cntr_rgwServerVersion_0;
@@ -1576,7 +1617,7 @@ _PUBLIC_ void ndr_print_EcDoConnectEx(struct ndr_print *ndr, const char *name, i
 	ndr->depth--;
 }
 
-_PUBLIC_ void ndr_print_EcDoRpcExt(struct ndr_print *ndr, const char *name, int flags, const struct EcDoRpcExt *r)
+_PUBLIC_ void ndr_print_EcDoRpcExt(struct ndr_print *ndr, const char *name, ndr_flags_type flags, const struct EcDoRpcExt *r)
 {
 	DATA_BLOB		rgbIn;
 	DATA_BLOB		rgbOut;
@@ -1694,7 +1735,7 @@ _PUBLIC_ void ndr_print_EcDoRpcExt(struct ndr_print *ndr, const char *name, int 
 	talloc_free(mem_ctx);
 }
 
-_PUBLIC_ void ndr_print_EcDoRpcExt2(struct ndr_print *ndr, const char *name, int flags, const struct EcDoRpcExt2 *r)
+_PUBLIC_ void ndr_print_EcDoRpcExt2(struct ndr_print *ndr, const char *name, ndr_flags_type flags, const struct EcDoRpcExt2 *r)
 {
 	uint32_t		cntr_rgbAuxOut_0;
 	DATA_BLOB		rgbIn;
@@ -1841,7 +1882,7 @@ _PUBLIC_ void ndr_print_EcDoRpcExt2(struct ndr_print *ndr, const char *name, int
   If we have no results, do not push/pull the DATA_BLOB
 */
 
-enum ndr_err_code ndr_push_QueryRows_repl(struct ndr_push *ndr, int ndr_flags, const struct QueryRows_repl *r)
+enum ndr_err_code ndr_push_QueryRows_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct QueryRows_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1865,7 +1906,7 @@ enum ndr_err_code ndr_push_QueryRows_repl(struct ndr_push *ndr, int ndr_flags, c
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_QueryRows_repl(struct ndr_pull *ndr, int ndr_flags, struct QueryRows_repl *r)
+enum ndr_err_code ndr_pull_QueryRows_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct QueryRows_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1895,7 +1936,7 @@ enum ndr_err_code ndr_pull_QueryRows_repl(struct ndr_pull *ndr, int ndr_flags, s
 }
 
 
-enum ndr_err_code ndr_push_Logon_req(struct ndr_push *ndr, int ndr_flags, const struct Logon_req *r)
+enum ndr_err_code ndr_push_Logon_req(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct Logon_req *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1922,7 +1963,7 @@ enum ndr_err_code ndr_push_Logon_req(struct ndr_push *ndr, int ndr_flags, const 
 }
 
 /* MoveFolder */
-enum ndr_err_code ndr_push_MoveFolder_repl(struct ndr_push *ndr, int ndr_flags, const struct MoveFolder_repl *r)
+enum ndr_err_code ndr_push_MoveFolder_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct MoveFolder_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1941,7 +1982,7 @@ enum ndr_err_code ndr_push_MoveFolder_repl(struct ndr_push *ndr, int ndr_flags, 
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_MoveFolder_repl(struct ndr_pull *ndr, int ndr_flags, struct MoveFolder_repl *r)
+enum ndr_err_code ndr_pull_MoveFolder_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct MoveFolder_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1979,7 +2020,7 @@ _PUBLIC_ void ndr_print_MoveFolder_repl(struct ndr_print *ndr, const char *name,
 /* /MoveFolder */
 
 /* CopyFolder */
-enum ndr_err_code ndr_push_CopyFolder_repl(struct ndr_push *ndr, int ndr_flags, const struct CopyFolder_repl *r)
+enum ndr_err_code ndr_push_CopyFolder_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct CopyFolder_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -1998,7 +2039,7 @@ enum ndr_err_code ndr_push_CopyFolder_repl(struct ndr_push *ndr, int ndr_flags, 
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_CopyFolder_repl(struct ndr_pull *ndr, int ndr_flags, struct CopyFolder_repl *r)
+enum ndr_err_code ndr_pull_CopyFolder_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct CopyFolder_repl *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
@@ -2195,12 +2236,12 @@ _PUBLIC_ void ndr_print_fuzzyLevel(struct ndr_print *ndr, const char *name, uint
  * Fake wrapper over mapi_SRestriction. Workaround the no-pointer deep
  * recursion problem in pidl
  */
-enum ndr_err_code ndr_push_mapi_SRestriction_wrap(struct ndr_push *ndr, int ndr_flags, const struct mapi_SRestriction_wrap *r)
+enum ndr_err_code ndr_push_mapi_SRestriction_wrap(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi_SRestriction_wrap *r)
 {
 	return ndr_push_mapi_SRestriction(ndr, ndr_flags, (struct mapi_SRestriction *)r);
 }
 
-enum ndr_err_code ndr_pull_mapi_SRestriction_wrap(struct ndr_pull *ndr, int ndr_flags, struct mapi_SRestriction_wrap *r)
+enum ndr_err_code ndr_pull_mapi_SRestriction_wrap(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi_SRestriction_wrap *r)
 {
 	return ndr_pull_mapi_SRestriction(ndr, ndr_flags, (struct mapi_SRestriction *)r);
 }
@@ -2214,13 +2255,13 @@ void ndr_print_mapi_SRestriction_wrap(struct ndr_print *ndr, const char *name, c
  * Fake wrapper over mapi_SPropValue. Workaround the no-pointer deep
  * recursion problem in pidl
  */
-enum ndr_err_code ndr_push_mapi_SPropValue_wrap(struct ndr_push *ndr, int ndr_flags, const struct mapi_SPropValue_wrap *r)
+enum ndr_err_code ndr_push_mapi_SPropValue_wrap(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi_SPropValue_wrap *r)
 {
 	NDR_CHECK(ndr_push_align(ndr, 8));
 	return ndr_push_mapi_SPropValue(ndr, NDR_SCALARS, (const struct mapi_SPropValue *)r);
 }
 
-enum ndr_err_code ndr_pull_mapi_SPropValue_wrap(struct ndr_pull *ndr, int ndr_flags, struct mapi_SPropValue_wrap *r)
+enum ndr_err_code ndr_pull_mapi_SPropValue_wrap(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi_SPropValue_wrap *r)
 {
 	return ndr_pull_mapi_SPropValue(ndr, NDR_SCALARS, (struct mapi_SPropValue *)r);
 }
@@ -2235,13 +2276,13 @@ void ndr_print_mapi_SPropValue_wrap(struct ndr_print *ndr, const char *name, con
  * Fake wrapper over mapi_SPropValue_array. Workaround the no-pointer deep
  * recursion problem in pidl
  */
-enum ndr_err_code ndr_push_mapi_SPropValue_array_wrap(struct ndr_push *ndr, int ndr_flags, const struct mapi_SPropValue_array_wrap *r)
+enum ndr_err_code ndr_push_mapi_SPropValue_array_wrap(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct mapi_SPropValue_array_wrap *r)
 {
 	NDR_CHECK(ndr_push_align(ndr, 8));
 	return ndr_push_mapi_SPropValue_array(ndr, NDR_SCALARS, (const struct mapi_SPropValue_array *)r);
 }
 
-enum ndr_err_code ndr_pull_mapi_SPropValue_array_wrap(struct ndr_pull *ndr, int ndr_flags, struct mapi_SPropValue_array_wrap *r)
+enum ndr_err_code ndr_pull_mapi_SPropValue_array_wrap(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct mapi_SPropValue_array_wrap *r)
 {
 	return ndr_pull_mapi_SPropValue_array(ndr, NDR_SCALARS, (struct mapi_SPropValue_array *)r);
 }
@@ -2251,13 +2292,18 @@ void ndr_print_mapi_SPropValue_array_wrap(struct ndr_print *ndr, const char *nam
 	ndr_print_mapi_SPropValue_array(ndr, name, (const struct mapi_SPropValue_array *)r);
 }
 
-enum ndr_err_code ndr_push_RestrictionVariable(struct ndr_push *ndr, int ndr_flags, const union RestrictionVariable *r)
+enum ndr_err_code ndr_push_RestrictionVariable(struct ndr_push *ndr, ndr_flags_type ndr_flags, const union RestrictionVariable *r)
 {
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
 		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 		if (ndr_flags & NDR_SCALARS) {
-			int level = ndr_push_get_switch_value(ndr, r);
+			uint32_t level;
+#if HAVE_DECL_NDR_PUSH_GET_SWITCH_VALUE
+            level = ndr_push_get_switch_value(ndr, r);
+#else
+            NDR_CHECK(ndr_token_peek(&ndr->switch_list, r, &level));
+#endif
 			switch (level) {
 				case 0x0: {
 					break; }
@@ -2271,7 +2317,12 @@ enum ndr_err_code ndr_push_RestrictionVariable(struct ndr_push *ndr, int ndr_fla
 			}
 		}
 		if (ndr_flags & NDR_BUFFERS) {
-			int level = ndr_push_get_switch_value(ndr, r);
+			uint32_t level;
+#if HAVE_DECL_NDR_PUSH_GET_SWITCH_VALUE
+            level = ndr_push_get_switch_value(ndr, r);
+#else
+            NDR_CHECK(ndr_token_peek(&ndr->switch_list, r, &level));
+#endif
 			switch (level) {
 				case 0x0:
 				break;
@@ -2291,11 +2342,15 @@ enum ndr_err_code ndr_push_RestrictionVariable(struct ndr_push *ndr, int ndr_fla
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code  ndr_pull_RestrictionVariable(struct ndr_pull *ndr, int ndr_flags, union RestrictionVariable *r)
+enum ndr_err_code  ndr_pull_RestrictionVariable(struct ndr_pull *ndr, ndr_flags_type ndr_flags, union RestrictionVariable *r)
 {
-	int level;
+	uint32_t level;
 	TALLOC_CTX *_mem_save_res_0;
+#if HAVE_DECL_NDR_PUSH_GET_SWITCH_VALUE
 	level = ndr_pull_get_switch_value(ndr, r);
+#else
+	NDR_CHECK(ndr_token_peek(&ndr->switch_list, r, &level));
+#endif
 	{
 		uint32_t _flags_save_STRUCT = ndr->flags;
 		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
@@ -2343,8 +2398,12 @@ enum ndr_err_code  ndr_pull_RestrictionVariable(struct ndr_pull *ndr, int ndr_fl
 
 _PUBLIC_ void ndr_print_RestrictionVariable(struct ndr_print *ndr, const char *name, const union RestrictionVariable *r)
 {
-	int level;
+	uint32_t level = 0;
+#if HAVE_DECL_NDR_PUSH_GET_SWITCH_VALUE
 	level = ndr_print_get_switch_value(ndr, r);
+#else
+	(void)ndr_token_peek(&ndr->switch_list, r, &level);
+#endif
 	ndr_print_union(ndr, name, level, "RestrictionVariable");
 	switch (level) {
 		case 0x0:
@@ -2362,28 +2421,28 @@ _PUBLIC_ void ndr_print_RestrictionVariable(struct ndr_print *ndr, const char *n
 	}
 }
 
-enum ndr_err_code ndr_push_Release_req(struct ndr_push *ndr, int ndr_flags, const struct Release_req *r)
+enum ndr_err_code ndr_push_Release_req(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct Release_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_Release_req(struct ndr_pull *ndr, int ndr_flags, struct Release_req *r)
+enum ndr_err_code ndr_pull_Release_req(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct Release_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_Release_repl(struct ndr_push *ndr, int ndr_flags, const struct Release_repl *r)
+enum ndr_err_code ndr_push_Release_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct Release_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_Release_repl(struct ndr_pull *ndr, int ndr_flags, struct Release_repl *r)
+enum ndr_err_code ndr_pull_Release_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct Release_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
 
-enum ndr_err_code ndr_push_GetSearchCriteria_repl(struct ndr_push *ndr, int ndr_flags, const struct GetSearchCriteria_repl *r)
+enum ndr_err_code ndr_push_GetSearchCriteria_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct GetSearchCriteria_repl *r)
 {
 	uint32_t cntr_FolderIds_0;
 	{
@@ -2414,7 +2473,7 @@ enum ndr_err_code ndr_push_GetSearchCriteria_repl(struct ndr_push *ndr, int ndr_
 }
 
 
-enum ndr_err_code ndr_pull_GetSearchCriteria_repl(struct ndr_pull *ndr, int ndr_flags, struct GetSearchCriteria_repl *r)
+enum ndr_err_code ndr_pull_GetSearchCriteria_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct GetSearchCriteria_repl *r)
 {
 	uint32_t cntr_FolderIds_0;
 	TALLOC_CTX *_mem_save_FolderIds_0;
@@ -2482,49 +2541,49 @@ void ndr_print_GetSearchCriteria_repl(struct ndr_print *ndr, const char *name, c
 	}
 }
 
-enum ndr_err_code ndr_push_Backoff_req(struct ndr_push *ndr, int ndr_flags, const struct Backoff_req *r)
+enum ndr_err_code ndr_push_Backoff_req(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct Backoff_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_Backoff_req(struct ndr_pull *ndr, int ndr_flags, struct Backoff_req *r)
+enum ndr_err_code ndr_pull_Backoff_req(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct Backoff_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_Backoff_repl(struct ndr_push *ndr, int ndr_flags, const struct Backoff_repl *r)
+enum ndr_err_code ndr_push_Backoff_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct Backoff_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_Backoff_repl(struct ndr_pull *ndr, int ndr_flags, struct Backoff_repl *r)
+enum ndr_err_code ndr_pull_Backoff_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct Backoff_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_BufferTooSmall_req(struct ndr_push *ndr, int ndr_flags, const struct BufferTooSmall_req *r)
+enum ndr_err_code ndr_push_BufferTooSmall_req(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct BufferTooSmall_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_BufferTooSmall_req(struct ndr_pull *ndr, int ndr_flags, struct BufferTooSmall_req *r)
+enum ndr_err_code ndr_pull_BufferTooSmall_req(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct BufferTooSmall_req *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_BufferTooSmall_repl(struct ndr_push *ndr, int ndr_flags, const struct BufferTooSmall_repl *r)
+enum ndr_err_code ndr_push_BufferTooSmall_repl(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct BufferTooSmall_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_pull_BufferTooSmall_repl(struct ndr_pull *ndr, int ndr_flags, struct BufferTooSmall_repl *r)
+enum ndr_err_code ndr_pull_BufferTooSmall_repl(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct BufferTooSmall_repl *r)
 {
 	return NDR_ERR_SUCCESS;
 }
 
 /* property.idl */
 
-_PUBLIC_ enum ndr_err_code ndr_push_ExtendedException(struct ndr_push *ndr, int ndr_flags, uint16_t WriterVersion2, const struct ExceptionInfo *ExceptionInfo, const struct ExtendedException *r)
+_PUBLIC_ enum ndr_err_code ndr_push_ExtendedException(struct ndr_push *ndr, ndr_flags_type ndr_flags, uint16_t WriterVersion2, const struct ExceptionInfo *ExceptionInfo, const struct ExtendedException *r)
 {
 	bool subjectIsSet, locationIsSet;
 	{
@@ -2573,7 +2632,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_ExtendedException(struct ndr_push *ndr, int 
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_ExtendedException(struct ndr_pull *ndr, int ndr_flags, uint16_t WriterVersion2, const struct ExceptionInfo *ExceptionInfo, struct ExtendedException *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_ExtendedException(struct ndr_pull *ndr, ndr_flags_type ndr_flags, uint16_t WriterVersion2, const struct ExceptionInfo *ExceptionInfo, struct ExtendedException *r)
 {
 	bool subjectIsSet, locationIsSet;
 	{
@@ -2626,7 +2685,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_ExtendedException(struct ndr_pull *ndr, int 
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_push_AppointmentRecurrencePattern(struct ndr_push *ndr, int ndr_flags, const struct AppointmentRecurrencePattern *r)
+_PUBLIC_ enum ndr_err_code ndr_push_AppointmentRecurrencePattern(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct AppointmentRecurrencePattern *r)
 {
 	uint32_t cntr_ExceptionInfo_0;
 	uint32_t cntr_ReservedBlock1_0;
@@ -2671,7 +2730,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_AppointmentRecurrencePattern(struct ndr_push
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_AppointmentRecurrencePattern(struct ndr_pull *ndr, int ndr_flags, struct AppointmentRecurrencePattern *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_AppointmentRecurrencePattern(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct AppointmentRecurrencePattern *r)
 {
 	uint32_t cntr_ExceptionInfo_0;
 	TALLOC_CTX *_mem_save_ExceptionInfo_0;
@@ -2751,7 +2810,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_AppointmentRecurrencePattern(struct ndr_pull
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_push_PersistDataArray(struct ndr_push *ndr, int ndr_flags, const struct PersistDataArray *r)
+_PUBLIC_ enum ndr_err_code ndr_push_PersistDataArray(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct PersistDataArray *r)
 {
 	uint32_t cntr_lpPersistData_1;
 	{
@@ -2769,7 +2828,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_PersistDataArray(struct ndr_push *ndr, int n
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_PersistDataArray(struct ndr_pull *ndr, int ndr_flags, struct PersistDataArray *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_PersistDataArray(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct PersistDataArray *r)
 {
 	uint32_t cntr_lpPersistData_0;
 	TALLOC_CTX *_mem_save_lpPersistData_0;
@@ -2820,7 +2879,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_PersistDataArray(struct ndr_pull *ndr, int n
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_push_PersistElementArray(struct ndr_push *ndr, int ndr_flags, const struct PersistElementArray *r)
+_PUBLIC_ enum ndr_err_code ndr_push_PersistElementArray(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct PersistElementArray *r)
 {
 	uint32_t cntr_lpPersistElement_1;
 	{
@@ -2838,7 +2897,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_PersistElementArray(struct ndr_push *ndr, in
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_PersistElementArray(struct ndr_pull *ndr, int ndr_flags, struct PersistElementArray *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_PersistElementArray(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct PersistElementArray *r)
 {
 	uint32_t cntr_lpPersistElement_0;
 	TALLOC_CTX *_mem_save_lpPersistElement_0;

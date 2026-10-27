@@ -670,7 +670,8 @@ static enum mapistore_error mysql_record_get_fmid(struct indexing_context *ictx,
 
 	if (partial) {
 		uri_like = talloc_strdup(mem_ctx, uri);
-		string_replace(uri_like, '*', '%');
+		MAPISTORE_RETVAL_IF(!uri_like, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+		string_replace_m(uri_like, '*', '%');
 		sql = talloc_asprintf_append(sql, " AND url LIKE '%s'",
 					     _sql(mem_ctx, uri_like));
 	} else {

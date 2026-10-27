@@ -27,6 +27,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <limits.h>
 
 #include "mapistore.h"
 #include "mapistore_errors.h"
@@ -58,10 +59,14 @@ int					num_backends;
 _PUBLIC_ enum mapistore_error mapistore_backend_register(const void *_backend)
 {
 	const struct mapistore_backend	*backend = _backend;
+	struct mapistore_backend *copy;
+	struct mstore_backend *grown;
 	uint32_t			i;
 
 	/* Sanity checks */
-	MAPISTORE_RETVAL_IF(!backend, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(!backend || !backend->backend.name || !backend->backend.name[0],
+                         MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+    if (num_backends == INT_MAX) return MAPISTORE_ERR_NO_MEMORY;
 
 	for (i = 0; i < num_backends; i++) {
 		if (backends[i].backend && backend && 
@@ -72,13 +77,20 @@ _PUBLIC_ enum mapistore_error mapistore_backend_register(const void *_backend)
 		}
 	}
 
-	backends = realloc_p(backends, struct mstore_backend, num_backends + 1);
-	if (!backends) {
-		smb_panic("out of memory in mapistore_backend_register");
+	copy = talloc_memdup(NULL, backend, sizeof(*copy));
+	if (copy == NULL) return MAPISTORE_ERR_NO_MEMORY;
+	copy->backend.name = talloc_strdup(copy, backend->backend.name);
+	if (copy->backend.name == NULL) {
+		talloc_free(copy);
+		return MAPISTORE_ERR_NO_MEMORY;
 	}
-
-	backends[num_backends].backend = smb_xmemdup(backend, sizeof (*backend));
-	backends[num_backends].backend->backend.name = smb_xstrdup(backend->backend.name);
+	grown = talloc_realloc(NULL, backends, struct mstore_backend, (size_t)num_backends + 1);
+	if (grown == NULL) {
+		talloc_free(copy);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	backends = grown;
+	backends[num_backends].backend = talloc_steal(backends, copy);
 
 	num_backends++;
 

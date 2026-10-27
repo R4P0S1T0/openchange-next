@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # OpenChange provisioning
@@ -25,7 +25,7 @@ import os.path
 import samba
 from samba import Ldb
 import ldb
-from urlparse import urlparse
+from urllib.parse import urlparse
 import uuid
 import time
 import MySQLdb
@@ -154,7 +154,7 @@ dn: CASE_INSENSITIVE
         dn = "CN=%s,%s" % (fid, dn_prefix)
         change_num = gen_mailbox_folder_fid(ChangeNumber, ReplicaID)
         childcount = len(children)
-        print "\t* %-40s: 0x%.16x (%s)" % (name, int(fid, 10), fid)
+        print("\t* %-40s: 0x%.16x (%s)" % (name, int(fid, 10), fid))
         if parent_fid == 0:
             self.add_root_public_folder(dn, fid, change_num, SystemIndex, childcount)
         else:
@@ -165,7 +165,7 @@ dn: CASE_INSENSITIVE
         ChangeNumber += 1
         self.set_message_ChangeNumber(names.netbiosname, ChangeNumber=ChangeNumber)
 
-        for name, grandchildren in children.iteritems():
+        for name, grandchildren in children.items():
             self.add_one_public_folder(fid, path + (name,), grandchildren[0], grandchildren[1], names, dn)
 
     def add_public_folders(self, names):
@@ -407,7 +407,7 @@ class OpenChangeDBWithMysqlBackend(MysqlBackendMixin):
             else:
                 cur.execute(sql, params)
         except MySQLdb.ProgrammingError as e:
-            print "Error executing %s with %r: %r" % (sql, params, e)
+            print("Error executing %s with %r: %r" % (sql, params, e))
             raise e
         self.db.commit()
         cur.close()
@@ -465,7 +465,7 @@ class OpenChangeDBWithMysqlBackend(MysqlBackendMixin):
         fid = gen_mailbox_folder_fid(self.global_count, self.replica_id)
         change_num = gen_mailbox_folder_fid(self.change_number, self.replica_id)
         childcount = len(children)
-        print "\t* %-40s: 0x%.16x (%s)" % (name, int(fid, 10), fid)
+        print("\t* %-40s: 0x%.16x (%s)" % (name, int(fid, 10), fid))
         if parent_fid == 0:
             self._add_root_public_folder(fid, change_num, system_index, childcount)
         else:
@@ -475,7 +475,7 @@ class OpenChangeDBWithMysqlBackend(MysqlBackendMixin):
         self.global_count += 1
         self.change_number += 1
 
-        for name, grandchildren in children.iteritems():
+        for name, grandchildren in children.items():
             self._add_one_public_folder(fid, path + (name,), grandchildren[0],
                                         grandchildren[1], names)
 
@@ -489,8 +489,8 @@ class OpenChangeDBWithMysqlBackend(MysqlBackendMixin):
 
         public_folders = _public_folders_meta(names)
 
-        print "[+] Public Folders"
-        print "==================="
+        print("[+] Public Folders")
+        print("===================")
         self._add_one_public_folder(0, ("Public Folder Root",),
                                     public_folders[0], public_folders[1], names)
 
@@ -517,7 +517,7 @@ OpenChangeDB = OpenChangeDBWithLdbBackend
 
 def reverse_int64counter(GlobalCount):
     rev_counter = 0
-    for x in xrange(6):
+    for x in range(6):
         sh = x * 8
         unsh = (7-x) * 8
         rev_counter = rev_counter | (((GlobalCount >> sh) & 0xff) << unsh)

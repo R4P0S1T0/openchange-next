@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # OpenChangeDB migration for directory schema and contents
@@ -103,7 +103,7 @@ objectCategory: CN=Attribute-Schema,%(schema_dn)s
         add_schema_attr_ldif = add_schema_attr_ldif % {'schema_dn': schema_dn}
         try:
             db.add_ldif(add_schema_attr_ldif, ['relax:0'])
-        except Exception, ex:
+        except Exception as ex:
             sys.stderr.write("Error adding msExchRecipientTypeDetails and msExchRecipientDisplayType atributes to schema: %s\n" % str(ex))
 
         force_schemas_update(db, setup_path)
@@ -118,7 +118,7 @@ mayContain: msExchRecipientTypeDetails
         upgrade_schema_ldif = upgrade_schema_ldif % {'schema_dn': schema_dn}
         try:
             db.modify_ldif(upgrade_schema_ldif)
-        except Exception, ex:
+        except Exception as ex:
             sys.stderr.write("Error adding msExchRecipientTypeDetails and msExchRecipientDisplayType to Mail-Recipient schema: %s\n" % str(ex))
 
         force_schemas_update(db, setup_path)
@@ -156,7 +156,7 @@ msExchRecipientDisplayType: 0
                 ldif = template % {'user_dn': dn}
                 try:
                     db.modify_ldif(ldif)
-                except Exception, ex:
+                except Exception as ex:
                     sys.stderr.write("Error migrating user %s: %s. Skipping user\n" % (dn, str(ex)))
 
     @classmethod
@@ -192,7 +192,7 @@ proxyAddresses: smtp:postmaster@{mail_domain}
         res = db.search(base=names.domaindn, scope=ldb.SCOPE_SUBTREE, expression=ldb_filter)
         for element in res:
             if 'proxyAddresses' in element:
-                for entry in element['proxyAddresses']:
+                for entry in element['proxyAddresses'].text:
                     if entry.startswith('SMTP:postmaster@'):
                         mail_domain = entry[len('SMTP:postmaster@'):]
                         dn = element.dn.get_linearized()
@@ -200,7 +200,7 @@ proxyAddresses: smtp:postmaster@{mail_domain}
                                                                       mail_domain=mail_domain)
                         try:
                             db.modify_ldif(ldif)
-                        except Exception, ex:
+                        except Exception as ex:
                             sys.stderr.write("Error migrating user %s: %s\n" % (dn, ex))
 
     @classmethod
@@ -226,7 +226,7 @@ proxyAddresses: SMTP:postmaster@{mail_domain}
         res = db.search(base=names.domaindn, scope=ldb.SCOPE_SUBTREE, expression=ldb_filter)
         for element in res:
             if 'proxyAddresses' in element:
-                for entry in element['proxyAddresses']:
+                for entry in element['proxyAddresses'].text:
                     if entry.startswith('smtp:postmaster@'):
                         mail_domain = entry[len('smtp:postmaster@'):]
                         dn = element.dn.get_linearized()
@@ -234,7 +234,7 @@ proxyAddresses: SMTP:postmaster@{mail_domain}
                                                                       mail_domain=mail_domain)
                         try:
                             db.modify_ldif(ldif)
-                        except Exception, ex:
+                        except Exception as ex:
                             sys.stderr.write("Error unmigrating user %s: %s\n" % (dn, ex))
 
 
@@ -263,7 +263,7 @@ msExchOmaAdminWirelessEnable: 0
             ldif = add_activesync_template.format(dn=dn)
             try:
                 db.modify_ldif(ldif)
-            except Exception, ex:
+            except Exception as ex:
                 msg = "Error migrating recipient %s: %s\n" % (dn, ex)
                 sys.stderr.write(msg)
 
@@ -287,7 +287,7 @@ delete: msExchOmaAdminWirelessEnable
             ldif = delete_activesync_template.format(dn=dn)
             try:
                 db.modify_ldif(ldif)
-            except Exception, ex:
+            except Exception as ex:
                 msg = "Error reverting migration in recipient %s: %s\n" % (dn, ex)
                 sys.stderr.write(msg)
 

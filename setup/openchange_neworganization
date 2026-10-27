@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # encoding: utf8
 # OpenChange organization provision script
 #
@@ -22,7 +22,7 @@ import os
 import sys
 
 # To allow running from the source directory
-sys.path.append("python")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 
 import samba
 import samba.getopt as options

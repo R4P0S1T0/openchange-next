@@ -18,7 +18,8 @@
 #
 
 from samba import param
-from samba.tests import TestCaseInTempDir
+import tempfile
+import unittest
 from openchange.provision import (
     openchangedb_provision,
     guess_names_from_smbconf)
@@ -41,13 +42,21 @@ class ExtendedSamDBTestCase(SamDBTestCase):
 """
 
 
-class OpenChangeDBProvisionTestCase(TestCaseInTempDir):
+class OpenChangeDBProvisionTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="openchange-provision-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.tempdir = self.temp.name
 
     def test_provision(self):
         lp = param.LoadParm()
-        lp.load_default()
+        lp.set("realm", "example.test")
+        lp.set("server role", "active directory domain controller")
+        lp.set("netbios name", "OCSERVER")
+        lp.set("workgroup", "OCTEST")
         lp.set("private dir", self.tempdir)
         names = guess_names_from_smbconf(lp, firstorg="bar", firstou="foo")
         openchangedb_provision(names, lp, "ldb://openchange.ldb")
         os.unlink(os.path.join(self.tempdir, "openchange.ldb"))
-        os.unlink(os.path.join(self.tempdir, "sam.ldb"))
+        self.assertFalse(os.path.exists(os.path.join(self.tempdir, "sam.ldb")))

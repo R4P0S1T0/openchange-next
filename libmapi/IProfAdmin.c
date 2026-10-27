@@ -24,6 +24,16 @@
 #include <ldb_errors.h>
 #include <ldb.h>
 
+#if HAVE_DECL_CRED_USE_KERBEROS_DESIRED
+#define OC_KERBEROS_DESIRED CRED_USE_KERBEROS_DESIRED
+#define OC_KERBEROS_REQUIRED CRED_USE_KERBEROS_REQUIRED
+#define OC_KERBEROS_DISABLED CRED_USE_KERBEROS_DISABLED
+#else
+#define OC_KERBEROS_DESIRED CRED_AUTO_USE_KERBEROS
+#define OC_KERBEROS_REQUIRED CRED_MUST_USE_KERBEROS
+#define OC_KERBEROS_DISABLED CRED_DONT_USE_KERBEROS
+#endif
+
 /**
    \file IProfAdmin.c
 
@@ -753,7 +763,7 @@ _PUBLIC_ enum MAPISTATUS OpenProfile(struct mapi_context *mapi_ctx,
 _PUBLIC_ enum MAPISTATUS LoadProfile(struct mapi_context *mapi_ctx, 
 				     struct mapi_profile *profile)
 {
-	enum credentials_use_kerberos use_krb = CRED_AUTO_USE_KERBEROS;
+	enum credentials_use_kerberos use_krb = OC_KERBEROS_DESIRED;
 
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!mapi_ctx, MAPI_E_NOT_INITIALIZED, NULL);
@@ -777,9 +787,9 @@ _PUBLIC_ enum MAPISTATUS LoadProfile(struct mapi_context *mapi_ctx,
 	 * another API in the profile */
 	if (profile->kerberos) {
 		if (!strncmp(profile->kerberos, "yes", 3)) {
-			use_krb = CRED_MUST_USE_KERBEROS;
+			use_krb = OC_KERBEROS_REQUIRED;
 		} else {
-			use_krb = CRED_DONT_USE_KERBEROS;
+			use_krb = OC_KERBEROS_DISABLED;
 		}
 	}
 	/* additionally, don't set the username in the ccache if kerberos
@@ -787,14 +797,18 @@ _PUBLIC_ enum MAPISTATUS LoadProfile(struct mapi_context *mapi_ctx,
 	 * credentials.  cli_credentials_guess probably gets the right
 	 * thing anyway in the situations where kerberos is in use */
 	if (profile->username && *(profile->username)
-	    && use_krb != CRED_MUST_USE_KERBEROS) {
+	    && use_krb != OC_KERBEROS_REQUIRED) {
 		cli_credentials_set_username(profile->credentials, profile->username, CRED_SPECIFIED);
 	}
 	if (profile->password && *(profile->password)) {
 		cli_credentials_set_password(profile->credentials, profile->password, CRED_SPECIFIED);
 	}
-	if (use_krb != CRED_AUTO_USE_KERBEROS) {
+	if (use_krb != OC_KERBEROS_DESIRED) {
+#ifdef HAVE_KERBEROS_SETTER_PRIORITY
+		cli_credentials_set_kerberos_state(profile->credentials, use_krb, CRED_SPECIFIED);
+#else
 		cli_credentials_set_kerberos_state(profile->credentials, use_krb);
+#endif
 	}
 
 	return MAPI_E_SUCCESS;

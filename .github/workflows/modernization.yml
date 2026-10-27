@@ -1,0 +1,73 @@
+name: Modernization tooling
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  native-library:
+    runs-on: ubuntu-24.04
+    container: debian:13
+    steps:
+      - run: >-
+          apt-get update && apt-get install -y
+          git ca-certificates curl build-essential autoconf automake pkg-config
+          flex bison python3-dev samba-dev libmariadb-dev-compat
+          libmemcached-dev libnanomsg-dev libpopt-dev libparse-yapp-perl
+          check libsubunit-dev
+      - uses: actions/checkout@v4
+      - name: Fetch matching-generation PIDL source
+        run: |
+          curl --fail --location --retry 3 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz
+          printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
+          tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
+          echo /tmp/samba-4.22.10/pidl >> "$GITHUB_PATH"
+          echo PERL5LIB=/tmp/samba-4.22.10/pidl/lib >> "$GITHUB_ENV"
+      - run: ./autogen.sh && ./configure --with-samba=/usr
+      - run: make check-libmapi-modernization
+      - run: make check-mapiproxy-registries
+      - name: Check registry memory handling with sanitizers
+        run: make -W testsuite/modernization/registry_smoke.c check-mapiproxy-registries CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - run: python3 -c 'import ctypes; ctypes.CDLL("./libmapi.so.2.3")'
+      - run: make -q libmapi
+
+  tooling:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake pkg-config build-essential
+      - run: python3 -m unittest discover -s testsuite/modernization -v
+      - run: python3 script/doctor.py --json
+
+  python-runtime:
+    runs-on: ubuntu-24.04
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: openchange-ci-only
+        ports:
+          - 3306/tcp
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y python3-samba python3-mysqldb perl
+      - run: libmapi/conf/mparse.pl --parser=mapistore_namedprops_python --outputdir=python/openchange/migration/ libmapi/conf/mapi-named-properties
+      # Use the distribution interpreter to match Samba's compiled bindings.
+      - run: /usr/bin/python3 -m unittest discover -s python/openchange/tests -v
+        env:
+          PYTHONPATH: python
+          OPENCHANGE_TEST_MYSQL_HOST: 127.0.0.1
+          OPENCHANGE_TEST_MYSQL_PORT: ${{ job.services.mariadb.ports[3306] }}
+          OPENCHANGE_TEST_MYSQL_PASSWORD: openchange-ci-only

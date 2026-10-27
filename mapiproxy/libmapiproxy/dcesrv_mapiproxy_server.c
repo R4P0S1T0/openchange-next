@@ -22,6 +22,7 @@
 #include "libmapi/libmapi.h"
 #include "mapiproxy/dcesrv_mapiproxy.h"
 #include "libmapiproxy.h"
+#include <limits.h>
 #include "utils/dlinklist.h"
 
 /**
@@ -81,22 +82,36 @@ NTSTATUS mapiproxy_server_unbind(struct server_id server_id, uint32_t context_id
 }
 
 
-extern NTSTATUS mapiproxy_server_register(const void *_server_module)
+NTSTATUS mapiproxy_server_register(const void *_server_module)
 {
-	const struct mapiproxy_module	*server_module = (const struct mapiproxy_module *) _server_module;
+	const struct mapiproxy_module *server_module = _server_module;
+	struct mapiproxy_module *copy;
+	struct server_module *grown;
 
-	server_modules = realloc_p(server_modules, struct server_module, num_server_modules + 1);
-	if (!server_modules) {
-		smb_panic("out of memory in mapiproxy_server_register");
+	if (server_module == NULL || server_module->name == NULL || server_module->name[0] == '\0') {
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	server_modules[num_server_modules].server_module = (struct mapiproxy_module *) smb_xmemdup(server_module, sizeof (*server_module));
-	server_modules[num_server_modules].server_module->name = smb_xstrdup(server_module->name);
-
+	if (num_server_modules == INT_MAX) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	copy = talloc_memdup(NULL, server_module, sizeof(*copy));
+	if (copy == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	copy->name = talloc_strdup(copy, server_module->name);
+	if (copy->name == NULL) {
+		talloc_free(copy);
+		return NT_STATUS_NO_MEMORY;
+	}
+	grown = talloc_realloc(NULL, server_modules, struct server_module, (size_t)num_server_modules + 1);
+	if (grown == NULL) {
+		talloc_free(copy);
+		return NT_STATUS_NO_MEMORY;
+	}
+	server_modules = grown;
+	server_modules[num_server_modules].server_module = talloc_steal(server_modules, copy);
 	num_server_modules++;
-
-	OC_DEBUG(3, "MAPIPROXY server '%s' registered", server_module->name);
-
+	OC_DEBUG(3, "MAPIPROXY server '%s' registered", copy->name);
 	return NT_STATUS_OK;
 }
 

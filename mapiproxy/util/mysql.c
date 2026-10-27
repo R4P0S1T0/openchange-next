@@ -20,6 +20,7 @@
  */
 
 #include "mysql.h"
+#include <sys/stat.h>
 
 #include <time.h>
 #include "ccan/htable/htable.h"

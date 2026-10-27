@@ -66,12 +66,10 @@ static void add_interface(TALLOC_CTX *mem_ctx, struct in_addr ip, struct in_addr
 		return;
 	}
 
-	iface = talloc(*interfaces == NULL ? mem_ctx : *interfaces, struct interface);
+	iface = talloc_zero(*interfaces == NULL ? mem_ctx : *interfaces, struct interface);
 	if (iface == NULL) 
 		return;
 	
-	ZERO_STRUCTPN(iface);
-
 	iface->ip = ip;
 	iface->nmask = nmask;
 	bcast.s_addr = MKBCADDR(iface->ip.s_addr, iface->nmask.s_addr);

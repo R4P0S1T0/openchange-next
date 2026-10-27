@@ -89,7 +89,7 @@ struct openchangedb_context {
 	void *data;
 };
 
-const char *nil_string;
+extern const char *nil_string;
 
 
 #define TRANSPORT_FOLDER_SYSTEM_IDX 14

@@ -1,5 +1,7 @@
 #include "idl_types.h"
 
+cpp_quote("#include <inttypes.h>")
+
 cpp_quote("#include <util/debug.h>")
 cpp_quote("#include <gen_ndr/ndr_misc.h>")
 
@@ -495,19 +497,20 @@ System Attendant Private Interface
 		[case(PT_OBJECT)]		uint32			object;
 	} SPropValue_CTR;
 
-	typedef [public,noprint,nopush,nopull] struct {
+	/* Internal memory types have no NDR routines or public NDR table entry. */
+	typedef [noprint,nopush,nopull] struct {
 		MAPITAGS ulPropTag;
 		uint32 dwAlignPad;
 		[switch_is(ulPropTag & 0xFFFF)] SPropValue_CTR value;
 	} SPropValue;
 
-	typedef [public,noprint,nopush,nopull] struct {
+	typedef [noprint,nopush,nopull] struct {
 		uint32			       	ulAdrEntryPad;
 		[range(0,100000)] uint32       	cValues;
 		[size_is(cValues)]SPropValue	*lpProps;
 	} SRow;
 
-	typedef [public,noprint,nopush,nopull] struct {
+	typedef [noprint,nopush,nopull] struct {
 		[range(0,100000)] uint32	cRows;
 		[size_is(cRows)] SRow		aRow[];
 	} SRowSet;

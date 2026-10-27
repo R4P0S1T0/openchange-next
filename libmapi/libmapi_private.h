@@ -31,6 +31,13 @@
 
 #include <inttypes.h>
 
+#ifndef ZERO_STRUCT
+#define ZERO_STRUCT(value) memset(&(value), 0, sizeof(value))
+#endif
+#ifndef ZERO_STRUCTP
+#define ZERO_STRUCTP(value) memset((value), 0, sizeof(*(value)))
+#endif
+
 #if defined(HAVE_PTHREADS)
 #include <pthread.h>
 #elif defined(HAVE_GTHREAD)
@@ -61,18 +68,22 @@
 
 __BEGIN_DECLS
 
+/* Still exported by samba-util, but no longer declared in installed headers. */
+void dump_data(int level, const uint8_t *buf, int len);
+int gen_fnmatch(const char *pattern, const char *string);
+
 /* The following private definitions come from ndr_mapi.c */
 void obfuscate_data(uint8_t *, uint32_t, uint8_t);
 enum ndr_err_code ndr_pull_lzxpress_decompress(struct ndr_pull *, struct ndr_pull **, ssize_t);
 enum ndr_err_code ndr_push_lzxpress_compress(struct ndr_push *, struct ndr_push *);
-enum ndr_err_code ndr_push_ExtendedException(struct ndr_push *, int, uint16_t, const struct ExceptionInfo *, const struct ExtendedException *);
-enum ndr_err_code ndr_pull_ExtendedException(struct ndr_pull *, int, uint16_t, const struct ExceptionInfo *, struct ExtendedException *);
-enum ndr_err_code ndr_push_AppointmentRecurrencePattern(struct ndr_push *, int, const struct AppointmentRecurrencePattern *);
-enum ndr_err_code ndr_pull_AppointmentRecurrencePattern(struct ndr_pull *, int, struct AppointmentRecurrencePattern *);
-enum ndr_err_code ndr_push_PersistDataArray(struct ndr_push *ndr, int ndr_flags, const struct PersistDataArray *r);
-enum ndr_err_code ndr_pull_PersistDataArray(struct ndr_pull *ndr, int ndr_flags, struct PersistDataArray *r);
-enum ndr_err_code ndr_push_PersistElementArray(struct ndr_push *ndr, int ndr_flags, const struct PersistElementArray *r);
-enum ndr_err_code ndr_pull_PersistElementArray(struct ndr_pull *ndr, int ndr_flags, struct PersistElementArray *r);
+enum ndr_err_code ndr_push_ExtendedException(struct ndr_push *, ndr_flags_type, uint16_t, const struct ExceptionInfo *, const struct ExtendedException *);
+enum ndr_err_code ndr_pull_ExtendedException(struct ndr_pull *, ndr_flags_type, uint16_t, const struct ExceptionInfo *, struct ExtendedException *);
+enum ndr_err_code ndr_push_AppointmentRecurrencePattern(struct ndr_push *, ndr_flags_type, const struct AppointmentRecurrencePattern *);
+enum ndr_err_code ndr_pull_AppointmentRecurrencePattern(struct ndr_pull *, ndr_flags_type, struct AppointmentRecurrencePattern *);
+enum ndr_err_code ndr_push_PersistDataArray(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct PersistDataArray *r);
+enum ndr_err_code ndr_pull_PersistDataArray(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct PersistDataArray *r);
+enum ndr_err_code ndr_push_PersistElementArray(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct PersistElementArray *r);
+enum ndr_err_code ndr_pull_PersistElementArray(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct PersistElementArray *r);
 void ndr_dump_data(struct ndr_print *, const uint8_t *, int);
 
 /* The following private definitions come from libmapi/nspi.c */

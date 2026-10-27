@@ -23,6 +23,7 @@
 #define	__MAPISTORE_PRIVATE_H__
 
 #include <talloc.h>
+#include "mapiproxy/samba_compat.h"
 #include "backends/namedprops_backend.h"
 #include "utils/dlinklist.h"
 #include "mapiproxy/libmapistore/gen_ndr/mapistore_notification.h"

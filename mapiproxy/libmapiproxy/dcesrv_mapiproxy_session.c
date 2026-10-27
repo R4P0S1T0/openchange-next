@@ -95,7 +95,7 @@ struct mpm_session *mpm_session_init(TALLOC_CTX *mem_ctx,
 	if (!dce_call->conn) return NULL;
 	if (!dce_call->context) return NULL;
 
-	return mpm_session_new(mem_ctx, dce_call->conn->server_id, 
+	return mpm_session_new(mem_ctx, mapiproxy_connection_server_id(dce_call->conn),
 			       dce_call->context->context_id);
 }
 
@@ -181,13 +181,20 @@ bool mpm_session_cmp_sub(struct mpm_session *session,
 {
 	if (!session) return false;
 
-	if (memcmp(&session->server_id, &sid, sizeof(struct server_id) == 0) &&
-	    (session->context_id == context_id)) {
-		return true;
+	/* Compare fields, not padding bytes. A misplaced parenthesis in the old
+	 * memcmp expression compared zero bytes and never matched any session. */
+	if (session->context_id != context_id ||
+	    session->server_id.pid != sid.pid ||
+	    session->server_id.task_id != sid.task_id ||
+	    session->server_id.vnn != sid.vnn) {
+		return false;
 	}
-
-
-	return false;
+#ifdef HAVE_STRUCT_SERVER_ID_UNIQUE_ID
+	if (session->server_id.unique_id != sid.unique_id) {
+		return false;
+	}
+#endif
+	return true;
 }
 
 
@@ -206,8 +213,8 @@ bool mpm_session_cmp_sub(struct mpm_session *session,
 bool mpm_session_cmp(struct mpm_session *session,
 		     struct dcesrv_call_state *dce_call)
 {
-	if (!session || !dce_call) return false;
+	if (!session || !dce_call || !dce_call->conn || !dce_call->context) return false;
 
-	return mpm_session_cmp_sub(session, dce_call->conn->server_id, 
+	return mpm_session_cmp_sub(session, mapiproxy_connection_server_id(dce_call->conn),
 				   dce_call->context->context_id);
 }
