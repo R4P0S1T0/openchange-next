@@ -377,8 +377,7 @@ enum mapistore_error mapistore_namedprops_mysql_init(TALLOC_CTX *mem_ctx,
 
 	/* Initialize the database */
 	if (!table_exists(conn, NAMEDPROPS_MYSQL_TABLE)) {
-		OC_DEBUG(3, "Creating schema for named_properties on mysql %s\n",
-			 connection_string);
+		OC_DEBUG(3, "Creating schema for named_properties on MySQL");
 		schema_created_ret = migrate_named_properties_schema(connection_string);
 		if (schema_created_ret) {
 			OC_DEBUG(1, "Failed named properties schema creation using "

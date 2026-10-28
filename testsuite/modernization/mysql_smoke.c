@@ -1,0 +1,128 @@
+/* Actual SQL connection code with a substituted driver; no database is contacted. */
+#include "libmapi/libmapi.h"
+#include "mapiproxy/util/mysql.h"
+#include <assert.h>
+#include <stdarg.h>
+
+static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_POOL } failure;
+static bool need_database;
+static unsigned initialized, connected, closed;
+static char logs[8192], query[512];
+static size_t logged;
+static void fixture_debug(const char *format, ...)
+{
+    va_list args;
+    int written;
+    va_start(args, format);
+    written = vsnprintf(logs + logged, sizeof(logs) - logged, format, args);
+    va_end(args);
+    if (written > 0) logged += (size_t)written < sizeof(logs) - logged ? (size_t)written : sizeof(logs) - logged - 1;
+}
+static MYSQL *fixture_mysql_init(MYSQL *existing)
+{
+    if (failure == FAIL_INIT) return NULL;
+    initialized++;
+    return calloc(1, sizeof(MYSQL));
+}
+static int fixture_mysql_options(MYSQL *mysql, enum mysql_option option, const void *value)
+{ assert(mysql); return 0; }
+static MYSQL *fixture_mysql_connect(MYSQL *mysql, const char *host, const char *user,
+    const char *password, const char *database, unsigned port, const char *socket, unsigned long flags)
+{
+    assert(mysql && host && user);
+    connected++;
+    if (failure == FAIL_AUTH || ((need_database || failure == FAIL_QUERY || failure == FAIL_SELECT) && database)) return NULL;
+    return mysql;
+}
+static void fixture_mysql_close(MYSQL *mysql) { assert(mysql); closed++; free(mysql); }
+static const char *fixture_mysql_error(MYSQL *mysql) { return "fixture failure"; }
+static int fixture_mysql_query(MYSQL *mysql, const char *sql)
+{
+    assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
+    return failure == FAIL_QUERY;
+}
+static int fixture_mysql_select(MYSQL *mysql, const char *database) { return failure == FAIL_SELECT; }
+
+#undef OC_DEBUG
+#define OC_DEBUG(level, ...) fixture_debug(__VA_ARGS__)
+#define mysql_init fixture_mysql_init
+#define mysql_options fixture_mysql_options
+#define mysql_real_connect fixture_mysql_connect
+#define mysql_close fixture_mysql_close
+#define mysql_error fixture_mysql_error
+#define mysql_query fixture_mysql_query
+#define mysql_select_db fixture_mysql_select
+#include "mapiproxy/util/mysql.c"
+
+void *__real__talloc_zero(const void *, size_t, const char *);
+void *__wrap__talloc_zero(const void *, size_t, const char *);
+char *__real_talloc_strdup(const void *, const char *);
+char *__wrap_talloc_strdup(const void *, const char *);
+bool __real_htable_add(struct htable *, size_t, const void *);
+bool __wrap_htable_add(struct htable *, size_t, const void *);
+void *__wrap__talloc_zero(const void *ctx, size_t size, const char *name)
+{
+    return failure == FAIL_ENTRY && !strcmp(name, "struct conn_v") ? NULL : __real__talloc_zero(ctx, size, name);
+}
+char *__wrap_talloc_strdup(const void *ctx, const char *value)
+{
+    return failure == FAIL_COPY && !strncmp(value, "mysql://", 8) ? NULL : __real_talloc_strdup(ctx, value);
+}
+bool __wrap_htable_add(struct htable *table, size_t hash, const void *entry)
+{ return failure == FAIL_POOL ? false : __real_htable_add(table, hash, entry); }
+
+#define CHECK(c) do { if (!(c)) { \
+    fprintf(stderr, "MySQL utility check failed at %d: %s\n", __LINE__, #c); \
+    return 1; \
+} } while (0)
+
+int main(void)
+{
+    TALLOC_CTX *ctx = talloc_new(NULL), *pool = talloc_autofree_context(), *limited;
+    const char *uri = "mysql://user:fixture-secret@host:23306/database";
+    MYSQL *mysql = (void *)1, *first;
+    char *host, *user, *password, *database;
+    int port;
+    size_t blocks = talloc_total_blocks(pool);
+    static const char * const invalid[] = {
+        NULL, "", "mysql://user:fixture-secret@/db", "mysql://user:fixture-secret@host:/db",
+        "mysql://u:p@h:65536/d", "mysql://u:p@h:18446744073709551616/d",
+        "mysql://u:p@h:-1/d", "mysql://u:p@h:+1/d", "mysql://u:p@h: 1/d"
+    };
+    CHECK(ctx);
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        CHECK(create_connection(invalid[i], &mysql) == NULL && mysql == NULL);
+    }
+    CHECK(initialized == 0 && ht.elems == 0);
+    CHECK(parse_connection_string(ctx, "mysql://user@host:65535/db", &host, &port, &user, &password, &database));
+    CHECK(port == 65535 && password == NULL && !strcmp(host, "host"));
+    limited = talloc_new(ctx); CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+    CHECK(!parse_connection_string(limited, uri, &host, &port, &user, &password, &database));
+    CHECK(host == NULL && user == NULL && password == NULL && database == NULL && port == 0);
+    talloc_free(limited);
+    for (failure = FAIL_INIT; failure <= FAIL_POOL; failure++) {
+        unsigned before = closed, allocated = initialized;
+        CHECK(create_connection(uri, &mysql) == NULL && mysql == NULL && ht.elems == 0);
+        CHECK(closed - before == initialized - allocated);
+        CHECK(talloc_total_blocks(pool) == blocks);
+    }
+    failure = FAIL_NONE;
+    CHECK(create_connection(uri, &mysql) == mysql && mysql != NULL && ht.elems == 1);
+    first = mysql;
+    {
+        unsigned before = initialized;
+        CHECK(create_connection(uri, &mysql) == first && initialized == before);
+    }
+    CHECK(create_connection("mysql://user:fixture-secret@host/second", &mysql) && ht.elems == 2);
+    CHECK(create_connection("mysql://user@host/no_password", &mysql) && ht.elems == 3);
+    close_all_connections(); CHECK(ht.elems == 0 && closed == initialized && talloc_total_blocks(pool) == blocks);
+    need_database = true;
+    CHECK(create_connection("mysql://user:fixture-secret@host/db`quoted", &mysql));
+    CHECK(!strcmp(query, "CREATE DATABASE `db``quoted`"));
+    close_all_connections(); CHECK(closed == initialized && talloc_total_blocks(pool) == blocks);
+    CHECK(strstr(logs, "fixture-secret") == NULL && strstr(logs, "mysql://") == NULL);
+    CHECK(connected > initialized);
+    talloc_free(ctx);
+    puts("MySQL URI bounds, allocation/transport failure, pool cleanup, identifier quoting and credential-free diagnostics: OK");
+    return 0;
+}

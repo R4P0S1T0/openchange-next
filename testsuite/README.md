@@ -90,6 +90,16 @@ request/reply handle matching, atomic cache completion or sync timeouts.
 For the Python runtime tests and isolated SQL database options, see
 [the modernization guide](../doc/MODERNIZATION.md).
 
+SQL connection utilities can be checked without a server:
+
+    make check-mysql-utils
+
+The driver is substituted for failure tests; real talloc and pool code are used.
+The optional `make check-mysql-live` requires OPENCHANGE_TEST_MYSQL_HOST (and
+optionally PORT, USER and PASSWORD with the same prefix) pointing to a disposable
+SQL server. It creates random openchange_test_* databases and drops them after
+the checks. It does not read production configuration as a fallback.
+
 Usage
 -----
 

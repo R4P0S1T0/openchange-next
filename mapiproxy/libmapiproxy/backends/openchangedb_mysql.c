@@ -3811,8 +3811,7 @@ enum MAPISTATUS openchangedb_mysql_initialize(TALLOC_CTX *mem_ctx,
 	oc_ctx->data = conn;
 	talloc_set_destructor(oc_ctx, openchangedb_mysql_destructor);
 	if (!table_exists(oc_ctx->data, "folders")) {
-		OC_DEBUG(3, "Creating schema for openchangedb on mysql %s\n",
-			  connection_string);
+		OC_DEBUG(3, "Creating schema for openchangedb on MySQL");
 		schema_created_ret = migrate_openchangedb_schema(connection_string);
 		if (schema_created_ret) {
 			OC_DEBUG(1, "Failed openchangedb schema creation using migration framework: %d\n",

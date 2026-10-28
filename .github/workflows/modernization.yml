@@ -9,6 +9,16 @@ jobs:
   native-library:
     runs-on: ubuntu-24.04
     container: debian:13
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: openchange-ci-only
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
     steps:
       - run: >-
           apt-get update && apt-get install -y
@@ -32,6 +42,15 @@ jobs:
           make mapitest-install
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapiprofile --newdb --database "$RUNNER_TEMP/profiles.ldb" --ldif setup/profiles
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapitest --no-server --database "$RUNNER_TEMP/profiles.ldb"
+      - run: make check-mysql-utils
+      - name: Check MySQL failure and pool paths with sanitizers
+        run: make -W testsuite/modernization/mysql_smoke.c check-mysql-utils CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Check real MySQL database creation and cleanup
+        run: make check-mysql-live
+        env:
+          OPENCHANGE_TEST_MYSQL_HOST: mariadb
+          OPENCHANGE_TEST_MYSQL_USER: root
+          OPENCHANGE_TEST_MYSQL_PASSWORD: openchange-ci-only
       - run: make check-binary-properties check-property-blobs check-recipient-blobs
       - name: Check packed properties and recurrence ownership with sanitizers
         run: make -W ndr_mapi.c -W libmapi/emsmdb.c -W libmapi/property.c check-binary-properties check-property-blobs check-recipient-blobs check-libmapi-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'

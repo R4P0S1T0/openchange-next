@@ -2105,3 +2105,19 @@ check-binary-properties: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/b
 bin/binary-properties-check: testsuite/modernization/binary_property_smoke.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
+
+.PHONY: check-mysql-utils
+check-mysql-utils: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mysql-utils-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mysql-utils-check
+
+bin/mysql-utils-check: testsuite/modernization/mysql_smoke.c mapiproxy/util/mysql.c mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -ffunction-sections -fdata-sections -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_zero -Wl,--wrap=talloc_strdup -Wl,--wrap=htable_add libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MYSQL_LIBS)
+
+.PHONY: check-mysql-live
+check-mysql-live: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mysql-live-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mysql-live-check
+
+bin/mysql-live-check: testsuite/modernization/mysql_live_smoke.c mapiproxy/util/mysql.c mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -ffunction-sections -fdata-sections -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MYSQL_LIBS)

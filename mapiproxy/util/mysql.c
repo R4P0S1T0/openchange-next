@@ -64,14 +64,15 @@ static float timespec_diff_in_seconds(struct timespec *end, struct timespec *sta
  */
 void close_all_connections(void)
 {
-	struct htable_iter 	i;
-	struct conn_v		*entry;
-
+	struct htable_iter i;
+	struct conn_v *entry, *next;
 	entry = htable_first(&ht, &i);
 	while (entry) {
-		OC_DEBUG(3, "Closing %s", entry->connection_string);
+		next = htable_next(&ht, &i);
+		OC_DEBUG(3, "Closing pooled MySQL connection");
 		mysql_close(entry->conn);
-		entry = htable_next(&ht, &i);
+		talloc_free(entry);
+		entry = next;
 	}
 	htable_clear(&ht);
 }
@@ -95,17 +96,18 @@ static bool parse_connection_string(TALLOC_CTX *mem_ctx,
 				    char **host, int *port, char **user,
 				    char **passwd, char **db)
 {
-	const char	*user_p, *pass_p, *host_p, *port_p, *db_p, *port_str;
+	const char	*user_p, *pass_p, *host_p, *port_p, *db_p;
+	TALLOC_CTX *tmp;
+	char *parsed_user, *parsed_passwd = NULL, *parsed_host, *parsed_db;
+	size_t i;
 	size_t		user_len, pass_len, host_len, port_len;
 	uint64_t	port_number;
 
 	/* Sanity check on input parameters */
-	if (!connection_string || !connection_string[0]) {
-		return false;
-	}
-	if (!host || !port || !user || !passwd || !db) {
-		return false;
-	}
+	if (!host || !port || !user || !passwd || !db) return false;
+	*host = *user = *passwd = *db = NULL;
+	*port = 0;
+	if (!connection_string || !connection_string[0]) return false;
 
 	/* check for prefix - len(mysql://) = 8 */
 	if (strncasecmp(connection_string, "mysql://", 8)) {
@@ -182,100 +184,111 @@ static bool parse_connection_string(TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
-	*user = talloc_strndup(mem_ctx, user_p, user_len);
-	*passwd = talloc_strndup(mem_ctx, pass_p, pass_len);
-	*host = talloc_strndup(mem_ctx, host_p, host_len);
-	*db = talloc_strdup(mem_ctx, db_p);
-	if (port_len > 0) {
-		port_str = talloc_strndup(mem_ctx, port_p, port_len);
-		if (!convert_string_to_ull(port_str, &port_number)) {
-			return false;
-		}
-		*port = (int) port_number;
-	} else {
-		*port = 0;
+	port_number = 0;
+	if (port_p != NULL && port_len == 0) return false;
+	for (i = 0; i < port_len; i++) {
+		if (port_p[i] < '0' || port_p[i] > '9') return false;
+		port_number = port_number * 10 + (port_p[i] - '0');
+		if (port_number > UINT16_MAX) return false;
 	}
+	tmp = talloc_new(mem_ctx);
+	if (tmp == NULL) return false;
+	parsed_user = talloc_strndup(tmp, user_p, user_len);
+	if (pass_p != NULL) parsed_passwd = talloc_strndup(tmp, pass_p, pass_len);
+	parsed_host = talloc_strndup(tmp, host_p, host_len);
+	parsed_db = talloc_strdup(tmp, db_p);
+	if (parsed_user == NULL || parsed_host == NULL || parsed_db == NULL ||
+	    (pass_p != NULL && parsed_passwd == NULL)) {
+		talloc_free(tmp);
+		return false;
+	}
+	*user = talloc_steal(mem_ctx, parsed_user);
+	*passwd = talloc_steal(mem_ctx, parsed_passwd);
+	*host = talloc_steal(mem_ctx, parsed_host);
+	*db = talloc_steal(mem_ctx, parsed_db);
+	*port = port_number;
+	talloc_free(tmp);
 
 	return true;
 }
 
 
+static char *mysql_quote_dbname(TALLOC_CTX *ctx, const char *name)
+{
+	size_t length = strlen(name), i, used = 0;
+	char *quoted;
+	if (length > (SIZE_MAX - 3) / 2) return NULL;
+	quoted = talloc_array(ctx, char, 2 * length + 3);
+	if (quoted == NULL) return NULL;
+	quoted[used++] = '`';
+	for (i = 0; i < length; i++) {
+		if (name[i] == '`') quoted[used++] = '`';
+		quoted[used++] = name[i];
+	}
+	quoted[used++] = '`';
+	quoted[used] = '\0';
+	return quoted;
+}
+
 MYSQL *create_connection(const char *connection_string, MYSQL **conn)
 {
-	TALLOC_CTX	*mem_ctx;
-	my_bool		reconnect;
-	char		*host, *user, *passwd, *db, *sql;
-	int		port;
-	bool		parsed;
-	struct conn_v	*entry = NULL, *retval = NULL;
+	TALLOC_CTX *mem_ctx;
+	my_bool reconnect = true;
+	char *host, *user, *passwd, *db, *quoted, *sql;
+	int port;
+	struct conn_v *entry = NULL, *cached;
+	MYSQL *candidate = NULL;
 
 	if (conn == NULL) return NULL;
-
-	retval = htable_get(&ht, hash_string(connection_string), _ht_cmp, connection_string);
-	if (retval) {
-		OC_DEBUG(5, "[MYSQL] Found connection, reusing it %"PRIu32, hash_string(connection_string));
-		*conn = retval->conn;
+	*conn = NULL;
+	if (connection_string == NULL || connection_string[0] == '\0') return NULL;
+	cached = htable_get(&ht, hash_string(connection_string), _ht_cmp, connection_string);
+	if (cached) {
+		OC_DEBUG(5, "[MYSQL] Reusing pooled connection");
+		*conn = cached->conn;
 		return *conn;
 	}
-
-	mem_ctx = talloc_zero(NULL, TALLOC_CTX);
-	if (!mem_ctx) return NULL;
-
-	parsed = parse_connection_string(mem_ctx, connection_string,
-					 &host, &port, &user, &passwd, &db);
-	if (!parsed) {
-		OC_DEBUG(1, "[MYSQL] Wrong connection string %s", connection_string);
-		*conn = NULL;
+	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) return NULL;
+	if (!parse_connection_string(mem_ctx, connection_string, &host, &port, &user, &passwd, &db)) {
+		OC_DEBUG(1, "[MYSQL] Invalid connection string");
 		goto end;
 	}
+	candidate = mysql_init(NULL);
+	if (candidate == NULL) goto end;
+	if (mysql_options(candidate, MYSQL_OPT_RECONNECT, &reconnect))
+		OC_DEBUG(1, "[MYSQL] Cannot set MYSQL_OPT_RECONNECT option");
 
-	*conn = mysql_init(NULL);
-
-	reconnect = true;
-	if (mysql_options(*conn, MYSQL_OPT_RECONNECT, &reconnect)) {
-		OC_DEBUG(1, "[MYSQL] Can't set MYSQL_OPT_RECONNECT option");
-	}
-
-	// First try to connect to the database, if it fails try to create it
-	if (mysql_real_connect(*conn, host, user, passwd, db, port, NULL, 0)) {
-		OC_DEBUG(5, "[MYSQL] Connection done");
-		goto connected;
-	}
-
-	// Try to create database
-	if (!mysql_real_connect(*conn, host, user, passwd, NULL, port, NULL, 0)) {
-		// Nop
-		OC_DEBUG(1, "[MYSQL] Can't connect to server using %s, error: %s",
-			  connection_string, mysql_error(*conn));
-		mysql_close(*conn);
-		*conn = NULL;
-		goto end;
-	} else {
-		OC_DEBUG(5, "[MYSQL] Connection done, let's create the database");
-		// Connect it!, let's try to create database
-		sql = talloc_asprintf(mem_ctx, "CREATE DATABASE %s", db);
-		if (mysql_query(*conn, sql) != 0 || mysql_select_db(*conn, db) != 0) {
-			OC_DEBUG(1, "[MYSQL] Can't connect to server using %s, error: %s",
-				  connection_string, mysql_error(*conn));
-			mysql_close(*conn);
-			*conn = NULL;
+	if (!mysql_real_connect(candidate, host, user, passwd, db, port, NULL, 0)) {
+		if (!mysql_real_connect(candidate, host, user, passwd, NULL, port, NULL, 0)) {
+			OC_DEBUG(1, "[MYSQL] Cannot connect: %s", mysql_error(candidate));
+			goto end;
+		}
+		quoted = mysql_quote_dbname(mem_ctx, db);
+		if (quoted == NULL) goto end;
+		sql = talloc_asprintf(mem_ctx, "CREATE DATABASE %s", quoted);
+		if (sql == NULL) goto end;
+		if (mysql_query(candidate, sql) != 0 || mysql_select_db(candidate, db) != 0) {
+			OC_DEBUG(1, "[MYSQL] Cannot create/select database: %s", mysql_error(candidate));
 			goto end;
 		}
 	}
-
-connected:
-	// This entries will never be deallocated
 	entry = talloc_zero(talloc_autofree_context(), struct conn_v);
+	if (entry == NULL) goto end;
 	entry->connection_string = talloc_strdup(entry, connection_string);
-	entry->conn = *conn;
-	// Store the new connection in our table
+	if (entry->connection_string == NULL) goto end;
+	entry->conn = candidate;
 	if (!htable_add(&ht, hash_string(connection_string), entry)) {
-		OC_DEBUG(1, "[MYSQL] ERROR adding new connection to internal pool of connections");
-	} else {
-		OC_DEBUG(5, "[MYSQL] Stored new connection %"PRIu32, hash_string(connection_string));
+		OC_DEBUG(1, "[MYSQL] Cannot add connection to pool");
+		goto end;
 	}
-
+	*conn = candidate;
+	candidate = NULL;
+	entry = NULL;
+	OC_DEBUG(5, "[MYSQL] Connection added to pool");
 end:
+	if (candidate) mysql_close(candidate);
+	talloc_free(entry);
 	talloc_free(mem_ctx);
 	return *conn;
 }

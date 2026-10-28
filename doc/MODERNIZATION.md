@@ -676,6 +676,29 @@ append semantics, overflow and allocation failure. Native/source-copy, ASan,
 UBSan and LeakSanitizer checks pass, and the offline client suite still reports
 30 successes and its one known expected LZXpress failure.
 
+## SQL connection failure and diagnostics
+
+The MySQL connection helper clears failed outputs, validates port digits/range,
+checks client/parser/pool allocations and closes a connected client if it cannot
+be registered. Closing the pool frees its metadata as well as its connections.
+Raw connection strings and password-derived hashes no longer appear in pool or
+schema-creation diagnostics. Database creation quotes identifiers by doubling
+backticks, as described by
+[MariaDB's identifier quoting documentation](https://mariadb.com/docs/server/reference/system-tables/sys-schema/sys-schema-stored-functions/quote_identifier).
+
+`make check-mysql-utils` substitutes only the database driver and selected
+allocation/pool failures. It exercises invalid/null URIs, parser allocation,
+connection failure, pool reuse/cleanup, quoted identifiers and credential-free
+messages. `make check-mysql-live` requires an explicitly selected disposable SQL
+host and uses random test database names; it checks real creation/selection,
+connection reuse and removal for both normal and backtick-containing names.
+
+Native/source-copy, ASan/UBSan and LeakSanitizer checks pass. The live C check
+also passes against a private MariaDB 11.8.6 on a temporary loopback port, with
+no fixture databases remaining; the daemon and directory were removed. CI now
+includes these checks with its own MariaDB service. Full storage-backend suites,
+SQL literal escaping/modes and query-data logging still require review.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

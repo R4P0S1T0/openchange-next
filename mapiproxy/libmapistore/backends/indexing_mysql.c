@@ -835,8 +835,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_mysql_init(struct mapistore_con
 	MAPISTORE_RETVAL_IF(!ictx->data, MAPISTORE_ERR_NOT_INITIALIZED, ictx);
 
 	if (!table_exists(conn, INDEXING_TABLE)) {
-		OC_DEBUG(3, "Creating schema for indexing on mysql %s\n",
-			  connection_string);
+		OC_DEBUG(3, "Creating schema for indexing on MySQL");
 
 		schema_created_ret = migrate_indexing_schema(connection_string);
 		if (schema_created_ret) {
