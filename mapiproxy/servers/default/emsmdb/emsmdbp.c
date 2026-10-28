@@ -555,37 +555,34 @@ _PUBLIC_ int emsmdbp_source_key_from_fmid(TALLOC_CTX *mem_ctx, struct emsmdbp_co
    \return MAPI_E_SUCCESS or an error if something happens
  */
 _PUBLIC_ enum MAPISTATUS emsmdbp_fetch_organizational_units(TALLOC_CTX *mem_ctx,
-							    struct emsmdbp_context *emsmdbp_ctx,
-							    char **organization_name,
-							    char **group_name)
+	struct emsmdbp_context *emsmdbp_ctx, char **organization_name, char **group_name)
 {
-	char 		*exdn0, *exdn1;
-	const char 	*EssDN;
+	const char *dn, *group, *recipient;
+	char *organization = NULL, *unit = NULL;
 
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx, MAPI_E_NOT_INITIALIZED, NULL);
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx->szUserDN, MAPI_E_NOT_INITIALIZED, NULL);
-
-	EssDN = emsmdbp_ctx->szUserDN;
-	// EssDN has format: /o=organizacion name/ou=group name/cn=Recipients/cn=username
-
+	if (organization_name) *organization_name = NULL;
+	if (group_name) *group_name = NULL;
+	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx || !emsmdbp_ctx->szUserDN, MAPI_E_NOT_INITIALIZED, NULL);
+	if (!organization_name && !group_name) return MAPI_E_SUCCESS;
+	dn = emsmdbp_ctx->szUserDN;
+	OPENCHANGE_RETVAL_IF(strncmp(dn, "/o=", 3) != 0, MAPI_E_BAD_VALUE, NULL);
+	group = strstr(dn + 3, "/ou=");
+	OPENCHANGE_RETVAL_IF(group == NULL || group == dn + 3, MAPI_E_BAD_VALUE, NULL);
+	recipient = strstr(group + 4, "/cn=");
+	OPENCHANGE_RETVAL_IF(group_name && (recipient == NULL || recipient == group + 4), MAPI_E_BAD_VALUE, NULL);
 	if (organization_name) {
-		exdn0 = strstr(EssDN, "/o=");
-		OPENCHANGE_RETVAL_IF(!exdn0, MAPI_E_BAD_VALUE, NULL);
-		exdn1 = strstr(EssDN, "/ou=");
-		OPENCHANGE_RETVAL_IF(!exdn1, MAPI_E_BAD_VALUE, NULL);
-		*organization_name = talloc_strndup(mem_ctx, exdn0 + 3, exdn1 - exdn0 - 3);
-		OPENCHANGE_RETVAL_IF(!*organization_name, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+		organization = talloc_strndup(mem_ctx, dn + 3, group - dn - 3);
+		OPENCHANGE_RETVAL_IF(organization == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 	}
-
 	if (group_name) {
-		exdn0 = strstr(EssDN, "/ou=");
-		OPENCHANGE_RETVAL_IF(!exdn0, MAPI_E_BAD_VALUE, NULL);
-		exdn1 = strstr(EssDN, "/cn=");
-		OPENCHANGE_RETVAL_IF(!exdn1, MAPI_E_BAD_VALUE, NULL);
-		*group_name = talloc_strndup(mem_ctx, exdn0 + 4, exdn1 - exdn0 - 4);
-		OPENCHANGE_RETVAL_IF(!*group_name, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+		unit = talloc_strndup(mem_ctx, group + 4, recipient - group - 4);
+		if (unit == NULL) {
+			talloc_free(organization);
+			OPENCHANGE_RETVAL_ERR(MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+		}
 	}
-
+	if (organization_name) *organization_name = organization;
+	if (group_name) *group_name = unit;
 	return MAPI_E_SUCCESS;
 }
 
@@ -599,32 +596,32 @@ _PUBLIC_ enum MAPISTATUS emsmdbp_fetch_organizational_units(TALLOC_CTX *mem_ctx,
  */
 _PUBLIC_ enum MAPISTATUS emsmdbp_get_org_dn(struct emsmdbp_context *emsmdbp_ctx, struct ldb_dn **basedn)
 {
-	enum MAPISTATUS		retval;
-	int			ret;
-	struct ldb_result	*res = NULL;
-	char			*org_name;
+	enum MAPISTATUS retval;
+	struct ldb_result *res = NULL;
+	struct ldb_dn *config;
+	char *org_name, *encoded;
+	int ret;
 
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx, MAPI_E_NOT_INITIALIZED, NULL);
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx->samdb_ctx, MAPI_E_NOT_INITIALIZED, NULL);
 	OPENCHANGE_RETVAL_IF(!basedn, MAPI_E_INVALID_PARAMETER, NULL);
-
+	*basedn = NULL;
+	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx || !emsmdbp_ctx->samdb_ctx, MAPI_E_NOT_INITIALIZED, NULL);
+	config = ldb_get_config_basedn(emsmdbp_ctx->samdb_ctx);
+	OPENCHANGE_RETVAL_IF(config == NULL, MAPI_E_NOT_FOUND, NULL);
 	retval = emsmdbp_fetch_organizational_units(emsmdbp_ctx, emsmdbp_ctx, &org_name, NULL);
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, NULL);
-
-	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res,
-			 ldb_get_config_basedn(emsmdbp_ctx->samdb_ctx),
-                         LDB_SCOPE_SUBTREE, NULL,
-                         "(&(objectClass=msExchOrganizationContainer)(cn=%s))",
-                         ldb_binary_encode_string(emsmdbp_ctx, org_name));
+	encoded = ldb_binary_encode_string(emsmdbp_ctx, org_name);
 	talloc_free(org_name);
-
-	/* If the search failed */
-	if (ret != LDB_SUCCESS) {
-		OC_DEBUG(1, "emsmdbp_get_org_dn ldb_search failure.\n");
-		return MAPI_E_NOT_FOUND;
+	OPENCHANGE_RETVAL_IF(encoded == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res,
+		config, LDB_SCOPE_SUBTREE, NULL,
+		"(&(objectClass=msExchOrganizationContainer)(cn=%s))", encoded);
+	talloc_free(encoded);
+	if (ret != LDB_SUCCESS || res->count != 1) {
+		talloc_free(res);
+		OPENCHANGE_RETVAL_ERR(MAPI_E_NOT_FOUND, NULL);
 	}
-
-	*basedn = ldb_dn_new(emsmdbp_ctx, emsmdbp_ctx->samdb_ctx,
-			     ldb_msg_find_attr_as_string(res->msgs[0], "distinguishedName", NULL));
+	*basedn = ldb_dn_copy(emsmdbp_ctx, res->msgs[0]->dn);
+	talloc_free(res);
+	OPENCHANGE_RETVAL_IF(*basedn == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 	return MAPI_E_SUCCESS;
 }

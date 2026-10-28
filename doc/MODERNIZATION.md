@@ -559,6 +559,20 @@ records and 10,001 elements). Native/source-copy and ASan/UBSan checks pass,
 including the existing 8 Check tests; the complete default build also passes.
 This does not validate every binary property's declared-size semantics.
 
+## Organization directory lookup
+
+Organization/group parsing validates nonempty components in protocol order
+before subtracting pointers or allocating output strings. Invalid input and
+allocation failure leave both outputs empty. Organization lookup requires a
+configuration base DN and exactly one matching directory object, handles empty
+or duplicate results without indexing them, and copies the actual result DN
+instead of trusting an optional distinguishedName attribute.
+
+The EMSMDB backend harness exercises real LDB lookups for missing configuration,
+no result, a literal organization containing filter characters, duplicate results,
+malformed names and allocation failure. Native and ASan/UBSan checks pass; actual
+AD schema/provisioning remains untested.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

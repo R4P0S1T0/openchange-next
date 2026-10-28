@@ -160,6 +160,46 @@ static int add_user(struct ldb_context *db, const char *dn, const char *name,
     ret = ldb_add(db, msg); talloc_free(tmp); return ret;
 }
 
+static int organization_names(TALLOC_CTX *ctx, struct emsmdbp_context *backend)
+{
+    static const char * const invalid[] = {
+        "/ou=Group/o=Org/cn=User", "/o=/ou=Group/cn=User",
+        "/o=Org/ou=/cn=User", "/o=Org/cn=User/ou=Group", "/o=Org/ou=Group"
+    };
+    char *saved = backend->szUserDN, *organization, *group;
+    struct ldb_context *db = backend->samdb_ctx;
+    struct ldb_dn *base = ldb_dn_new(db, db, "CN=Configuration,DC=test"), *result;
+    struct ldb_message *message;
+    TALLOC_CTX *limited;
+    backend->szUserDN = "/o=Org (Ops)*/ou=Group/cn=Recipients/cn=test";
+    CHECK(emsmdbp_get_org_dn(backend, &result) == MAPI_E_NOT_FOUND && result == NULL);
+    CHECK(base && ldb_set_opaque(db, "configurationNamingContext", base) == LDB_SUCCESS);
+    CHECK(emsmdbp_fetch_organizational_units(ctx, backend, &organization, &group) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(organization, "Org (Ops)*") && !strcmp(group, "Group"));
+    talloc_free(organization); talloc_free(group);
+    CHECK(emsmdbp_get_org_dn(backend, &result) == MAPI_E_NOT_FOUND && result == NULL);
+    message = ldb_msg_new(ctx); CHECK(message);
+    message->dn = ldb_dn_new(message, db, "CN=org,CN=Configuration,DC=test");
+    CHECK(message->dn && ldb_msg_add_string(message, "objectClass", "msExchOrganizationContainer") == 0);
+    CHECK(ldb_msg_add_string(message, "cn", "Org (Ops)*") == 0 && ldb_add(db, message) == LDB_SUCCESS);
+    CHECK(emsmdbp_get_org_dn(backend, &result) == MAPI_E_SUCCESS);
+    CHECK(ldb_dn_compare(result, message->dn) == 0 && talloc_parent(result) == backend); talloc_free(result);
+    message->dn = ldb_dn_new(message, db, "CN=duplicate,CN=Configuration,DC=test");
+    CHECK(message->dn && ldb_add(db, message) == LDB_SUCCESS);
+    CHECK(emsmdbp_get_org_dn(backend, &result) == MAPI_E_NOT_FOUND && result == NULL);
+    talloc_free(message);
+    limited = talloc_new(ctx); CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+    CHECK(emsmdbp_fetch_organizational_units(limited, backend, &organization, &group) == MAPI_E_NOT_ENOUGH_MEMORY);
+    CHECK(organization == NULL && group == NULL); talloc_free(limited);
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        backend->szUserDN = discard_const(invalid[i]);
+        CHECK(emsmdbp_fetch_organizational_units(ctx, backend, &organization, &group) == MAPI_E_BAD_VALUE);
+        CHECK(organization == NULL && group == NULL);
+    }
+    backend->szUserDN = saved;
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL), *owner;
@@ -185,6 +225,7 @@ int main(void)
     failure = FAIL_NONE;
     first = emsmdbp_init(lp, "test", NULL); second = emsmdbp_init(lp, "test", NULL);
     CHECK(first && second && first->samdb_ctx != second->samdb_ctx);
+    CHECK(organization_names(ctx, first) == 0);
     CHECK(first->mem_ctx == first && talloc_parent(first->samdb_ctx) == first);
     CHECK(add_user(first->samdb_ctx, "CN=test,DC=test", "test", "/o=Org/cn=test", "0") == LDB_SUCCESS);
     CHECK(add_user(first->samdb_ctx, "CN=other,DC=test", "other", "/o=Org/cn=other", "0") == LDB_SUCCESS);
