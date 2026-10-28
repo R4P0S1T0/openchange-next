@@ -213,6 +213,59 @@ static int named_property_checks(void)
     return 0;
 }
 
+static int named_property_read_checks(TALLOC_CTX *ctx)
+{
+    struct namedprops_context backend = { .data = (MYSQL *)1 };
+    struct MAPINAMEID *name = (void *)1;
+    const char *guid = "00112233-4455-6677-8899-aabbccddeeff";
+    TALLOC_CTX *limited;
+    uint16_t type = 7;
+    size_t blocks = talloc_total_blocks(ctx);
+    char oversized[128]; memset(oversized, 'a', sizeof(oversized) - 1); oversized[127] = 0;
+    result_fields = 4;
+    result_values[0][0] = "1"; result_values[0][1] = (char *)guid;
+    result_values[0][2] = "caf\xc3\xa9"; result_values[0][3] = NULL;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_SUCCESS);
+    CHECK(name && name->ulKind == MNID_STRING && name->kind.lpwstr.NameSize == 10);
+    CHECK(!strcmp(name->kind.lpwstr.Name, "caf\xc3\xa9") && talloc_parent(name) == ctx);
+    CHECK(talloc_parent(name->kind.lpwstr.Name) == name); talloc_free(name);
+    result_values[0][2] = "\xf0\x9f\x98\x80";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_SUCCESS);
+    CHECK(name->kind.lpwstr.NameSize == 6); talloc_free(name);
+    result_values[0][2] = oversized;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][2] = "\xff";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][2] = NULL;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][2] = "valid"; result_values[0][1] = "bad-guid";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][1] = (char *)guid; result_values[0][0] = "99";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][0] = "0"; result_values[0][3] = "4294967295";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_SUCCESS && name->kind.lid == UINT32_MAX);
+    talloc_free(name); result_values[0][3] = "4294967296";
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_INVALID_DATA && !name);
+    result_values[0][0] = "1"; fail_result_copy = true;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_NO_MEMORY && !name);
+    fail_result_copy = false; fail_fetch = true;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_DATABASE_OPS && !name);
+    fail_fetch = false; fail_store = true;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_DATABASE_OPS && !name);
+    fail_store = false; result_rows_count = 0;
+    CHECK(get_nameid(&backend, 32769, ctx, &name) == MAPISTORE_ERR_NOT_FOUND && !name);
+    result_rows_count = 1;
+    limited = talloc_new(ctx); CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+    CHECK(get_nameid(&backend, 32769, limited, &name) == MAPISTORE_ERR_NO_MEMORY && !name);
+    talloc_free(limited);
+    result_fields = 1; result_values[0][0] = "31";
+    CHECK(get_nameid_type(&backend, 32769, &type) == MAPISTORE_SUCCESS && type == 31);
+    result_values[0][0] = "65536";
+    CHECK(get_nameid_type(&backend, 32769, &type) == MAPISTORE_ERR_DATABASE_OPS && type == 31);
+    CHECK(talloc_total_blocks(ctx) == blocks && acquired == released);
+    return 0;
+}
+
 static int diagnostic_checks(void)
 {
     MYSQL *connection = (MYSQL *)1;
@@ -302,6 +355,7 @@ int main(void)
     CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
     CHECK(result_checks(ctx) == 0);
     CHECK(named_property_checks() == 0);
+    CHECK(named_property_read_checks(ctx) == 0);
     CHECK(diagnostic_checks() == 0);
     talloc_free(ctx);
     puts("MySQL URI/pool failures, escaping, row ownership/shapes, numeric bounds and named property queries: OK");

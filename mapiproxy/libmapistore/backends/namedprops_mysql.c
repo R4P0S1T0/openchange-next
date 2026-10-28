@@ -30,6 +30,7 @@
 #include <mysql/mysql.h>
 #include <mysql/mysqld_error.h>
 #include <ldb.h>
+#include "libmapi/libmapi_private.h"
 
 
 static enum mapistore_error get_mapped_id(struct namedprops_context *self,
@@ -171,72 +172,80 @@ static enum mapistore_error get_nameid(struct namedprops_context *self,
 				       TALLOC_CTX *mem_ctx,
 				       struct MAPINAMEID **nameidp)
 {
-	TALLOC_CTX *local_mem_ctx = talloc_zero(NULL, TALLOC_CTX);
-	MYSQL *conn = self->data;
-	const char *sql = talloc_asprintf(local_mem_ctx,
-		"SELECT type, oleguid, propName, propId FROM "NAMEDPROPS_MYSQL_TABLE" "
-		"WHERE mappedId=%d", mapped_id);
-	if (mysql_query(conn, sql) != 0) {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_DATABASE_OPS,
-				    local_mem_ctx);
-	}
-	MYSQL_RES *res = mysql_store_result(conn);
-	if (mysql_num_rows(res) == 0) {
-		// Not found
-		mysql_free_result(res);
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_NOT_FOUND,
-				    local_mem_ctx);
-	}
-	MYSQL_ROW row = mysql_fetch_row(res);
+	TALLOC_CTX *tmp;
+	MYSQL_RES *res = NULL;
+	MYSQL_ROW row;
+	struct MAPINAMEID *nameid = NULL;
+	char *sql;
+	uint64_t type, id;
+	size_t name_size;
+	enum MYSQLRESULT result;
+	enum mapistore_error status = MAPISTORE_ERR_DATABASE_OPS;
 
-	enum mapistore_error ret = MAPISTORE_SUCCESS;
-	struct MAPINAMEID *nameid = talloc_zero(mem_ctx, struct MAPINAMEID);
-	const char *guid = row[1];
-	GUID_from_string(guid, &nameid->lpguid);
-	int type = strtol(row[0], NULL, 10);
+	MAPISTORE_RETVAL_IF(!nameidp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	*nameidp = NULL;
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	tmp = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!tmp, MAPISTORE_ERR_NO_MEMORY, NULL);
+	sql = talloc_asprintf(tmp,
+		"SELECT type, oleguid, propName, propId FROM "NAMEDPROPS_MYSQL_TABLE" "
+		"WHERE mappedId=%u", mapped_id);
+	if (!sql) { status = MAPISTORE_ERR_NO_MEMORY; goto end; }
+	result = select_without_fetch(self->data, sql, &res);
+	if (result == MYSQL_NOT_FOUND) { status = MAPISTORE_ERR_NOT_FOUND; goto end; }
+	if (result != MYSQL_SUCCESS || mysql_field_count(self->data) != 4) goto end;
+	row = mysql_fetch_row(res);
+	if (!row) goto end;
+	status = MAPISTORE_ERR_INVALID_DATA;
+	if (!convert_string_to_ull(row[0], &type) || type > MNID_STRING || !row[1]) goto end;
+	nameid = talloc_zero(mem_ctx, struct MAPINAMEID);
+	if (!nameid) { status = MAPISTORE_ERR_NO_MEMORY; goto end; }
+	if (!NT_STATUS_IS_OK(GUID_from_string(row[1], &nameid->lpguid))) goto end;
 	nameid->ulKind = type;
 	if (type == MNID_ID) {
-		nameid->kind.lid = strtol(row[3], NULL, 10);
-	} else if (type == MNID_STRING) {
-		const char *propName = row[2];
-		nameid->kind.lpwstr.NameSize = strlen(propName) * 2 + 2;//FIXME WHY *2+2 and not just +1?
-		nameid->kind.lpwstr.Name = talloc_strdup(nameid, propName);
+		if (!convert_string_to_ull(row[3], &id) || id > UINT32_MAX) goto end;
+		nameid->kind.lid = id;
 	} else {
-		nameid = NULL;
-		ret = MAPISTORE_ERROR;
+		if (!row[2]) goto end;
+		name_size = get_utf8_utf16_conv_length(row[2]);
+		if (name_size > UINT8_MAX) goto end;
+		nameid->kind.lpwstr.NameSize = name_size;
+		nameid->kind.lpwstr.Name = talloc_strdup(nameid, row[2]);
+		if (!nameid->kind.lpwstr.Name) { status = MAPISTORE_ERR_NO_MEMORY; goto end; }
 	}
-
 	*nameidp = nameid;
-
-	mysql_free_result(res);
-	talloc_free(local_mem_ctx);
-
-	return ret;
+	nameid = NULL;
+	status = MAPISTORE_SUCCESS;
+end:
+	if (res) mysql_free_result(res);
+	talloc_free(nameid);
+	talloc_free(tmp);
+	if (status != MAPISTORE_SUCCESS) mapistore_set_errno(status);
+	return status;
 }
 
 static enum mapistore_error get_nameid_type(struct namedprops_context *self,
 					    uint16_t mapped_id,
 					    uint16_t *prop_type)
 {
-	TALLOC_CTX *mem_ctx = talloc_zero(NULL, TALLOC_CTX);
-	MYSQL *conn = self->data;
-	const char *sql = talloc_asprintf(mem_ctx,
-		//FIXME mappedId or propId? mappedId is not unique
-		"SELECT propType FROM "NAMEDPROPS_MYSQL_TABLE" WHERE mappedId=%d",
-		mapped_id);
-	if (mysql_query(conn, sql) != 0) {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
-	}
-	MYSQL_RES *res = mysql_store_result(conn);
-	if (mysql_num_rows(res) == 0) {
-		// Not found
-		mysql_free_result(res);
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_NOT_FOUND, mem_ctx);
-	}
-	MYSQL_ROW row = mysql_fetch_row(res);
-	*prop_type = strtol(row[0], NULL, 10);
-	mysql_free_result(res);
-	talloc_free(mem_ctx);
+	TALLOC_CTX *tmp;
+	char *sql;
+	uint64_t type;
+	enum MYSQLRESULT result;
+
+	MAPISTORE_RETVAL_IF(!self || !self->data || !prop_type,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	tmp = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!tmp, MAPISTORE_ERR_NO_MEMORY, NULL);
+	sql = talloc_asprintf(tmp,
+		"SELECT propType FROM "NAMEDPROPS_MYSQL_TABLE" WHERE mappedId=%u", mapped_id);
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, tmp);
+	result = select_first_uint(self->data, sql, &type);
+	talloc_free(tmp);
+	MAPISTORE_RETVAL_IF(result == MYSQL_NOT_FOUND, MAPISTORE_ERR_NOT_FOUND, NULL);
+	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS || type > UINT16_MAX,
+		MAPISTORE_ERR_DATABASE_OPS, NULL);
+	*prop_type = type;
 	return MAPISTORE_SUCCESS;
 }
 

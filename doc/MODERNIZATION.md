@@ -760,7 +760,7 @@ Unicode, numeric property IDs, and a literal injection-shaped missing name.
 Its real row/scalar checks also verify the repaired result shapes and integer
 limits. Fixture databases and the private server directory are removed.
 
-Reverse named-property decoding, ID allocation/concurrency and the remaining
+ID allocation/concurrency and the remaining
 storage operations still need review; this is not full backend qualification.
 The preceding literal-encoding commit `87844f3c` passed all four
 [GitHub CI jobs](https://github.com/R4P0S1T0/openchange-next/actions/runs/40734736817).
@@ -781,6 +781,25 @@ It also injects both initial and final clock-read failures. Native and
 ASan/UBSan/LeakSanitizer checks pass; both full build trees and the private real
 SQL check pass. This change does not establish a repository-wide logging or
 data-retention policy; other storage/debug output still requires review.
+
+## Named property reverse decoding
+
+The MySQL reverse lookup now validates result/row presence, column count, kind,
+GUID and 32-bit numeric property ID before publishing output. Driver results and
+partially allocated names are released on every failure. Names and strings are
+owned by the caller's context; allocation failures leave a null output. Property
+type reads use the checked scalar helper and reject values outside 16 bits.
+
+String property names use the project's UTF-8-to-UTF-16 length helper instead of
+`strlen * 2 + 2`. Their encoded size must fit the one-byte protocol field before
+assignment. Focused tests cover accented text, surrogate pairs, oversized names,
+malformed values, failed result/copy/fetch operations and constrained output
+allocation. Native and ASan/UBSan/LeakSanitizer checks pass, along with both full
+build trees. The real private SQL test now verifies reverse names, GUIDs, numeric
+property IDs, property types and independently recorded UTF-16 sizes after a
+forced reconnect. The private server and all fixture data are removed afterward.
+The LDB named-property backend and broader protocol semantics remain separate
+review work.
 
 ## Remaining blockers
 

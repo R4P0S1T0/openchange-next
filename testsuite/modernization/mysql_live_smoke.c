@@ -49,12 +49,14 @@ static bool literals_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
     return true;
 }
 
-static bool named_properties_roundtrip(MYSQL *connection)
+static bool named_properties_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
 {
     struct namedprops_context backend = { .data = connection };
     struct MAPINAMEID name = { .ulKind = MNID_STRING };
     const char *values[] = {"name'", "backslash\\' OR 1=1 --", "caf\xc3\xa9", "emoji \xf0\x9f\x98\x80"};
-    uint16_t mapped;
+    const unsigned sizes[] = {12, 44, 10, 18};
+    uint16_t mapped, type;
+    struct MAPINAMEID *decoded;
     name.lpguid = GUID_random();
     if (mysql_query(connection, "CREATE TABLE named_properties (`type` INT, propType INT, "
         "oleguid VARCHAR(36), mappedId INT UNSIGNED, propId BIGINT UNSIGNED, propName TEXT) "
@@ -63,12 +65,24 @@ static bool named_properties_roundtrip(MYSQL *connection)
         name.kind.lpwstr.Name = values[j];
         if (create_id(&backend, name, 32768 + j) != MAPISTORE_SUCCESS ||
             get_mapped_id(&backend, name, &mapped) != MAPISTORE_SUCCESS || mapped != 32768 + j) return false;
+        if (get_nameid(&backend, mapped, ctx, &decoded) != MAPISTORE_SUCCESS) return false;
+        if (decoded->ulKind != MNID_STRING || !GUID_equal(&name.lpguid, &decoded->lpguid) ||
+            strcmp(decoded->kind.lpwstr.Name, values[j]) || decoded->kind.lpwstr.NameSize != sizes[j]) {
+            talloc_free(decoded); return false;
+        }
+        talloc_free(decoded);
+        if (get_nameid_type(&backend, mapped, &type) != MAPISTORE_SUCCESS || type != PT_NULL) return false;
     }
     name.kind.lpwstr.Name = "missing' OR 1=1 --";
     if (get_mapped_id(&backend, name, &mapped) != MAPISTORE_ERR_NOT_FOUND) return false;
     name.ulKind = MNID_ID; name.kind.lid = UINT32_MAX;
-    return create_id(&backend, name, 65534) == MAPISTORE_SUCCESS &&
-        get_mapped_id(&backend, name, &mapped) == MAPISTORE_SUCCESS && mapped == 65534;
+    if (create_id(&backend, name, 65534) != MAPISTORE_SUCCESS ||
+        get_mapped_id(&backend, name, &mapped) != MAPISTORE_SUCCESS || mapped != 65534 ||
+        get_nameid(&backend, mapped, ctx, &decoded) != MAPISTORE_SUCCESS) return false;
+    bool valid = decoded->ulKind == MNID_ID && decoded->kind.lid == UINT32_MAX &&
+        GUID_equal(&name.lpguid, &decoded->lpguid);
+    talloc_free(decoded);
+    return valid;
 }
 
 static bool result_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
@@ -128,7 +142,7 @@ int main(void)
             !scalar_equals(connection, "SELECT @@SESSION.sql_mode NOT LIKE '%NO_BACKSLASH_ESCAPES%'", "1") ||
             !scalar_equals(connection, "SELECT @@character_set_connection", "utf8mb4") ||
             !scalar_equals(connection, "SELECT DATABASE()", name) ||
-            !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(connection) ||
+            !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(ctx, connection) ||
             !result_roundtrip(ctx, connection)) FAIL();
         quoted = mysql_quote_dbname(ctx, name);
         drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE %s", quoted) : NULL;
