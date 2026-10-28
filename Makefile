@@ -123,19 +123,19 @@ gen_ndr/%.h: %.idl | gen_ndr
 	@echo "Generating $@"
 	@$(PIDL) --outputdir=gen_ndr --header -- $<
 
-%.o: %.c libmapi/mapidefs.h | idl libmapi/version.h
+%.o: %.c libmapi/mapidefs.h libmapi/version.h | idl
 	@echo "Compiling $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-%.po: %.c libmapi/mapidefs.h | idl libmapi/version.h
+%.po: %.c libmapi/mapidefs.h libmapi/version.h | idl
 	@echo "Compiling $< with -fPIC"
 	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fPIC -c $< -o $@
 
-%.o: %.cpp | idl libmapi/version.h
+%.o: %.cpp libmapi/version.h | idl
 	@echo "Compiling $< with -fPIC"
 	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) $(QT4_CXXFLAGS) -fPIC -c $< -o $@
 
-%.po: %.cpp | idl libmapi/version.h
+%.po: %.cpp libmapi/version.h | idl
 	@echo "Compiling $< with -fPIC"
 	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -fPIC -c $< -o $@
 
@@ -343,7 +343,20 @@ libmapi.$(SHLIBEXT).$(PACKAGE_VERSION): 		\
 libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION): libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	ln -fs $< $@
 
-libmapi/version.h: VERSION
+# Git HEAD and the active branch ref change independently (including worktrees).
+VERSION_GIT_DIR := $(shell test -e .git && git rev-parse --absolute-git-dir 2>/dev/null)
+ifneq ($(VERSION_GIT_DIR),)
+VERSION_GIT_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
+VERSION_GIT_COMMON_DIR := $(shell git rev-parse --git-common-dir 2>/dev/null)
+version_empty :=
+version_space := $(version_empty) $(version_empty)
+version_existing_path = $(subst $(version_space),\$(version_space),$(wildcard $(subst $(version_space),\$(version_space),$(1))))
+VERSION_GIT_DEPS := $(call version_existing_path,$(VERSION_GIT_DIR)/HEAD) \
+	$(if $(VERSION_GIT_REF),$(call version_existing_path,$(VERSION_GIT_COMMON_DIR)/$(VERSION_GIT_REF))) \
+	$(call version_existing_path,$(VERSION_GIT_COMMON_DIR)/packed-refs)
+endif
+
+libmapi/version.h: VERSION script/mkversion.sh $(VERSION_GIT_DEPS)
 	@./script/mkversion.sh VERSION libmapi/version.h $(PACKAGE_VERSION) $(top_builddir)/
 
 libmapi/emsmdb.c: libmapi/emsmdb.h gen_ndr/ndr_exchange_c.h gen_ndr/ndr_asyncemsmdb_c.h

@@ -10,7 +10,7 @@ coverage. The milestone is **not ready** as of 2026-10-28.
 | Acceptance criterion | Current evidence / remaining work |
 | --- | --- |
 | Build the required server, plugins and storage components from source on a selected, patched OS | Default `make -j2 all` passes from a source-only copy, including libraries, RPC modules, plugins, default servers and clients; patched deployment baseline and storage installation remain pending |
-| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); complete server suites and current-environment Python socket checks remain pending |
+| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); 30 Python tooling/socket and 25 runtime checks pass with disposable SQL. Complete C/server integration suites remain pending |
 | Review and test exposed input and authentication boundaries | RPC state isolation, cancellation and pack validation covered; remaining NDR allocation/length handling, default servers, directory/database inputs and cache paths still need review |
 | Resolve or explicitly assess security findings affecting the test configuration | Focused fixes have regression tests; repository-wide review and dependency CVE assessment are incomplete |
 | Prepare reproducible installation, configuration, startup/health checks and teardown for a disposable instance | Pending; no deployment to the user's server has been attempted |

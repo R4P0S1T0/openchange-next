@@ -27,9 +27,10 @@ Validated locally with Debian 13, GCC 14.2.0, Autoconf 2.72, Automake/aclocal
 - `make check-libmapi-modernization` passes: request/reply NDR round trips,
   malformed array rejection, restriction union switches, and the **8 existing
   Check tests** for libmapi properties and IDSETs.
-- The last full Python validation (2026-10-27) passed **22 Python tooling/socket
-  tests** and **25 Python runtime tests**. Five socket tests encounter permission
-  restrictions in the current sandbox and are not reported as passing here.
+- The current Python validation (2026-10-28) passes **30 Python tooling/socket
+  tests** and **25 Python runtime tests**. Socket tests were run outside the
+  restricted sandbox; SQL used a fresh private MariaDB directory and a UNIX
+  socket with TCP disabled. The daemon was stopped and its data removed.
   Runtime tests exercise disposable LDB files, real SQL schema upgrades and
   rollbacks, Unicode LDIF, failed-import rollback, and administration CLI help.
 - Incremental `make -q libmapi` succeeds without rebuilding generated protocols.
@@ -627,6 +628,21 @@ argv checks with spaces and shell metacharacters in the private root path.
 Native/source-copy and ASan/UBSan checks pass. This changes the experimental cache
 file layout: an enabled recovery test must start with a fresh disposable cache;
 old cache records are not migrated or deleted automatically.
+
+## Build version provenance
+
+The version header depends on Git HEAD and the active branch reference, including
+linked worktrees. C/C++ objects depend normally on that header, so moving to a
+new commit updates the version compiled into binaries. Unchanged generated
+content preserves its timestamp. The generator reads the source checkout's Git
+metadata, handles quoted paths and emits escaped string macros; an archive nested
+inside another repository no longer inherits its parent's hash.
+
+Eight temporary-repository tests exercise source selection, archives, branches,
+detached worktrees, unchanged timestamps, quoting, missing input and the actual
+Make rules. The full native build passes in the checkout and source-only copy;
+`make -q libmapi` is quiet after the build. Source archives intentionally omit a
+Git revision; build/release records must identify their source commit separately.
 
 ## Remaining blockers
 

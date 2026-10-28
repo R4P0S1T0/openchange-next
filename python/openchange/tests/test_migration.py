@@ -19,7 +19,7 @@
 """
 OpenChangeDB migration framework functional tests.
 
-It requires having a MySQL daemon running where smb.conf says
+SQL tests require an explicitly selected disposable endpoint via OPENCHANGE_TEST_MYSQL_SOCKET or OPENCHANGE_TEST_MYSQL_HOST.
 """
 from datetime import datetime
 import os
