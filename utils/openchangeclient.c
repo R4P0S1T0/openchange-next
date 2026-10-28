@@ -829,7 +829,7 @@ static enum MAPISTATUS openchangeclient_sendmail(TALLOC_CTX *mem_ctx,
 
 	SPropValue.ulPropTag = PR_SEND_INTERNET_ENCODING;
 	SPropValue.value.l = 0;
-	SRowSet_propcpy(mem_ctx, SRowSet, SPropValue);
+	if (SRowSet_propcpy(mem_ctx, SRowSet, SPropValue)) return GetLastError();
 
 	/* ModifyRecipients operation */
 	retval = ModifyRecipients(&obj_message, SRowSet);

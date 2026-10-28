@@ -676,7 +676,7 @@ _PUBLIC_ enum MAPISTATUS ocpf_set_Recipients(TALLOC_CTX *mem_ctx,
 	/* Step3. Finish to build the ModifyRecipients SRowSet */
 	SPropValue.ulPropTag = PR_SEND_INTERNET_ENCODING;
 	SPropValue.value.l = 0;
-	SRowSet_propcpy(mem_ctx, SRowSet, SPropValue);
+	if (SRowSet_propcpy(mem_ctx, SRowSet, SPropValue)) return GetLastError();
 
 	/* Step4. Call ModifyRecipients */
 	retval = ModifyRecipients(obj_message, SRowSet);

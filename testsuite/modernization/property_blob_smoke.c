@@ -160,10 +160,47 @@ static int growth(TALLOC_CTX *ctx)
     return 0;
 }
 
+static int deletion_and_copy(TALLOC_CTX *ctx)
+{
+    TALLOC_CTX *owner = talloc_new(ctx), *copy_owner = talloc_new(ctx);
+    enum MAPITAGS *items = talloc_array(owner, enum MAPITAGS, 4);
+    enum MAPITAGS expected[] = {PR_DISPLAY_NAME, PR_ACCOUNT, PR_DISPLAY_NAME, PR_BODY};
+    struct SPropTagArray tags = { .cValues = 4, .aulPropTag = items };
+    struct SRowSet rows = { .cRows = 2 };
+    struct SPropValue value = { .ulPropTag = PR_DISPLAY_NAME, .value.lpszA = "literal string" };
+    struct SPropValue *old[2];
+    CHECK(owner && copy_owner && items);
+    memcpy(items, expected, sizeof(expected));
+    CHECK(talloc_set_memlimit(owner, 1) == 0);
+    CHECK(SPropTagArray_delete(owner, &tags, PR_SUBJECT) == MAPI_E_SUCCESS);
+    CHECK(tags.cValues == 4 && tags.aulPropTag == items && !memcmp(items, expected, sizeof(expected)));
+    CHECK(SPropTagArray_delete(owner, &tags, PR_DISPLAY_NAME) == MAPI_E_SUCCESS);
+    CHECK(tags.cValues == 2 && tags.aulPropTag == items && items[0] == PR_ACCOUNT && items[1] == PR_BODY && items[2] == 0);
+    CHECK(SPropTagArray_delete(owner, &tags, PR_ACCOUNT) == MAPI_E_SUCCESS);
+    CHECK(SPropTagArray_delete(owner, &tags, PR_BODY) == MAPI_E_SUCCESS && tags.cValues == 0 && items[0] == 0);
+    tags.cValues = 1; tags.aulPropTag = NULL;
+    CHECK(SPropTagArray_delete(owner, &tags, PR_BODY) == MAPI_E_INVALID_PARAMETER);
+    rows.aRow = talloc_zero_array(copy_owner, struct SRow, 2); CHECK(rows.aRow);
+    CHECK(SRowSet_propcpy(copy_owner, &rows, value) == 0);
+    CHECK(rows.aRow[0].cValues == 1 && rows.aRow[1].cValues == 1);
+    CHECK(rows.aRow[0].lpProps[0].value.lpszA == value.value.lpszA && !strcmp(rows.aRow[1].lpProps[0].value.lpszA, "literal string"));
+    /* Row-set copy appends even when the same tag already exists. */
+    CHECK(SRowSet_propcpy(copy_owner, &rows, value) == 0 && rows.aRow[0].cValues == 2 && rows.aRow[1].cValues == 2);
+    old[0] = rows.aRow[0].lpProps; old[1] = rows.aRow[1].lpProps;
+    CHECK(talloc_set_memlimit(copy_owner, 1) == 0);
+    CHECK(SRowSet_propcpy(copy_owner, &rows, value) == 1 && GetLastError() == MAPI_E_NOT_ENOUGH_MEMORY);
+    CHECK(rows.aRow[0].cValues == 2 && rows.aRow[1].cValues == 2 && rows.aRow[0].lpProps == old[0] && rows.aRow[1].lpProps == old[1]);
+    rows.aRow[0].cValues = UINT32_MAX;
+    CHECK(SRowSet_propcpy(copy_owner, &rows, value) == 1 && GetLastError() == MAPI_E_INVALID_PARAMETER);
+    CHECK(SRowSet_propcpy(copy_owner, NULL, value) == 1 && GetLastError() == MAPI_E_INVALID_PARAMETER);
+    talloc_free(owner); talloc_free(copy_owner);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
-    CHECK(ctx && values(ctx) == 0 && rows(ctx) == 0 && growth(ctx) == 0);
+    CHECK(ctx && values(ctx) == 0 && rows(ctx) == 0 && growth(ctx) == 0 && deletion_and_copy(ctx) == 0);
     {
         TALLOC_CTX *limited = talloc_new(ctx);
         uint8_t bytes[] = {1, 2, 3, 4};

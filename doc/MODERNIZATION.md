@@ -56,9 +56,17 @@ Validated locally with Debian 13, GCC 14.2.0, Autoconf 2.72, Automake/aclocal
   passes the native checks, and its library loads successfully. Generated files
   from the working tree were not copied into that validation build.
 
-CI is configured for the native library on Debian 13, Python tooling on 3.11
-and 3.13, and runtime tests with distribution Samba bindings and a MariaDB 11.8
-service. The workflow has not been run on GitHub in this session.
+CI covers the native build on Debian 13, Python tooling on 3.11 and 3.13,
+and runtime tests with distribution Samba bindings and a MariaDB 11.8 service.
+All four jobs passed for commit ee10e26e in
+[GitHub Actions run 40725147679](https://github.com/R4P0S1T0/openchange-next/actions/runs/40725147679).
+Later commits need their own reviewed workflow results.
+
+The complete focused native check set also passes locally with AddressSanitizer,
+UndefinedBehaviorSanitizer and LeakSanitizer outside the sandbox. Earlier
+per-block notes below record the initial detect_leaks=0 runs; the current
+out-of-sandbox run closes that local leak-check restriction for these harnesses,
+not for live server workloads.
 
 ## What changed
 
@@ -650,6 +658,23 @@ detached worktrees, unchanged timestamps, quoting, missing input and the actual
 Make rules. The full native build passes in the checkout and source-only copy;
 `make -q libmapi` is quiet after the build. Source archives intentionally omit a
 Git revision; build/release records must identify their source commit separately.
+
+## Property list copying and deletion
+
+SRow_addprop and SRowSet_propcpy share checked append logic. Row-set copies now
+copy the actual property value, preserving string pointers instead of pointing
+into the temporary by-value union. Growth failure preserves the affected row's
+pointer/count, returns an error and sets GetLastError. Both recipient callers
+stop before ModifyRecipients if copying fails. Existing row-set append semantics
+(including duplicate tags) remain; earlier rows can already be updated if a later
+row fails.
+
+Tag deletion compacts its existing allocation and does not realloc or write past
+an exact-sized array when no tag matches. Tests cover deletion under a real
+allocation limit, duplicate/removing-all/missing tags, string row-set copies,
+append semantics, overflow and allocation failure. Native/source-copy, ASan,
+UBSan and LeakSanitizer checks pass, and the offline client suite still reports
+30 successes and its one known expected LZXpress failure.
 
 ## Remaining blockers
 

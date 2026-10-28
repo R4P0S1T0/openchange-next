@@ -128,7 +128,7 @@ _PUBLIC_ enum MAPISTATUS SPropTagArray_delete(TALLOC_CTX *mem_ctx,
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!mem_ctx, MAPI_E_NOT_INITIALIZED, NULL);
 	OPENCHANGE_RETVAL_IF(!SPropTagArray, MAPI_E_INVALID_PARAMETER, NULL);
-	OPENCHANGE_RETVAL_IF(!SPropTagArray->cValues, MAPI_E_INVALID_PARAMETER, NULL);
+	OPENCHANGE_RETVAL_IF(!SPropTagArray->cValues || !SPropTagArray->aulPropTag, MAPI_E_INVALID_PARAMETER, NULL);
 
 	for (i = 0; i < SPropTagArray->cValues; i++) {
 		if (SPropTagArray->aulPropTag[i] == aulPropTag) {
@@ -139,10 +139,11 @@ _PUBLIC_ enum MAPISTATUS SPropTagArray_delete(TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	SPropTagArray->cValues -= removed;
-	SPropTagArray->aulPropTag = (enum MAPITAGS *) talloc_realloc(mem_ctx, SPropTagArray->aulPropTag,
-								     uint32_t, SPropTagArray->cValues + 1);
-	SPropTagArray->aulPropTag[SPropTagArray->cValues] = (enum MAPITAGS) 0;
+	/* Compaction keeps the allocation intact, including when no tag matches. */
+	if (removed != 0) {
+		SPropTagArray->cValues -= removed;
+		SPropTagArray->aulPropTag[SPropTagArray->cValues] = (enum MAPITAGS)0;
+	}
 
 	return MAPI_E_SUCCESS;
 }
@@ -1108,6 +1109,22 @@ _PUBLIC_ uint32_t cast_SPropValue(TALLOC_CTX *mem_ctx,
 }
 
 
+static enum MAPISTATUS property_row_append(TALLOC_CTX *mem_ctx, struct SRow *row,
+	struct SPropValue value)
+{
+	struct SPropValue *grown;
+	OPENCHANGE_RETVAL_IF(row == NULL || row->cValues == UINT32_MAX ||
+		(row->cValues && row->lpProps == NULL), MAPI_E_INVALID_PARAMETER, NULL);
+	grown = talloc_realloc(mem_ctx, row->lpProps, struct SPropValue, row->cValues + 1);
+	OPENCHANGE_RETVAL_IF(grown == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	/* Nested property data is borrowed, as in the replacement path. */
+	grown[row->cValues] = value;
+	grown[row->cValues].dwAlignPad = 0;
+	row->lpProps = grown;
+	row->cValues++;
+	return MAPI_E_SUCCESS;
+}
+
 /**
    \details add a SPropValue structure to a SRow array
 
@@ -1121,10 +1138,6 @@ _PUBLIC_ uint32_t cast_SPropValue(TALLOC_CTX *mem_ctx,
  */
 _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue spropvalue)
 {
-	TALLOC_CTX		*mem_ctx;
-	uint32_t		cValues;
-	struct SPropValue	lpProp = {0};
-	struct SPropValue	*grown;
 	uint32_t		i;
 	
 	/* Sanity checks */
@@ -1132,7 +1145,6 @@ _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue sprop
 	OPENCHANGE_RETVAL_IF((aRow->cValues && aRow->lpProps == NULL) ||
 			     aRow->cValues == UINT32_MAX, MAPI_E_INVALID_PARAMETER, NULL);
 
-	mem_ctx = (TALLOC_CTX *) aRow;
 
 	/* If the property tag already exist, overwrite its value */
 	for (i = 0; i < aRow->cValues; i++) {
@@ -1142,17 +1154,7 @@ _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue sprop
 		}
 	}
 
-	cValues = aRow->cValues + 1;
-	grown = talloc_realloc(mem_ctx, aRow->lpProps, struct SPropValue, cValues);
-	OPENCHANGE_RETVAL_IF(grown == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
-	aRow->lpProps = grown;
-	lpProp.ulPropTag = spropvalue.ulPropTag;
-	lpProp.dwAlignPad = 0;
-	set_SPropValue(&(lpProp), get_SPropValue_data(&spropvalue));
-	aRow->cValues = cValues;
-	aRow->lpProps[cValues - 1] = lpProp;
-
-	return MAPI_E_SUCCESS;
+	return property_row_append(aRow, aRow, spropvalue);
 }
 
 
@@ -1167,22 +1169,13 @@ _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue sprop
  */
 _PUBLIC_ uint32_t SRowSet_propcpy(TALLOC_CTX *mem_ctx, struct SRowSet *SRowSet, struct SPropValue spropvalue)
 {
-	uint32_t		rows;
-	uint32_t		cValues;
-	struct SPropValue	lpProp;
-
-	/* Sanity checks */
-	if (!SRowSet) return 1;
-
-	for (rows = 0; rows < SRowSet->cRows; rows++) {
-		cValues = SRowSet->aRow[rows].cValues + 1;
-		SRowSet->aRow[rows].lpProps = talloc_realloc(mem_ctx, SRowSet->aRow[rows].lpProps, struct SPropValue, cValues);
-		lpProp = SRowSet->aRow[rows].lpProps[cValues-1];
-		lpProp.ulPropTag = spropvalue.ulPropTag;
-		lpProp.dwAlignPad = 0;
-		set_SPropValue(&(lpProp), (void *)&spropvalue.value);
-		SRowSet->aRow[rows].cValues = cValues;
-		SRowSet->aRow[rows].lpProps[cValues - 1] = lpProp;
+	uint32_t row;
+	if (SRowSet == NULL || (SRowSet->cRows && SRowSet->aRow == NULL)) {
+		set_errno(MAPI_E_INVALID_PARAMETER);
+		return 1;
+	}
+	for (row = 0; row < SRowSet->cRows; row++) {
+		if (property_row_append(mem_ctx, &SRowSet->aRow[row], spropvalue) != MAPI_E_SUCCESS) return 1;
 	}
 	return 0;
 }
