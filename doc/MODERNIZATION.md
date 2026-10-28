@@ -573,6 +573,25 @@ no result, a literal organization containing filter characters, duplicate result
 malformed names and allocation failure. Native and ASan/UBSan checks pass; actual
 AD schema/provisioning remains untested.
 
+## Address-book search boundaries
+
+NSPI property searches validate matching property tags and accept only their
+supported text/string-array representations before reading the value as text.
+Null values and empty arrays fail explicitly; numeric properties are rejected
+instead of being reinterpreted as strings. User values and the authenticated
+organization name are escaped as LDAP literals. The legacyExchangeDN branch no
+longer emits an invalid extra filter clause. Organization filters and temporary
+search data are owned by the request, and MID arrays are published only after
+all directory records have been mapped successfully.
+
+The real LDB/TDB backend harness covers Unicode/ANSI and multivalue text,
+literal wildcard/parenthesis characters, injection attempts, cross-organization
+matches, exact legacy DNs, UPN lookup, result limits, malformed restrictions,
+TDB-write failures and allocation failure. Native/source-copy and ASan/UBSan
+checks pass. Numeric restrictions, additional restriction forms and full
+comparison/operator semantics remain protocol work; these tests do not prove
+AD's ANR behavior or live Outlook search compatibility.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

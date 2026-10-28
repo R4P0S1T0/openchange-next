@@ -93,6 +93,101 @@ static int add_user(struct ldb_context *db, const char *dn, const char *name,
     return ret;
 }
 
+static int search_boundaries(TALLOC_CTX *ctx, struct emsabp_context *backend)
+{
+    static const char * const entries[][3] = {
+        {"literal", "/o=Org/ou=Site/cn=literal", "Alice (Ops)*"},
+        {"general", "/o=Org/ou=Site/cn=general", "Alice General"},
+        {"foreign", "/o=Other/ou=Site/cn=foreign", "Alice (Ops)*"},
+        {"orgstar", "/o=Org*/ou=Site/cn=orgstar", "Scoped"},
+        {"orgother", "/o=OrgA/ou=Site/cn=orgother", "Scoped"}
+    };
+    struct Restriction_r restriction = { .rt = RES_PROPERTY };
+    struct PropertyValue_r value = { .ulPropTag = PidTagDisplayName };
+    struct PropertyTagArray_r mids = {0};
+    struct STAT state = { .SortType = SortTypeDisplayName };
+    struct ldb_message *message;
+    char *dn, *filter;
+    const char *saved_org = backend->organization_name;
+    TALLOC_CTX *query = talloc_new(ctx);
+    CHECK(query);
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        message = ldb_msg_new(ctx); CHECK(message);
+        message->dn = ldb_dn_new_fmt(message, backend->samdb_ctx, "CN=%s,DC=test", entries[i][0]);
+        CHECK(message->dn && ldb_msg_add_string(message, "objectClass", "user") == 0);
+        CHECK(ldb_msg_add_string(message, "legacyExchangeDN", entries[i][1]) == 0);
+        CHECK(ldb_msg_add_string(message, "displayName", entries[i][2]) == 0);
+        if (i == 0) {
+            CHECK(ldb_msg_add_string(message, "proxyAddresses", "SMTP:alice@example.test") == 0);
+            CHECK(ldb_msg_add_string(message, "userPrincipalName", "alice@example.test") == 0);
+        }
+        CHECK(ldb_add(backend->samdb_ctx, message) == LDB_SUCCESS); talloc_free(message);
+    }
+    restriction.res.resProperty.ulPropTag = value.ulPropTag;
+    restriction.res.resProperty.lpProp = &value;
+    value.value.lpszW = "Alice (Ops)*";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    CHECK(talloc_parent(mids.aulPropTag) == query);
+    CHECK(emsabp_tdb_fetch_dn_from_MId(query, backend->ttdb_ctx, mids.aulPropTag[0], &dn) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(dn, "CN=literal,DC=test"));
+    value.value.lpszW = "*";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    value.value.lpszW = "Alice";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 1) == MAPI_E_TABLE_TOO_BIG);
+    CHECK(mids.cValues == 0 && mids.aulPropTag == NULL);
+    value.value.lpszW = "Alice General"; fail_store = true;
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_CORRUPT_STORE);
+    CHECK(mids.cValues == 0 && mids.aulPropTag == NULL); fail_store = false;
+    value.value.lpszW = "*)(objectClass=*)";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_NOT_FOUND);
+    CHECK(mids.cValues == 0 && mids.aulPropTag == NULL);
+    value.ulPropTag = restriction.res.resProperty.ulPropTag = PidTagEmailAddress;
+    value.value.lpszW = entries[0][1];
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    value.ulPropTag = restriction.res.resProperty.ulPropTag = PidTagDisplayName;
+    value.value.lpszW = "Scoped"; backend->organization_name = "Org*";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    CHECK(emsabp_tdb_fetch_dn_from_MId(query, backend->ttdb_ctx, mids.aulPropTag[0], &dn) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(dn, "CN=orgstar,DC=test"));
+    CHECK(emsabp_include_organization_restriction(query, backend, "(objectClass=user)", &filter) == MAPI_E_SUCCESS);
+    CHECK(talloc_parent(filter) == query);
+    backend->organization_name = saved_org;
+    restriction.res.resProperty.lpProp = NULL;
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_INVALID_PARAMETER);
+    restriction.res.resProperty.lpProp = &value;
+    value.ulPropTag = PidTagObjectType;
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_INVALID_PARAMETER);
+    restriction.res.resProperty.ulPropTag = PidTagObjectType; value.value.l = 0x41414141;
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_NO_SUPPORT);
+    value.ulPropTag = restriction.res.resProperty.ulPropTag = PR_DISPLAY_NAME;
+    value.value.lpszA = "Alice (Ops)*";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    value.ulPropTag = restriction.res.resProperty.ulPropTag = PidTagAnr;
+    value.value.lpszW = "alice@example.test";
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    {
+        const char *address[] = {"SMTP:alice@example.test"};
+        value.ulPropTag = restriction.res.resProperty.ulPropTag = PR_EMS_AB_PROXY_ADDRESSES;
+        value.value.MVszA.cValues = 1; value.value.MVszA.lppszA = address;
+        CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+        value.ulPropTag = restriction.res.resProperty.ulPropTag = PR_EMS_AB_PROXY_ADDRESSES_UNICODE;
+        value.value.MVszW.cValues = 1; value.value.MVszW.lppszW = address;
+        CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_SUCCESS && mids.cValues == 1);
+    }
+    value.ulPropTag = restriction.res.resProperty.ulPropTag = PR_EMS_AB_PROXY_ADDRESSES;
+    value.value.MVszA.cValues = 0; value.value.MVszA.lppszA = NULL;
+    CHECK(emsabp_search(query, backend, &mids, &restriction, &state, 0) == MAPI_E_INVALID_PARAMETER);
+    {
+        TALLOC_CTX *limited = talloc_new(ctx);
+        CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+        CHECK(emsabp_search(limited, backend, &mids, NULL, &state, 0) == MAPI_E_NOT_ENOUGH_MEMORY);
+        CHECK(mids.cValues == 0 && mids.aulPropTag == NULL);
+        talloc_free(limited);
+    }
+    talloc_free(query);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
@@ -130,6 +225,7 @@ int main(void)
     CHECK(!emsabp_verify_user(&call, second));
     account_sids[0].sub_auths[1]--;
     CHECK(strcmp(first->account_name, "test") == 0 && strcmp(first->organization_name, "Org") == 0);
+    CHECK(search_boundaries(ctx, first) == 0);
     CHECK(second->account_name == NULL && second->organization_name == NULL);
     user.account_name = "disabled"; CHECK(!emsabp_verify_user(&call, second));
     user.account_name = "missing"; CHECK(!emsabp_verify_user(&call, second));

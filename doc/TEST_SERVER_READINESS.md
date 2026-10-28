@@ -35,6 +35,10 @@ upgrade/restore validation beyond this first test milestone.
   checked against the authenticated SID; cross-account connection DNs and
   private mailbox logons are rejected. Backend and notification registration
   cleanup has focused regression coverage.
+- Directory recipient and NSPI search values are escaped as literals. NSPI
+  validates supported property value types and organization scoping; missing or
+  duplicate organization lookups fail safely. Real LDB/TDB checks cover these
+  paths; complete directory/protocol semantics remain unverified.
 - Packed property readers reject truncated values, missing string terminators,
   excessive multi-value counts and unknown row flags. Nested values remain owned
   after parser destruction; failed rows publish no partial results. Recipient

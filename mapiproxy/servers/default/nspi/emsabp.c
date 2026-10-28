@@ -1062,19 +1062,19 @@ _PUBLIC_ enum MAPISTATUS emsabp_get_CreationTemplatesTable(TALLOC_CTX *mem_ctx, 
     \param expression pointer on pointer to char to return the new ldap filter
     with organization restriction
  */
-static enum MAPISTATUS emsabp_include_organization_restriction(struct emsabp_context *emsabp_ctx, const char *filter, char **expression)
+static enum MAPISTATUS emsabp_include_organization_restriction(TALLOC_CTX *mem_ctx,
+	struct emsabp_context *emsabp_ctx, const char *filter, char **expression)
 {
+	char *encoded;
 	OPENCHANGE_RETVAL_IF(!expression, MAPI_E_BAD_VALUE, NULL);
-	OPENCHANGE_RETVAL_IF(!filter, MAPI_E_BAD_VALUE, NULL);
-	OPENCHANGE_RETVAL_IF(!emsabp_ctx, MAPI_E_BAD_VALUE, NULL);
+	*expression = NULL;
+	OPENCHANGE_RETVAL_IF(!filter || !emsabp_ctx, MAPI_E_BAD_VALUE, NULL);
 	OPENCHANGE_RETVAL_IF(!emsabp_ctx->organization_name, MAPI_E_NOT_INITIALIZED, NULL);
-
-	*expression = talloc_asprintf(emsabp_ctx->mem_ctx,
-				      "(&(legacyExchangeDN=/o=%s/ou=*)%s)",
-				      emsabp_ctx->organization_name, filter);
-
+	encoded = ldb_binary_encode_string(mem_ctx, emsabp_ctx->organization_name);
+	OPENCHANGE_RETVAL_IF(encoded == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	*expression = talloc_asprintf(mem_ctx, "(&(legacyExchangeDN=/o=%s/ou=*)%s)", encoded, filter);
+	talloc_free(encoded);
 	OPENCHANGE_RETVAL_IF(!*expression, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
-
 	return MAPI_E_SUCCESS;
 }
 
@@ -1109,12 +1109,19 @@ _PUBLIC_ enum MAPISTATUS emsabp_search(TALLOC_CTX *mem_ctx, struct emsabp_contex
 	const char			*dn;
 	char				*fmt_str, *search_filter = NULL;
 	const char			*fmt_attr;
-	char				*attr;
+	const char			*attr;
+	char				*encoded;
+	uint32_t			*mids;
 	int				ldb_ret;
 	struct ldb_server_sort_control	**ldb_sort_controls = NULL;
 	struct ldb_request		*ldb_req;
 
-	local_mem_ctx = talloc_new(NULL);
+	OPENCHANGE_RETVAL_IF(MIds == NULL, MAPI_E_INVALID_PARAMETER, NULL);
+	MIds->cValues = 0;
+	MIds->aulPropTag = NULL;
+	OPENCHANGE_RETVAL_IF(emsabp_ctx == NULL || emsabp_ctx->samdb_ctx == NULL ||
+			     pStat == NULL, MAPI_E_INVALID_PARAMETER, NULL);
+	local_mem_ctx = talloc_new(mem_ctx);
 	OPENCHANGE_RETVAL_IF(local_mem_ctx == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 
 	/* Step 1. Apply sort type, restriction and retrieve results from AD */
@@ -1139,24 +1146,37 @@ _PUBLIC_ enum MAPISTATUS emsabp_search(TALLOC_CTX *mem_ctx, struct emsabp_contex
 		fmt_attr = emsabp_property_get_attribute(res_prop->ulPropTag);
 		OPENCHANGE_RETVAL_IF(fmt_attr == NULL, MAPI_E_NO_SUPPORT, local_mem_ctx);
 
-		attr = (char *)get_PropertyValue_data(res_prop->lpProp);
-		OPENCHANGE_RETVAL_IF(attr == NULL, MAPI_E_NO_SUPPORT, local_mem_ctx);
-
-		if ((res_prop->ulPropTag & 0xFFFF) == 0x101e) {
-			struct StringArray_r *attr_ml = (struct StringArray_r *) get_PropertyValue_data(res_prop->lpProp);
-			attr = (char *)attr_ml->lppszA[0];
-		} else {
-			attr = (char *)get_PropertyValue_data(res_prop->lpProp);
+		OPENCHANGE_RETVAL_IF(res_prop->lpProp == NULL ||
+			res_prop->lpProp->ulPropTag != res_prop->ulPropTag,
+			MAPI_E_INVALID_PARAMETER, local_mem_ctx);
+		switch (res_prop->ulPropTag & 0xffff) {
+		case PT_STRING8: attr = res_prop->lpProp->value.lpszA; break;
+		case PT_UNICODE: attr = res_prop->lpProp->value.lpszW; break;
+		case PT_MV_STRING8:
+			OPENCHANGE_RETVAL_IF(res_prop->lpProp->value.MVszA.cValues == 0 ||
+				res_prop->lpProp->value.MVszA.lppszA == NULL,
+				MAPI_E_INVALID_PARAMETER, local_mem_ctx);
+			attr = res_prop->lpProp->value.MVszA.lppszA[0];
+			break;
+		case PT_MV_UNICODE:
+			OPENCHANGE_RETVAL_IF(res_prop->lpProp->value.MVszW.cValues == 0 ||
+				res_prop->lpProp->value.MVszW.lppszW == NULL,
+				MAPI_E_INVALID_PARAMETER, local_mem_ctx);
+			attr = res_prop->lpProp->value.MVszW.lppszW[0];
+			break;
+		default: OPENCHANGE_RETVAL_ERR(MAPI_E_NO_SUPPORT, local_mem_ctx);
 		}
-		OPENCHANGE_RETVAL_IF(attr == NULL, MAPI_E_NO_SUPPORT, local_mem_ctx);
+		OPENCHANGE_RETVAL_IF(attr == NULL, MAPI_E_INVALID_PARAMETER, local_mem_ctx);
+		encoded = ldb_binary_encode_string(local_mem_ctx, attr);
+		OPENCHANGE_RETVAL_IF(encoded == NULL, MAPI_E_NOT_ENOUGH_MEMORY, local_mem_ctx);
 
 		/* Special case: anr doesn't return correct result with partial search */
 		if (!strcmp(fmt_attr, "anr")) {
-			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(|(%s=%s)(userPrincipalName=%s))(!(objectClass=computer)))", fmt_attr, attr, attr);
+			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(|(%s=%s)(userPrincipalName=%s))(!(objectClass=computer)))", fmt_attr, encoded, encoded);
 		} else if (!strcmp(fmt_attr, "legacyExchangeDN")) {
-			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(|(%s=%s)(%s%s)(anr=%s))(!(objectClass=computer)))", fmt_attr, attr, fmt_attr, attr, attr);
+			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(|(%s=%s)(anr=%s))(!(objectClass=computer)))", fmt_attr, encoded, encoded);
 		} else {
-			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(%s=*%s*)(!(objectClass=computer)))", fmt_attr, attr);
+			fmt_str = talloc_asprintf(local_mem_ctx, "(&(objectClass=user)(%s=*%s*)(!(objectClass=computer)))", fmt_attr, encoded);
 		}
 		OPENCHANGE_RETVAL_IF(fmt_str == NULL, MAPI_E_NOT_ENOUGH_MEMORY, local_mem_ctx);
 	} else {
@@ -1165,7 +1185,7 @@ _PUBLIC_ enum MAPISTATUS emsabp_search(TALLOC_CTX *mem_ctx, struct emsabp_contex
 		attr = NULL;
 	}
 
-	retval = emsabp_include_organization_restriction(emsabp_ctx, fmt_str, &search_filter);
+	retval = emsabp_include_organization_restriction(local_mem_ctx, emsabp_ctx, fmt_str, &search_filter);
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, local_mem_ctx);
 
 	ldb_res = talloc_zero(local_mem_ctx, struct ldb_result);
@@ -1196,23 +1216,25 @@ _PUBLIC_ enum MAPISTATUS emsabp_search(TALLOC_CTX *mem_ctx, struct emsabp_contex
 	OPENCHANGE_RETVAL_IF(ldb_res->count == 0, MAPI_E_NOT_FOUND, local_mem_ctx);
 	OPENCHANGE_RETVAL_IF(limit && ldb_res->count > limit, MAPI_E_TABLE_TOO_BIG, local_mem_ctx);
 
-	MIds->aulPropTag = (uint32_t *) talloc_array(mem_ctx, uint32_t, ldb_res->count);
-	OPENCHANGE_RETVAL_IF(MIds->aulPropTag == NULL, MAPI_E_NOT_ENOUGH_MEMORY, local_mem_ctx);
-	MIds->cValues = ldb_res->count;
+	mids = talloc_array(local_mem_ctx, uint32_t, ldb_res->count);
+	OPENCHANGE_RETVAL_IF(mids == NULL, MAPI_E_NOT_ENOUGH_MEMORY, local_mem_ctx);
 
 	/* Step 2. Create session MId for all fetched records */
 
 	for (i = 0; i < ldb_res->count; i++) {
-		dn = ldb_msg_find_attr_as_string(ldb_res->msgs[i], "distinguishedName", NULL);
-		retval = emsabp_tdb_fetch_MId(emsabp_ctx->ttdb_ctx, dn, (uint32_t *)&(MIds->aulPropTag[i]));
+		dn = ldb_dn_get_linearized(ldb_res->msgs[i]->dn);
+		OPENCHANGE_RETVAL_IF(dn == NULL, MAPI_E_NOT_ENOUGH_MEMORY, local_mem_ctx);
+		retval = emsabp_tdb_fetch_MId(emsabp_ctx->ttdb_ctx, dn, &mids[i]);
 		if (retval != MAPI_E_SUCCESS) {
 			retval = emsabp_tdb_insert(emsabp_ctx->ttdb_ctx, dn);
 			OPENCHANGE_RETVAL_IF(retval, MAPI_E_CORRUPT_STORE, local_mem_ctx);
-			retval = emsabp_tdb_fetch_MId(emsabp_ctx->ttdb_ctx, dn, (uint32_t *) &(MIds->aulPropTag[i]));
+			retval = emsabp_tdb_fetch_MId(emsabp_ctx->ttdb_ctx, dn, &mids[i]);
 			OPENCHANGE_RETVAL_IF(retval, MAPI_E_CORRUPT_STORE, local_mem_ctx);
 		}
 	}
 
+	MIds->cValues = ldb_res->count;
+	MIds->aulPropTag = talloc_steal(mem_ctx, mids);
 	talloc_free(local_mem_ctx);
 	return MAPI_E_SUCCESS;
 }
@@ -1353,7 +1375,7 @@ _PUBLIC_ enum MAPISTATUS emsabp_ab_fetch_filter(TALLOC_CTX *mem_ctx,
 	}
 
 	/* Add organization restriction */
-	return emsabp_include_organization_restriction(emsabp_ctx, purportedSearch, filter);
+	return emsabp_include_organization_restriction(mem_ctx, emsabp_ctx, purportedSearch, filter);
 }
 
 
