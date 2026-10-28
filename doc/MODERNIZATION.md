@@ -117,6 +117,7 @@ With those prerequisites on PATH:
 ./configure --with-samba=/usr
 make check-libmapi-modernization
 make check-ocpf-lexer
+make check-mapiadmin
 make check-mapiproxy-registries
 make check-mapiproxy-rpc
 make check-asyncemsmdb
@@ -407,11 +408,46 @@ from libmapi instead of embedding duplicate copies of NDR tables and routines.
 This removes duplicate global definitions exposed by AddressSanitizer. The build
 also declares generated headers/version prerequisites for parallel compilation.
 
+## Administration recovery
+
+`libmapiadmin.so.2.3` now builds and loads with the selected Samba baseline.
+SAMR calls use the public generic binding-handle API and check both transport
+and server status. Connection state, event contexts and policy handles remain
+owned by the administration context after individual calls return. Failed
+connection setup publishes no partially initialized state.
+
+Creating an existing user returns `MAPI_E_COLLISION` without deleting it.
+Metadata strings are copied literally instead of used as format strings, and
+passwords are no longer included in debug logs. Password setup uses Samba's AES
+SAMR encoder and level 31 with no legacy-cipher fallback. Generated passwords
+have at least 32 characters; ordinary account creation no longer disables
+password expiry. Session-key copies are wiped before release. Failed creation
+rolls back through the exact new account's handle, without resolving a username
+again. A rollback RPC can itself fail; the reported account then needs explicit
+administrative cleanup rather than being assumed absent.
+
+Configure probes `init_samr_CryptPasswordAES` in the matching Samba private
+library. The default private-library directory is Samba's pkg-config libdir
+plus `/samba`; split SDK/runtime layouts can set
+`--with-samba-private-libdir=DIR`. The encoder declaration was checked against
+Samba 4.22.10's `source3/rpc_client/init_samr.h`. This dependency is a private ABI
+boundary and must be retested when the Samba package changes. Older controllers
+without AES SAMR support are not approved for this administration path.
+
+`make check-mapiadmin` exercises server-error responses, existing-user
+preservation, connection ownership, password/metadata failures, literal percent
+characters, empty RID replies and exact-handle rollback using substituted RPC
+and LDAP transport. A separate check calls the installed Samba AES encoder and
+serializes its SAMR request with real NDR code. These checks pass natively and
+with ASan/UBSan in the source-only copy (local leak detection remains disabled).
+No real directory account has been created or deleted during these checks;
+end-to-end administration and LDAP extension still require integration testing.
+
 ## Remaining blockers
 
 The focused `mapiproxy` build and server boundary checks pass. The complete
-repository build currently stops in `libmapiadmin/mapiadmin_user.c`, which
-includes Samba's unavailable private `ldap_ndr.h`. The full C/server suite and an installation against a disposable
+repository build still encounters missing Samba utility declarations in
+standalone clients and test tools; that compatibility pass is ongoing. The full C/server suite and an installation against a disposable
 AD controller remain to be validated. The RPC modules need real bind/unbind,
 authentication, relay and notification tests against disposable servers.
 Remaining ROP implementation, directory/schema, cache identity/integrity and

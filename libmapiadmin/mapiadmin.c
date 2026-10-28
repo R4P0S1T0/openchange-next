@@ -35,12 +35,14 @@ _PUBLIC_ struct mapiadmin_ctx *mapiadmin_init(struct mapi_session *session)
 	struct mapiadmin_ctx	*mapiadmin_ctx;
 
 	if (!session) return NULL;
-	if (!session->profile) return NULL;
+	if (!session->profile || !session->profile->server) return NULL;
 
 	mapiadmin_ctx = talloc_zero((TALLOC_CTX *)session, struct mapiadmin_ctx);
+	if (mapiadmin_ctx == NULL) return NULL;
 
 	mapiadmin_ctx->binding = talloc_asprintf((TALLOC_CTX *)mapiadmin_ctx, "ncacn_np:%s", 
 						 session->profile->server);
+	if (mapiadmin_ctx->binding == NULL) { talloc_free(mapiadmin_ctx); return NULL; }
 	mapiadmin_ctx->session = session;
 
 	return mapiadmin_ctx;

@@ -41,6 +41,16 @@ ownership checks, setup failures, multiple contexts and handles, wait completion
 cancellation, call destruction and resource cleanup. It does not test real
 notification delivery or an AD DC.
 
+Administration failure paths and the installed Samba AES encoder can be checked:
+
+    make check-mapiadmin
+
+The first harness substitutes RPC/LDAP access and never modifies a real account.
+It checks server errors, preserving existing users, connection lifetime, literal
+metadata, failed setup and rollback by the newly created account's handle.
+The separate crypto harness uses Samba's real AES encoder and NDR serialization.
+Actual account creation/LDAP extension is not covered by these isolated checks.
+
 Default address-book and mailbox boundaries have separate checks:
 
     make check-nspi check-emsmdb

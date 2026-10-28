@@ -30,6 +30,11 @@ jobs:
         run: make -W ndr_mapi.c -W testsuite/modernization/ndr_smoke.c check-ndr-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - name: Restore the native NDR library
         run: make -W ndr_mapi.c -W testsuite/modernization/ndr_smoke.c check-ndr-modernization
+      - run: make check-mapiadmin
+      - name: Check administration failures with sanitizers
+        run: make -W testsuite/modernization/admin_smoke.c -W testsuite/modernization/admin_crypto_smoke.c check-mapiadmin CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Load administration library
+        run: LD_LIBRARY_PATH=. python3 -c 'import ctypes; ctypes.CDLL("./libmapiadmin.so.0")'
       - run: make check-ocpf-lexer
       - name: Check OCPF strings with sanitizers
         run: make -W testsuite/modernization/ocpf_lexer_smoke.c check-ocpf-lexer CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'

@@ -467,6 +467,18 @@ PKG_CHECK_MODULES(SAMBA, dcerpc ndr samba-hostconfig samba-util tevent samba-cre
 PKG_CHECK_MODULES(SAMBASERVER, dcerpc_server samdb, [], [AC_MSG_WARN(No mapiproxy support)])
 AC_CHECK_LIB([dcerpc-server-core], [_dcesrv_iface_state_find_conn],
     [SAMBASERVER_LIBS="$SAMBASERVER_LIBS -ldcerpc-server-core"], [], [$SAMBASERVER_LIBS])
+dnl Administration uses Samba's own AES SAMR password encoder.
+AC_ARG_WITH([samba-private-libdir],
+    [AS_HELP_STRING([--with-samba-private-libdir=DIR], [directory containing matching Samba private libraries])],
+    [oc_samba_private_libdir="$withval"],
+    [oc_samba_private_libdir="`$PKG_CONFIG --variable=libdir samba-util`/samba"])
+oc_admin_save_LDFLAGS="$LDFLAGS"
+LDFLAGS="$LDFLAGS -L$oc_samba_private_libdir -Wl,-rpath,$oc_samba_private_libdir"
+AC_CHECK_LIB([:libsamba-net-private-samba.so.0], [init_samr_CryptPasswordAES],
+    [SAMBA_ADMIN_PRIVATE_LIBS="-L$oc_samba_private_libdir -Wl,-rpath,$oc_samba_private_libdir -l:libsamba-net-private-samba.so.0"],
+    [AC_MSG_ERROR([Matching Samba AES password support is required; set --with-samba-private-libdir])], [$SAMBA_LIBS])
+LDFLAGS="$oc_admin_save_LDFLAGS"
+AC_SUBST(SAMBA_ADMIN_PRIVATE_LIBS)
 PKG_CHECK_MODULES(TDB, tdb)
 PKG_CHECK_MODULES(LDB, ldb)
 

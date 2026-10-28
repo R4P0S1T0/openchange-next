@@ -542,7 +542,10 @@ clean:: libmapixx-messages-clean
 
 LIBMAPIADMIN_SO_VERSION = 0
 
-libmapiadmin:		libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION)
+libmapiadmin:		libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION) libmapiadmin.$(SHLIBEXT).$(LIBMAPIADMIN_SO_VERSION)
+
+libmapiadmin.$(SHLIBEXT).$(LIBMAPIADMIN_SO_VERSION): libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION)
+	ln -fs $< $@
 
 libmapiadmin-install:	libmapiadmin-installpc		\
 			libmapiadmin-installlib		\
@@ -594,12 +597,16 @@ libmapiadmin-uninstalllib:
 libmapiadmin-uninstallheader:
 	rm -rf $(DESTDIR)$(includedir)/libmapiadmin
 
+LIBMAPIADMIN_LIBS += -lsamba-errors
+
+libmapiadmin/mapiadmin_user.po libmapiadmin/mapiadmin.po: libmapiadmin/libmapiadmin.h
+
 libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION):	\
 	libmapiadmin/mapiadmin_user.po		\
 	libmapiadmin/mapiadmin.po 		\
 	libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiadmin.$(SHLIBEXT).$(LIBMAPIADMIN_SO_VERSION) -o $@ $^ $(LIBS) $(LIBMAPIADMIN_LIBS)
+	@$(CC) $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiadmin.$(SHLIBEXT).$(LIBMAPIADMIN_SO_VERSION) -o $@ $^ $(LIBS) $(LIBMAPIADMIN_LIBS) $(SAMBA_ADMIN_PRIVATE_LIBS)
 
 
 
@@ -1757,6 +1764,19 @@ check-asyncemsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHL
 bin/asyncemsmdb: testsuite/modernization/asyncemsmdb_smoke.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=getsockname -Wl,--wrap=close mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(NANOMSG_LIBS)
+
+.PHONY: check-mapiadmin
+check-mapiadmin: libmapi libmapiadmin libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mapiadmin-check bin/mapiadmin-crypto
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mapiadmin-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mapiadmin-crypto
+
+bin/mapiadmin-check: testsuite/modernization/admin_smoke.c libmapiadmin/mapiadmin_user.c libmapiadmin/mapiadmin.c libmapiadmin/libmapiadmin.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(LIBMAPIADMIN_LIBS)
+
+bin/mapiadmin-crypto: testsuite/modernization/admin_crypto_smoke.c libmapiadmin/libmapiadmin.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(LIBMAPIADMIN_LIBS) $(SAMBA_ADMIN_PRIVATE_LIBS)
 
 .PHONY: check-ocpf-lexer
 check-ocpf-lexer: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/ocpf-lexer

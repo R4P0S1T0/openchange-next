@@ -25,6 +25,11 @@ upgrade/restore validation beyond this first test milestone.
 
 ## Security changes completed in the recovered subset
 
+- Administration preserves existing users, checks SAMR server errors, copies
+  metadata literally and uses Samba AES password encoding without a legacy
+  cipher fallback. Failed creation rolls back by the newly created account's
+  handle. Focused mock-transport and real encoder checks pass; actual directory
+  administration and failed-rollback recovery remain integration work.
 - NSPI and EMSMDB sessions use Samba policy handles with SID, interface,
   association and authentication-level checks. Directory account ownership is
   checked against the authenticated SID; cross-account connection DNs and

@@ -99,11 +99,17 @@ struct mapiadmin_ctx
 
 __BEGIN_DECLS
 
+/* Exported private ABI checked against Samba 4.22.10 libcli/ldap/ldap_ndr.h. */
+char *ldap_encode_ndr_dom_sid(TALLOC_CTX *, const struct dom_sid *);
+/* Public samba-util export, absent from installed headers. */
+char *generate_random_str(TALLOC_CTX *, size_t);
+
 /* The following definitions come from samba4 framework */
 struct ldb_dn *samdb_search_dn(struct ldb_context *, TALLOC_CTX *, struct ldb_dn *, const char *, ...) _PRINTF_ATTRIBUTE(4,5);
 struct dom_sid *dom_sid_add_rid(TALLOC_CTX *, const struct dom_sid *, uint32_t);
-bool encode_pw_buffer(uint8_t buffer[516], const char *, int);
-void arcfour_crypt_blob(uint8_t *, int, const DATA_BLOB *);
+/* Exported private ABI from Samba 4.22.10 source3/rpc_client/init_samr.h. */
+struct samr_EncryptedPasswordAES;
+NTSTATUS init_samr_CryptPasswordAES(TALLOC_CTX *, const char *, DATA_BLOB *, DATA_BLOB *, struct samr_EncryptedPasswordAES *);
 
 /* The following public definitions come from libmapiadmin/mapiadmin.c */
 struct mapiadmin_ctx *mapiadmin_init(struct mapi_session *);
