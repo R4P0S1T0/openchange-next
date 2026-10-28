@@ -129,10 +129,43 @@ static int rpc_correlations(TALLOC_CTX *ctx, const char *root)
     return 0;
 }
 
+static int property_files(TALLOC_CTX *ctx, struct mpm_message *message, const char *original)
+{
+    TALLOC_CTX *tmp = talloc_new(ctx);
+    struct mpm_stream *other = talloc_zero(tmp, struct mpm_stream), *second;
+    struct mpm_attachment *attachment = talloc_zero(tmp, struct mpm_attachment);
+    char *saved;
+    CHECK(tmp && other && attachment);
+    other->message = message; other->PropertyTag = PidTagHtml; other->StreamSize = 4;
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, other)));
+    CHECK(strcmp(other->filename, original) != 0);
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_write(other, 4, (uint8_t *)"html")));
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(other)) && file_contents(original, "test"));
+    saved = other->filename; other->filename = discard_const(original);
+    CHECK(NT_STATUS_EQUAL(mpm_cache_stream_open(mpm, other), NT_STATUS_INVALID_PARAMETER));
+    other->filename = saved;
+    attachment->message = message; attachment->AttachmentID = 3;
+    other->message = NULL; other->attachment = attachment; other->filename = NULL;
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, other)));
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_write(other, 4, (uint8_t *)"atwo")));
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(other)));
+    second = talloc_zero(tmp, struct mpm_stream); CHECK(second);
+    second->attachment = attachment; second->PropertyTag = PidTagAttachDataBinary; second->StreamSize = 4;
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, second)));
+    CHECK(strcmp(second->filename, other->filename) != 0);
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_write(second, 4, (uint8_t *)"aone")));
+    CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(second)) && file_contents(other->filename, "atwo"));
+    saved = second->filename; second->filename = other->filename;
+    CHECK(NT_STATUS_EQUAL(mpm_cache_stream_open(mpm, second), NT_STATUS_INVALID_PARAMETER));
+    second->filename = saved;
+    talloc_free(tmp);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
-    char root[] = "/tmp/openchange-cache-XXXXXX";
+    char root[] = "/tmp/openchange-cache dir;'$()-XXXXXX";
     char outside[] = "/tmp/openchange-cache-outside-XXXXXX";
     char *path, *victim, *directory, *original, *source, *copy_target;
     struct mpm_stream *stream;
@@ -184,6 +217,7 @@ int main(void)
     CHECK(length == 4 && memcmp(data, "test", 4) == 0);
     CHECK(NT_STATUS_IS_OK(mpm_cache_stream_read(stream, 1, &length, &data)) && length == 0);
     CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(stream)) && stream->fp == NULL);
+    CHECK(property_files(ctx, message, original) == 0);
     CHECK(NT_STATUS_EQUAL(mpm_cache_stream_close(stream), NT_STATUS_NOT_FOUND));
     CHECK(NT_STATUS_EQUAL(mpm_cache_stream_read(stream, 1, &length, &data), NT_STATUS_INVALID_PARAMETER));
     CHECK(NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, stream)));
@@ -199,6 +233,12 @@ int main(void)
     CHECK(chmod(directory, 0755) == 0);
     CHECK(!NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, stream)));
     CHECK(chmod(directory, 0700) == 0);
+    {
+        char *held = talloc_asprintf(ctx, "%s/held", root); CHECK(held);
+        CHECK(rename(directory, held) == 0 && symlink(outside, directory) == 0);
+        CHECK(!NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, stream)));
+        CHECK(unlink(directory) == 0 && rename(held, directory) == 0);
+    }
     victim = talloc_asprintf(ctx, "%s/victim", outside);
     CHECK(victim != NULL);
     fp = fopen(victim, "wb"); CHECK(fp != NULL);
@@ -248,7 +288,7 @@ int main(void)
     CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(stream)));
 
     source = talloc_asprintf(ctx, "%s/source", root);
-    copy_target = talloc_asprintf(ctx, "%s/copy target;'$()", root);
+    copy_target = talloc_strdup(ctx, stream->filename);
     CHECK(source != NULL && copy_target != NULL);
     fp = fopen(source, "wb"); CHECK(fp != NULL);
     CHECK(fwrite("data", 1, 4, fp) == 4 && fclose(fp) == 0);

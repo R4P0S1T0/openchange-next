@@ -70,20 +70,24 @@ NTSTATUS mpm_cache_stream_open(struct mpm_cache *mpm, struct mpm_stream *stream)
 	tmp = talloc_new(stream);
 	if (tmp == NULL) return NT_STATUS_NO_MEMORY;
 	create = stream->filename == NULL;
-	if (!create) {
-		path = talloc_strdup(tmp, stream->filename);
-	} else if (stream->message != NULL) {
-		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64".stream",
-			mpm->dbpath, stream->message->FolderId, stream->message->MessageId);
+	if (stream->message != NULL) {
+		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64"/0x%"PRIx32".stream",
+			mpm->dbpath, stream->message->FolderId, stream->message->MessageId,
+			(uint32_t)stream->PropertyTag);
 	} else if (stream->attachment != NULL && stream->attachment->message != NULL) {
-		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64"/%"PRIu32".stream",
+		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64"/attach-%"PRIu32"/0x%"PRIx32".stream",
 			mpm->dbpath, stream->attachment->message->FolderId,
-			stream->attachment->message->MessageId, stream->attachment->AttachmentID);
+			stream->attachment->message->MessageId, stream->attachment->AttachmentID,
+			(uint32_t)stream->PropertyTag);
 	} else {
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto done;
 	}
 	if (path == NULL) { status = NT_STATUS_NO_MEMORY; goto done; }
+	if (!create && strcmp(path, stream->filename) != 0) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
 	root_length = strlen(mpm->dbpath);
 	while (root_length > 1 && mpm->dbpath[root_length - 1] == '/') root_length--;
 	if (strncmp(path, mpm->dbpath, root_length) != 0 || path[root_length] != '/') {

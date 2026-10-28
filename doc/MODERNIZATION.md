@@ -611,6 +611,23 @@ covers Release/Notify ordering. Native/source-copy and ASan/UBSan checks pass.
 Identity/store namespaces, atomic cache publication and sync-command timeouts
 remain unqualified; the cache is still not approved for an enabled test setup.
 
+## Cache property file keys
+
+Message and attachment stream paths now include the property tag. Distinct
+properties no longer truncate or reuse the same physical file. Reopening a
+stored filename requires the exact path computed from its message/attachment
+and property metadata; arbitrary or legacy filenames are rejected. These paths
+still lack the fully qualified identity/store namespace described above, so
+this is not approval to enable the plugin.
+
+The cache harness writes different properties of one message and one attachment,
+checks that their bytes remain independent and rejects cross-property filenames.
+It also checks a symlink inserted into an expected directory and runs the sync
+argv checks with spaces and shell metacharacters in the private root path.
+Native/source-copy and ASan/UBSan checks pass. This changes the experimental cache
+file layout: an enabled recovery test must start with a fresh disposable cache;
+old cache records are not migrated or deleted automatically.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary
