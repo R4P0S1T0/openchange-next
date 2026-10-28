@@ -765,6 +765,23 @@ storage operations still need review; this is not full backend qualification.
 The preceding literal-encoding commit `87844f3c` passed all four
 [GitHub CI jobs](https://github.com/R4P0S1T0/openchange-next/actions/runs/40734736817).
 
+## SQL diagnostic data exposure
+
+Shared connection/query/result diagnostics and mailbox row-fetch errors no
+longer include SQL text or free-form driver error messages, which can repeat
+private input values. They retain operation labels, numeric driver error codes
+and the five-character SQLSTATE. Slow queries report only elapsed time through
+the configured logger; the unconditional SQL dump to stdout is removed. Failed
+clock reads skip timing without changing the database operation's result.
+
+The substituted driver test captures stdout and debug messages for failed and
+artificially slow queries containing a private payload. It checks that stdout
+stays empty, the payload is absent, and error code/SQLSTATE/timing remain useful.
+It also injects both initial and final clock-read failures. Native and
+ASan/UBSan/LeakSanitizer checks pass; both full build trees and the private real
+SQL check pass. This change does not establish a repository-wide logging or
+data-retention policy; other storage/debug output still requires review.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

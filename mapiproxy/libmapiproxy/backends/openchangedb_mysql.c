@@ -563,8 +563,8 @@ static enum MAPISTATUS get_ReceiveFolder(TALLOC_CTX *parent_ctx,
 
 		row = mysql_fetch_row(res);
 		if (row == NULL || row[0] == NULL) {
-			OC_DEBUG(0, "Error getting row %d of `%s`: %s",
-				  (int) i, sql, mysql_error(conn));
+			OC_DEBUG(0, "Cannot fetch receive-folder row %u (error %u, SQLSTATE %.5s)",
+				  i, mysql_errno(conn), mysql_sqlstate(conn));
 			mysql_free_result(res);
 			return MAPI_E_CALL_FAILED;
 		}
@@ -648,8 +648,8 @@ static enum MAPISTATUS get_ReceiveFolderTable(TALLOC_CTX *parent_ctx,
 	for (i = 0; i < nrows; i++) {
 		row = mysql_fetch_row(res);
 		if (row == NULL) {
-			OC_DEBUG(0, "Error getting row %d of `%s`: %s\n",
-				  (int)i, sql, mysql_error(conn));
+			OC_DEBUG(0, "Cannot fetch receive-folder table row %u (error %u, SQLSTATE %.5s)",
+				  i, mysql_errno(conn), mysql_sqlstate(conn));
 			mysql_free_result(res);
 			OPENCHANGE_RETVAL_IF(row == NULL, MAPI_E_CALL_FAILED, mem_ctx);
 		}
@@ -659,8 +659,7 @@ static enum MAPISTATUS get_ReceiveFolderTable(TALLOC_CTX *parent_ctx,
 
 		rcvfolders[i].flag = 0;
 		if (!convert_string_to_ull(row[0], &rcvfolders[i].fid)) {
-			OC_DEBUG(0, "Failed conversion of folder_id "
-				  "from row %d of `%s`\n", (int)i, sql);
+			OC_DEBUG(0, "Invalid folder_id in receive-folder table row %u", i);
 			mysql_free_result(res);
 			OPENCHANGE_RETVAL_ERR(MAPI_E_CALL_FAILED, mem_ctx);
 		}
@@ -672,8 +671,7 @@ static enum MAPISTATUS get_ReceiveFolderTable(TALLOC_CTX *parent_ctx,
 		}
 
 		if (!convert_string_to_ull(row[2], &nt)) {
-			OC_DEBUG(0, "Failed conversion of PidTagLastModificationTime "
-				  "from row %d of `%s`\n", (int)i, sql);
+			OC_DEBUG(0, "Invalid PidTagLastModificationTime in receive-folder table row %u", i);
 			mysql_free_result(res);
 			OPENCHANGE_RETVAL_ERR(MAPI_E_CALL_FAILED, mem_ctx);
 		}
@@ -730,8 +728,8 @@ static enum MAPISTATUS get_mailbox_ids_by_name(MYSQL *conn,
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 	row = mysql_fetch_row(res);
 	if (row == NULL) {
-		OC_DEBUG(0, "Error getting user's mailbox `%s`: %s", sql,
-			  mysql_error(conn));
+		OC_DEBUG(0, "Cannot fetch mailbox row (error %u, SQLSTATE %.5s)",
+			  mysql_errno(conn), mysql_sqlstate(conn));
 		retval = MAPI_E_NOT_FOUND;
 		goto end;
 	}

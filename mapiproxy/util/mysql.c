@@ -268,7 +268,8 @@ MYSQL *create_connection(const char *connection_string, MYSQL **conn)
 	}
 
 	if (!mysql_real_connect(candidate, host, user, passwd, NULL, port, NULL, 0)) {
-		OC_DEBUG(1, "[MYSQL] Cannot connect: %s", mysql_error(candidate));
+		OC_DEBUG(1, "[MYSQL] Cannot connect (error %u, SQLSTATE %.5s)",
+			mysql_errno(candidate), mysql_sqlstate(candidate));
 		goto end;
 	}
 	if (mysql_select_db(candidate, db) != 0) {
@@ -277,7 +278,8 @@ MYSQL *create_connection(const char *connection_string, MYSQL **conn)
 		sql = talloc_asprintf(mem_ctx, "CREATE DATABASE %s", quoted);
 		if (sql == NULL) goto end;
 		if (mysql_query(candidate, sql) != 0 || mysql_select_db(candidate, db) != 0) {
-			OC_DEBUG(1, "[MYSQL] Cannot create/select database: %s", mysql_error(candidate));
+			OC_DEBUG(1, "[MYSQL] Cannot create/select database (error %u, SQLSTATE %.5s)",
+				mysql_errno(candidate), mysql_sqlstate(candidate));
 			goto end;
 		}
 	}
@@ -310,22 +312,20 @@ enum MYSQLRESULT execute_query(MYSQL *conn, const char *sql)
 {
 	struct timespec start, end;
 	float seconds_spent;
+	bool timed;
 
 	if (conn == NULL || sql == NULL) return MYSQL_ERROR;
 
-	clock_gettime(CLOCK_MONOTONIC, &start);
+	timed = clock_gettime(CLOCK_MONOTONIC, &start) == 0;
 	if (mysql_query(conn, sql) != 0) {
-		OC_DEBUG(3, "Error on query `%s`: %s", sql, mysql_error(conn));
+		OC_DEBUG(3, "MySQL query failed (error %u, SQLSTATE %.5s)",
+			mysql_errno(conn), mysql_sqlstate(conn));
 		return MYSQL_ERROR;
 	}
-	clock_gettime(CLOCK_MONOTONIC, &end);
-
-	seconds_spent = timespec_diff_in_seconds(&end, &start);
-	if (seconds_spent > THRESHOLD_SLOW_QUERIES) {
-		printf("MySQL slow query!\n"
-		       "\tQuery: `%s`\n\tTime: %.3f\n", sql, seconds_spent);
-		OC_DEBUG(5, "MySQL slow query!"
-			  "\tQuery: `%s`\n\tTime: %.3f\n", sql, seconds_spent);
+	if (timed && clock_gettime(CLOCK_MONOTONIC, &end) == 0) {
+		seconds_spent = timespec_diff_in_seconds(&end, &start);
+		if (seconds_spent > THRESHOLD_SLOW_QUERIES)
+			OC_DEBUG(5, "MySQL slow query: %.3f seconds", seconds_spent);
 	}
 	return MYSQL_SUCCESS;
 }
@@ -349,8 +349,8 @@ enum MYSQLRESULT select_without_fetch(MYSQL *conn, const char *sql,
 
 	*res = mysql_store_result(conn);
 	if (*res == NULL) {
-		OC_DEBUG(0, "Error getting results of `%s`: %s", sql,
-			  mysql_error(conn));
+		OC_DEBUG(0, "Cannot retrieve MySQL results (error %u, SQLSTATE %.5s)",
+			mysql_errno(conn), mysql_sqlstate(conn));
 		return MYSQL_ERROR;
 	}
 

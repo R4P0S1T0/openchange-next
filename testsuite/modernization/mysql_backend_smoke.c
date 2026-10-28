@@ -12,9 +12,11 @@ static int fixture_query(MYSQL *connection, const char *sql)
     queries++; strcpy(last_query, sql);
     return allow_queries ? 0 : 1;
 }
-static const char *fixture_error(MYSQL *connection) { return "fixture SQL rejected"; }
+static unsigned fixture_errno(MYSQL *connection) { return 1234; }
+static const char *fixture_sqlstate(MYSQL *connection) { return "42000"; }
 #define mysql_query fixture_query
-#define mysql_error fixture_error
+#define mysql_errno fixture_errno
+#define mysql_sqlstate fixture_sqlstate
 #include "mapiproxy/util/mysql.c"
 #include "mapiproxy/libmapiproxy/backends/openchangedb_mysql.c"
 #include "mapiproxy/libmapistore/backends/indexing_mysql.c"

@@ -3,9 +3,19 @@
 #include "mapiproxy/util/mysql.h"
 #include <assert.h>
 #include <stdarg.h>
+#include <time.h>
+#include <unistd.h>
 
 static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_CHARSET, FAIL_INIT_COMMAND, FAIL_POOL } failure;
 static bool need_database, charset_set, mode_set;
+static unsigned clock_mode, clock_calls;
+static int fixture_clock_gettime(clockid_t id, struct timespec *value)
+{
+    if (!clock_mode) return clock_gettime(id, value);
+    if (clock_mode == 2 || (clock_mode == 3 && clock_calls++)) return -1;
+    value->tv_sec = clock_calls++ * 2; value->tv_nsec = 0;
+    return 0;
+}
 static unsigned initialized, connected, closed, selections;
 static MYSQL_RES result_fixture;
 static uint64_t result_rows_count = 1;
@@ -60,7 +70,8 @@ static MYSQL *fixture_mysql_connect(MYSQL *mysql, const char *host, const char *
     return mysql;
 }
 static void fixture_mysql_close(MYSQL *mysql) { assert(mysql); closed++; free(mysql); }
-static const char *fixture_mysql_error(MYSQL *mysql) { return "fixture failure"; }
+static unsigned fixture_mysql_errno(MYSQL *mysql) { return 1234; }
+static const char *fixture_mysql_sqlstate(MYSQL *mysql) { return "42000"; }
 static int fixture_mysql_query(MYSQL *mysql, const char *sql)
 {
     assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
@@ -75,7 +86,9 @@ static int fixture_mysql_select(MYSQL *mysql, const char *database)
 #define mysql_options fixture_mysql_options
 #define mysql_real_connect fixture_mysql_connect
 #define mysql_close fixture_mysql_close
-#define mysql_error fixture_mysql_error
+#define mysql_errno fixture_mysql_errno
+#define mysql_sqlstate fixture_mysql_sqlstate
+#define clock_gettime fixture_clock_gettime
 #define mysql_query fixture_mysql_query
 #define mysql_select_db fixture_mysql_select
 #define mysql_store_result fixture_mysql_store_result
@@ -200,6 +213,33 @@ static int named_property_checks(void)
     return 0;
 }
 
+static int diagnostic_checks(void)
+{
+    MYSQL *connection = (MYSQL *)1;
+    MYSQL_RES *result;
+    FILE *output = tmpfile();
+    int saved;
+    const char *private_sql = "SELECT 'private-message-data'";
+    CHECK(output); fflush(stdout); saved = dup(fileno(stdout)); CHECK(saved >= 0);
+    CHECK(dup2(fileno(output), fileno(stdout)) >= 0);
+    logged = 0; logs[0] = 0; failure = FAIL_QUERY;
+    CHECK(execute_query(connection, private_sql) == MYSQL_ERROR);
+    CHECK(strstr(logs, "1234") && strstr(logs, "42000") && !strstr(logs, "private-message-data"));
+    failure = FAIL_NONE; fail_store = true;
+    CHECK(select_without_fetch(connection, private_sql, &result) == MYSQL_ERROR && !result);
+    fail_store = false; clock_mode = 1; clock_calls = 0;
+    CHECK(execute_query(connection, private_sql) == MYSQL_SUCCESS);
+    CHECK(strstr(logs, "slow query: 2.000 seconds") && !strstr(logs, "private-message-data"));
+    for (clock_mode = 2; clock_mode <= 3; clock_mode++) {
+        clock_calls = 0; logged = 0; logs[0] = 0;
+        CHECK(execute_query(connection, private_sql) == MYSQL_SUCCESS && logs[0] == 0);
+    }
+    clock_mode = 0;
+    fflush(stdout); CHECK(ftell(output) == 0);
+    CHECK(dup2(saved, fileno(stdout)) >= 0); close(saved); fclose(output);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL), *pool = talloc_autofree_context(), *limited;
@@ -262,6 +302,7 @@ int main(void)
     CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
     CHECK(result_checks(ctx) == 0);
     CHECK(named_property_checks() == 0);
+    CHECK(diagnostic_checks() == 0);
     talloc_free(ctx);
     puts("MySQL URI/pool failures, escaping, row ownership/shapes, numeric bounds and named property queries: OK");
     return 0;
