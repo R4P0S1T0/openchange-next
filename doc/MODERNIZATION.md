@@ -733,6 +733,38 @@ are removed afterward. This local database proof does not replace AD or mailbox
 server integration. The previous pool commit `bec73a14` also passed all four
 [GitHub CI jobs](https://github.com/R4P0S1T0/openchange-next/actions/runs/40731020676).
 
+## Named property queries and SQL result ownership
+
+Named property lookup and creation now escape client-supplied property names
+using the configured connection contract. Creation formats a checked key and
+INSERT directly instead of assembling a list of unchecked intermediate fields.
+It no longer logs the entire inserted record. Invalid kinds, null names and
+allocation failures return errors before SQL; mapped IDs outside 16 bits or
+invalid numeric results are rejected without overwriting the caller's output.
+
+The shared result readers free driver results on every failure, check row and
+copy allocations, and publish only complete results. A single-row, single-column
+query now returns its value instead of an empty array. The existing provisioning
+layout still skips the first locale column for one-row multi-column results;
+its two-column case now returns the actual folder name. Unsigned numeric parsing
+accepts decimal digits through `UINT64_MAX`, rejects empty/signed/overflowing or
+partially parsed input, and preserves the output on failure. Stored PT_I8 and
+timestamps already use unsigned decimal formatting.
+
+Focused tests cover row shapes, missing/failing results, SQL NULL, oversized row
+counts, allocation/copy failure, numeric limits, missing properties and invalid
+mapped IDs. Native and ASan/UBSan/LeakSanitizer runs pass, as do both full native
+build trees. The private MariaDB check exercises the actual named property
+lookup/create code with apostrophes, backslashes, accented text and supplementary
+Unicode, numeric property IDs, and a literal injection-shaped missing name.
+Its real row/scalar checks also verify the repaired result shapes and integer
+limits. Fixture databases and the private server directory are removed.
+
+Reverse named-property decoding, ID allocation/concurrency and the remaining
+storage operations still need review; this is not full backend qualification.
+The preceding literal-encoding commit `87844f3c` passed all four
+[GitHub CI jobs](https://github.com/R4P0S1T0/openchange-next/actions/runs/40734736817).
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

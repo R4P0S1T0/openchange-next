@@ -368,90 +368,79 @@ enum MYSQLRESULT select_all_strings(TALLOC_CTX *mem_ctx, MYSQL *conn,
 				   const char *sql,
 				   struct StringArrayW_r **_results)
 {
-	MYSQL_RES *res;
+	MYSQL_RES *res = NULL;
 	struct StringArrayW_r *results;
-	uint32_t i, num_rows = 0;
+	MYSQL_ROW row = NULL;
+	uint64_t rows;
+	uint32_t i, fields;
+	bool columns;
 	enum MYSQLRESULT ret;
 
+	if (_results == NULL) return MYSQL_ERROR;
+	*_results = NULL;
 	ret = select_without_fetch(conn, sql, &res);
-	if (ret == MYSQL_NOT_FOUND) {
-		results = talloc_zero(mem_ctx, struct StringArrayW_r);
-		results->cValues = 0;
-	} else if (ret == MYSQL_SUCCESS) {
-		results = talloc_zero(mem_ctx, struct StringArrayW_r);
-		num_rows = mysql_num_rows(res);
-		results->cValues = num_rows;
-		if (results->cValues == 1) {
-			results->cValues  = mysql_field_count(conn) - 1;
-		}
-	} else {
-		// Unexpected error on sql query
-		return ret;
+	if (ret != MYSQL_SUCCESS && ret != MYSQL_NOT_FOUND) return ret;
+	rows = res ? mysql_num_rows(res) : 0;
+	fields = res ? mysql_field_count(conn) : 0;
+	if (rows > UINT32_MAX || (rows && fields == 0)) goto error;
+	/* Provisioning selects one locale column followed by the folder names. */
+	columns = rows == 1 && fields > 1;
+	results = talloc_zero(mem_ctx, struct StringArrayW_r);
+	if (results == NULL) goto error;
+	results->cValues = columns ? fields - 1 : rows;
+	results->lppszW = talloc_zero_array(results, const char *, results->cValues);
+	if (results->cValues && results->lppszW == NULL) goto allocation_error;
+	if (columns) row = mysql_fetch_row(res);
+	for (i = 0; i < results->cValues; i++) {
+		const char *value;
+		if (!columns) row = mysql_fetch_row(res);
+		if (row == NULL) goto allocation_error;
+		value = columns ? row[i + 1] : row[0];
+		if (value == NULL) goto allocation_error;
+		results->lppszW[i] = talloc_strdup(results, value);
+		if (results->lppszW[i] == NULL) goto allocation_error;
 	}
-
-	results->lppszW = talloc_zero_array(results, const char *,
-					    results->cValues);
-	if (num_rows == 1 && results->cValues != 1) {
-		// Getting 1 row with n strings
-		MYSQL_ROW row = mysql_fetch_row(res);
-		for (i = 0; i < results->cValues; i++) {
-			results->lppszW[i] = talloc_strdup(results, row[i+1]);
-		}
-	} else {
-		// Getting n rows with 1 string
-		for (i = 0; i < results->cValues; i++) {
-			MYSQL_ROW row = mysql_fetch_row(res);
-			if (row == NULL) {
-				OC_DEBUG(0, "Error getting row %d of `%s`: %s", i, sql,
-					  mysql_error(conn));
-				mysql_free_result(res);
-				return MYSQL_ERROR;
-			}
-			results->lppszW[i] = talloc_strdup(results, row[0]);
-		}
-	}
-
-	if (ret == MYSQL_SUCCESS) {
-		mysql_free_result(res);
-	}
+	if (res) mysql_free_result(res);
 	*_results = results;
-
 	return MYSQL_SUCCESS;
-}
 
+allocation_error:
+	talloc_free(results);
+error:
+	if (res) mysql_free_result(res);
+	return MYSQL_ERROR;
+}
 
 enum MYSQLRESULT select_first_string(TALLOC_CTX *mem_ctx, MYSQL *conn,
 				    const char *sql, const char **s)
 {
 	MYSQL_RES *res;
+	MYSQL_ROW row;
+	const char *value = NULL;
 	enum MYSQLRESULT ret;
 
+	if (s == NULL) return MYSQL_ERROR;
+	*s = NULL;
 	ret = select_without_fetch(conn, sql, &res);
-	if (ret != MYSQL_SUCCESS) {
-		return ret;
-	}
-
-	MYSQL_ROW row = mysql_fetch_row(res);
-	if (row == NULL) {
-		OC_DEBUG(0, "Error getting row of `%s`: %s", sql,
-			  mysql_error(conn));
-		return MYSQL_ERROR;
-	}
-
-	*s = talloc_strdup(mem_ctx, row[0]);
+	if (ret != MYSQL_SUCCESS) return ret;
+	row = mysql_fetch_row(res);
+	if (row && row[0]) value = talloc_strdup(mem_ctx, row[0]);
 	mysql_free_result(res);
-
+	if (value == NULL) return MYSQL_ERROR;
+	*s = value;
 	return MYSQL_SUCCESS;
 }
-
 
 enum MYSQLRESULT select_first_uint(MYSQL *conn, const char *sql,
 				  uint64_t *n)
 {
-	TALLOC_CTX *mem_ctx = talloc_named(NULL, 0, "select_first_uint");
+	TALLOC_CTX *mem_ctx;
 	const char *result;
 	enum MYSQLRESULT ret;
 
+	if (n == NULL) return MYSQL_ERROR;
+	mem_ctx = talloc_named(NULL, 0, "select_first_uint");
+	if (mem_ctx == NULL) return MYSQL_ERROR;
 	ret = select_first_string(mem_ctx, conn, sql, &result);
 	if (ret != MYSQL_SUCCESS) {
 		talloc_free(mem_ctx);
@@ -566,17 +555,15 @@ const char* _sql_escape(TALLOC_CTX *mem_ctx, const char *s, char c)
 // FIXME use this function instead of strtoull(*, NULL, *) in openchangedb_mysql.c
 bool convert_string_to_ull(const char *str, uint64_t *ret)
 {
-	bool retval = false;
-	char *aux = NULL;
+	uint64_t value = 0;
+	const unsigned char *p = (const unsigned char *)str;
 
-	if (ret != NULL && str != NULL) {
-		*ret = strtoull(str, &aux, 10);
-		if (aux != NULL && *aux == '\0') {
-			retval = true;
-		} else {
-			OC_DEBUG(1, "ERROR converting %s into ull", str);
-		}
+	if (p == NULL || ret == NULL || *p == '\0') return false;
+	for (; *p; p++) {
+		unsigned digit = *p - '0';
+		if (digit > 9 || value > (UINT64_MAX - digit) / 10) return false;
+		value = value * 10 + digit;
 	}
-
-	return retval;
+	*ret = value;
+	return true;
 }

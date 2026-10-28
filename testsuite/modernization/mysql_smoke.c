@@ -7,6 +7,19 @@
 static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_CHARSET, FAIL_INIT_COMMAND, FAIL_POOL } failure;
 static bool need_database, charset_set, mode_set;
 static unsigned initialized, connected, closed, selections;
+static MYSQL_RES result_fixture;
+static uint64_t result_rows_count = 1;
+static unsigned result_fields = 1, result_cursor, acquired, released;
+static char *result_values[3][4] = {{"one"}};
+static bool fail_store, fail_fetch, fail_result_copy, fail_escape;
+static MYSQL_RES *fixture_mysql_store_result(MYSQL *mysql)
+{ if (fail_store) return NULL; result_cursor = 0; acquired++; return &result_fixture; }
+static void fixture_mysql_free_result(MYSQL_RES *result)
+{ assert(result == &result_fixture && released < acquired); released++; }
+static my_ulonglong fixture_mysql_num_rows(MYSQL_RES *result) { return result_rows_count; }
+static unsigned fixture_mysql_field_count(MYSQL *mysql) { return result_fields; }
+static MYSQL_ROW fixture_mysql_fetch_row(MYSQL_RES *result)
+{ return fail_fetch || result_cursor >= result_rows_count ? NULL : result_values[result_cursor++]; }
 static char logs[8192], query[512];
 static size_t logged;
 static void fixture_debug(const char *format, ...)
@@ -65,7 +78,15 @@ static int fixture_mysql_select(MYSQL *mysql, const char *database)
 #define mysql_error fixture_mysql_error
 #define mysql_query fixture_mysql_query
 #define mysql_select_db fixture_mysql_select
+#define mysql_store_result fixture_mysql_store_result
+#define mysql_free_result fixture_mysql_free_result
+#define mysql_num_rows fixture_mysql_num_rows
+#define mysql_field_count fixture_mysql_field_count
+#define mysql_fetch_row fixture_mysql_fetch_row
 #include "mapiproxy/util/mysql.c"
+#include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
+
+void mapistore_set_errno(int status) { errno = status; }
 
 void *__real__talloc_zero(const void *, size_t, const char *);
 void *__wrap__talloc_zero(const void *, size_t, const char *);
@@ -75,11 +96,12 @@ bool __real_htable_add(struct htable *, size_t, const void *);
 bool __wrap_htable_add(struct htable *, size_t, const void *);
 void *__wrap__talloc_zero(const void *ctx, size_t size, const char *name)
 {
-    return failure == FAIL_ENTRY && !strcmp(name, "struct conn_v") ? NULL : __real__talloc_zero(ctx, size, name);
+    return (failure == FAIL_ENTRY && !strcmp(name, "struct conn_v")) ||
+        (fail_escape && strstr(name, "mapiproxy/util/mysql.c:")) ? NULL : __real__talloc_zero(ctx, size, name);
 }
 char *__wrap_talloc_strdup(const void *ctx, const char *value)
 {
-    return failure == FAIL_COPY && !strncmp(value, "mysql://", 8) ? NULL : __real_talloc_strdup(ctx, value);
+    return (failure == FAIL_COPY && !strncmp(value, "mysql://", 8)) || fail_result_copy ? NULL : __real_talloc_strdup(ctx, value);
 }
 bool __wrap_htable_add(struct htable *table, size_t hash, const void *entry)
 { return failure == FAIL_POOL ? false : __real_htable_add(table, hash, entry); }
@@ -88,6 +110,95 @@ bool __wrap_htable_add(struct htable *table, size_t hash, const void *entry)
     fprintf(stderr, "MySQL utility check failed at %d: %s\n", __LINE__, #c); \
     return 1; \
 } } while (0)
+
+static int result_checks(TALLOC_CTX *ctx)
+{
+    MYSQL *connection = (MYSQL *)1;
+    struct StringArrayW_r *array = (void *)1;
+    const char *text = (void *)1;
+    uint64_t number = 7;
+    TALLOC_CTX *limited;
+    size_t blocks;
+    const char *invalid[] = {NULL, "", "-1", "+1", " 1", "1 ", "1x", "18446744073709551616"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        CHECK(!convert_string_to_ull(invalid[i], &number) && number == 7);
+    }
+    CHECK(convert_string_to_ull("18446744073709551615", &number) && number == UINT64_MAX);
+    CHECK(convert_string_to_ull("0", &number) && number == 0);
+    CHECK(!convert_string_to_ull("1", NULL));
+    CHECK(select_all_strings(ctx, connection, "SELECT value", &array) == MYSQL_SUCCESS);
+    CHECK(array->cValues == 1 && !strcmp(array->lppszW[0], "one")); talloc_free(array);
+    result_fields = 2; result_values[0][0] = "en"; result_values[0][1] = "Drafts";
+    CHECK(select_all_strings(ctx, connection, "SELECT locale, name", &array) == MYSQL_SUCCESS);
+    CHECK(array->cValues == 1 && !strcmp(array->lppszW[0], "Drafts")); talloc_free(array);
+    result_fields = 3; result_values[0][2] = "Calendar";
+    CHECK(select_all_strings(ctx, connection, "SELECT locale, names", &array) == MYSQL_SUCCESS);
+    CHECK(array->cValues == 2 && !strcmp(array->lppszW[1], "Calendar")); talloc_free(array);
+    result_rows_count = 2; result_fields = 1; result_values[0][0] = "one"; result_values[1][0] = "two";
+    CHECK(select_all_strings(ctx, connection, "SELECT values", &array) == MYSQL_SUCCESS);
+    CHECK(array->cValues == 2 && !strcmp(array->lppszW[1], "two")); talloc_free(array);
+    result_rows_count = 0;
+    CHECK(select_all_strings(ctx, connection, "SELECT empty", &array) == MYSQL_SUCCESS);
+    CHECK(array->cValues == 0); talloc_free(array);
+    result_rows_count = (uint64_t)UINT32_MAX + 1;
+    CHECK(select_all_strings(ctx, connection, "SELECT oversized", &array) == MYSQL_ERROR && !array);
+    result_rows_count = 1;
+    blocks = talloc_total_blocks(ctx);
+    fail_fetch = true;
+    CHECK(select_first_string(ctx, connection, "SELECT value", &text) == MYSQL_ERROR && !text);
+    CHECK(select_all_strings(ctx, connection, "SELECT value", &array) == MYSQL_ERROR && !array);
+    fail_fetch = false; result_values[0][0] = NULL;
+    CHECK(select_first_string(ctx, connection, "SELECT NULL", &text) == MYSQL_ERROR && !text);
+    CHECK(select_all_strings(ctx, connection, "SELECT NULL", &array) == MYSQL_ERROR && !array);
+    result_values[0][0] = "one"; fail_result_copy = true;
+    CHECK(select_first_string(ctx, connection, "SELECT value", &text) == MYSQL_ERROR && !text);
+    CHECK(select_all_strings(ctx, connection, "SELECT value", &array) == MYSQL_ERROR && !array);
+    fail_result_copy = false; fail_store = true;
+    CHECK(select_first_string(ctx, connection, "SELECT value", &text) == MYSQL_ERROR && !text);
+    fail_store = false;
+    CHECK(talloc_total_blocks(ctx) == blocks && acquired == released);
+    limited = talloc_new(ctx); CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+    CHECK(select_first_string(limited, connection, "SELECT value", &text) == MYSQL_ERROR && !text);
+    CHECK(select_all_strings(limited, connection, "SELECT value", &array) == MYSQL_ERROR && !array);
+    talloc_free(limited);
+    CHECK(acquired == released);
+    return 0;
+}
+
+static int named_property_checks(void)
+{
+    struct namedprops_context context = { .data = (MYSQL *)1 };
+    struct MAPINAMEID name = { .ulKind = MNID_STRING };
+    uint16_t mapped = 7;
+    name.kind.lpwstr.Name = "name\\' OR 1=1 --";
+    result_values[0][0] = "32769";
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_SUCCESS && mapped == 32769);
+    CHECK(strstr(query, "name\\\\\\' OR 1=1 --"));
+    CHECK(create_id(&context, name, mapped) == MAPISTORE_SUCCESS);
+    CHECK(strstr(query, "propName='name\\\\\\' OR 1=1 --'"));
+    fail_escape = true; query[0] = 0;
+    CHECK(create_id(&context, name, mapped) == MAPISTORE_ERR_NO_MEMORY && query[0] == 0);
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_NO_MEMORY && query[0] == 0);
+    fail_escape = false;
+    result_rows_count = 0;
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_NOT_FOUND);
+    result_rows_count = 1; result_values[0][0] = "65536";
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_DATABASE_OPS && mapped == 32769);
+    result_values[0][0] = "-1";
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_DATABASE_OPS && mapped == 32769);
+    fail_fetch = true;
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_DATABASE_OPS);
+    fail_fetch = false; fail_store = true;
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_DATABASE_OPS);
+    fail_store = false; name.kind.lpwstr.Name = NULL; query[0] = 0;
+    CHECK(create_id(&context, name, 1) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
+    name.ulKind = 99;
+    CHECK(create_id(&context, name, 1) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
+    CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
+    CHECK(acquired == released);
+    return 0;
+}
 
 int main(void)
 {
@@ -149,7 +260,9 @@ int main(void)
     query[0] = 0;
     CHECK(execute_query(NULL, "SELECT 1") == MYSQL_ERROR);
     CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
+    CHECK(result_checks(ctx) == 0);
+    CHECK(named_property_checks() == 0);
     talloc_free(ctx);
-    puts("MySQL URI bounds, allocation/transport failure, pool cleanup, identifier quoting and credential-free diagnostics: OK");
+    puts("MySQL URI/pool failures, escaping, row ownership/shapes, numeric bounds and named property queries: OK");
     return 0;
 }

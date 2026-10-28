@@ -36,46 +36,43 @@ static enum mapistore_error get_mapped_id(struct namedprops_context *self,
 					  struct MAPINAMEID nameid,
 					  uint16_t *mapped_id)
 {
-	TALLOC_CTX *mem_ctx = talloc_zero(NULL, TALLOC_CTX);
-	int type = nameid.ulKind;
-	char *guid = GUID_string(mem_ctx, &nameid.lpguid);
-	MYSQL *conn = self->data;
+	TALLOC_CTX *mem_ctx;
+	char *guid, *sql;
+	const char *name;
+	uint64_t id;
+	enum MYSQLRESULT result;
 
-	char *sql = NULL;
-	if (type == MNID_ID) {
-		uint32_t prop_id = nameid.kind.lid;
+	MAPISTORE_RETVAL_IF(!self || !self->data || !mapped_id,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(nameid.ulKind != MNID_ID && nameid.ulKind != MNID_STRING,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	guid = GUID_string(mem_ctx, &nameid.lpguid);
+	MAPISTORE_RETVAL_IF(!guid, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	if (nameid.ulKind == MNID_ID) {
 		sql = talloc_asprintf(mem_ctx,
 			"SELECT mappedId FROM "NAMEDPROPS_MYSQL_TABLE" "
-			"WHERE `type`=%d AND `oleguid`='%s' AND `propId`=%d",
-			type, guid, prop_id);
-	} else if (type == MNID_STRING) {
-		const char *prop_name = nameid.kind.lpwstr.Name;
-		sql = talloc_asprintf(mem_ctx,
-			"SELECT mappedId FROM "NAMEDPROPS_MYSQL_TABLE" "
-			"WHERE `type`=%d AND `oleguid`='%s' AND `propName`='%s'",
-			type, guid, prop_name);
+			"WHERE `type`=%u AND `oleguid`='%s' AND `propId`=%u",
+			nameid.ulKind, guid, nameid.kind.lid);
 	} else {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERROR, mem_ctx);
+		MAPISTORE_RETVAL_IF(!nameid.kind.lpwstr.Name, MAPISTORE_ERR_INVALID_PARAMETER, mem_ctx);
+		name = _sql(mem_ctx, nameid.kind.lpwstr.Name);
+		MAPISTORE_RETVAL_IF(!name, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+		sql = talloc_asprintf(mem_ctx,
+			"SELECT mappedId FROM "NAMEDPROPS_MYSQL_TABLE" "
+			"WHERE `type`=%u AND `oleguid`='%s' AND `propName`='%s'",
+			nameid.ulKind, guid, name);
 	}
-
-	if (mysql_query(conn, sql) != 0) {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
-	}
-
-	MYSQL_RES *res = mysql_store_result(conn);
-	if (mysql_num_rows(res) == 0) {
-		// Not found
-		mysql_free_result(res);
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_NOT_FOUND, mem_ctx);
-	}
-	MYSQL_ROW row = mysql_fetch_row(res);
-	*mapped_id = strtol(row[0], NULL, 10);
-	mysql_free_result(res);
-
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	result = select_first_uint(self->data, sql, &id);
+	MAPISTORE_RETVAL_IF(result == MYSQL_NOT_FOUND, MAPISTORE_ERR_NOT_FOUND, mem_ctx);
+	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS || id > UINT16_MAX,
+		MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
+	*mapped_id = id;
 	talloc_free(mem_ctx);
 	return MAPISTORE_SUCCESS;
 }
-
 
 /**
    \details Return the next unused namedprops ID
@@ -137,40 +134,35 @@ static enum mapistore_error create_id(struct namedprops_context *self,
 				      struct MAPINAMEID nameid,
 				      uint16_t mapped_id)
 {
-	TALLOC_CTX *mem_ctx = talloc_zero(NULL, TALLOC_CTX);
-	const char **fields = (const char **) str_list_make_empty(mem_ctx);
+	TALLOC_CTX *mem_ctx;
+	char *guid, *key, *sql;
+	const char *name;
+	enum MYSQLRESULT result;
 
-	fields = str_list_add(fields, talloc_asprintf(mem_ctx, "type=%d",
-						      nameid.ulKind));
-	fields = str_list_add(fields, talloc_asprintf(mem_ctx, "propType=%d",
-						      PT_NULL));
-	char *guid = GUID_string(mem_ctx, &nameid.lpguid);
-	fields = str_list_add(fields, talloc_asprintf(mem_ctx, "oleguid='%s'",
-						      guid));
-	fields = str_list_add(fields, talloc_asprintf(mem_ctx, "mappedId=%u",
-						      mapped_id));
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(nameid.ulKind != MNID_ID && nameid.ulKind != MNID_STRING,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	guid = GUID_string(mem_ctx, &nameid.lpguid);
+	MAPISTORE_RETVAL_IF(!guid, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	if (nameid.ulKind == MNID_ID) {
-		fields = str_list_add(fields,
-				      talloc_asprintf(mem_ctx, "propId=%u",
-						      nameid.kind.lid));
-	} else if (nameid.ulKind == MNID_STRING) {
-		fields = str_list_add(fields,
-				      talloc_asprintf(mem_ctx, "propName='%s'",
-						      nameid.kind.lpwstr.Name));
+		key = talloc_asprintf(mem_ctx, "propId=%u", nameid.kind.lid);
 	} else {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERROR, mem_ctx);
+		MAPISTORE_RETVAL_IF(!nameid.kind.lpwstr.Name, MAPISTORE_ERR_INVALID_PARAMETER, mem_ctx);
+		name = _sql(mem_ctx, nameid.kind.lpwstr.Name);
+		MAPISTORE_RETVAL_IF(!name, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+		key = talloc_asprintf(mem_ctx, "propName='%s'", name);
 	}
-
-	char *fields_sql = str_list_join(mem_ctx, fields, ',');
-	char *sql = talloc_asprintf(mem_ctx,
-		"INSERT INTO " NAMEDPROPS_MYSQL_TABLE " SET %s", fields_sql);
-	OC_DEBUG(5, "Inserting record:\n%s\n", sql);
-	MYSQL *conn = self->data;
-	if (mysql_query(conn, sql) != 0) {
-		MAPISTORE_RETVAL_IF(true, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
-	}
-
+	MAPISTORE_RETVAL_IF(!key, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	sql = talloc_asprintf(mem_ctx,
+		"INSERT INTO "NAMEDPROPS_MYSQL_TABLE" SET type=%u, propType=%u, "
+		"oleguid='%s', mappedId=%u, %s",
+		nameid.ulKind, PT_NULL, guid, mapped_id, key);
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	result = execute_query(self->data, sql);
 	talloc_free(mem_ctx);
+	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, NULL);
 	return MAPISTORE_SUCCESS;
 }
 

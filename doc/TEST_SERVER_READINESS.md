@@ -76,7 +76,10 @@ upgrade/restore validation beyond this first test milestone.
   and backslashes under an explicitly configured UTF-8 session, including
   reconnects. Current escape callers check allocation failure; message property
   transactions roll back. Focused native/sanitizer tests and a private real
-  MariaDB check pass. Full SQL and storage integration review remains pending.
+  MariaDB check pass. Named property creation/lookup escape client names and
+  validate returned IDs; shared result readers handle allocation/fetch failures
+  and single-value result shapes. Full SQL and storage integration review
+  remains pending.
 
 These changes are not a complete security audit. The remaining native parser
 and server paths are part of the acceptance work above.

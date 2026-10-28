@@ -1,6 +1,9 @@
 /* Explicit, disposable SQL endpoint only; unique databases are removed after use. */
 #include "mapiproxy/util/mysql.c"
 #include <unistd.h>
+#include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
+
+void mapistore_set_errno(int status) { errno = status; }
 
 #define FAIL() do { fprintf(stderr, "Live SQL failure at line %d\n", __LINE__); goto end; } while (0)
 
@@ -46,6 +49,43 @@ static bool literals_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
     return true;
 }
 
+static bool named_properties_roundtrip(MYSQL *connection)
+{
+    struct namedprops_context backend = { .data = connection };
+    struct MAPINAMEID name = { .ulKind = MNID_STRING };
+    const char *values[] = {"name'", "backslash\\' OR 1=1 --", "caf\xc3\xa9", "emoji \xf0\x9f\x98\x80"};
+    uint16_t mapped;
+    name.lpguid = GUID_random();
+    if (mysql_query(connection, "CREATE TABLE named_properties (`type` INT, propType INT, "
+        "oleguid VARCHAR(36), mappedId INT UNSIGNED, propId BIGINT UNSIGNED, propName TEXT) "
+        "CHARACTER SET utf8mb4") != 0) return false;
+    for (size_t j = 0; j < sizeof(values) / sizeof(values[0]); j++) {
+        name.kind.lpwstr.Name = values[j];
+        if (create_id(&backend, name, 32768 + j) != MAPISTORE_SUCCESS ||
+            get_mapped_id(&backend, name, &mapped) != MAPISTORE_SUCCESS || mapped != 32768 + j) return false;
+    }
+    name.kind.lpwstr.Name = "missing' OR 1=1 --";
+    if (get_mapped_id(&backend, name, &mapped) != MAPISTORE_ERR_NOT_FOUND) return false;
+    name.ulKind = MNID_ID; name.kind.lid = UINT32_MAX;
+    return create_id(&backend, name, 65534) == MAPISTORE_SUCCESS &&
+        get_mapped_id(&backend, name, &mapped) == MAPISTORE_SUCCESS && mapped == 65534;
+}
+
+static bool result_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
+{
+    struct StringArrayW_r *array;
+    uint64_t number = 7;
+    if (select_all_strings(ctx, connection, "SELECT 'only'", &array) != MYSQL_SUCCESS) return false;
+    if (array->cValues != 1 || strcmp(array->lppszW[0], "only")) { talloc_free(array); return false; }
+    talloc_free(array);
+    if (select_all_strings(ctx, connection, "SELECT 'en', 'Drafts'", &array) != MYSQL_SUCCESS) return false;
+    if (array->cValues != 1 || strcmp(array->lppszW[0], "Drafts")) { talloc_free(array); return false; }
+    talloc_free(array);
+    return select_first_uint(connection, "SELECT '18446744073709551615'", &number) == MYSQL_SUCCESS &&
+        number == UINT64_MAX && select_first_uint(connection, "SELECT '-1'", &number) == MYSQL_ERROR &&
+        number == UINT64_MAX;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
@@ -88,14 +128,15 @@ int main(void)
             !scalar_equals(connection, "SELECT @@SESSION.sql_mode NOT LIKE '%NO_BACKSLASH_ESCAPES%'", "1") ||
             !scalar_equals(connection, "SELECT @@character_set_connection", "utf8mb4") ||
             !scalar_equals(connection, "SELECT DATABASE()", name) ||
-            !literals_roundtrip(ctx, connection)) FAIL();
+            !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(connection) ||
+            !result_roundtrip(ctx, connection)) FAIL();
         quoted = mysql_quote_dbname(ctx, name);
         drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE %s", quoted) : NULL;
         if (!drop || mysql_query(connection, drop) != 0) FAIL();
         close_all_connections();
     }
     result = 0;
-    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect and cleanup: OK");
+    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results and cleanup: OK");
 end:
     close_all_connections(); talloc_free(ctx);
     return result;
