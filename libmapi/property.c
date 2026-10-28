@@ -1281,6 +1281,25 @@ _PUBLIC_ bool set_SPropValue_proptag_date_timeval(struct SPropValue *lpProps, en
 }
 
 
+/* Keep decoded children under the result, with one cleanup path for every format. */
+static void *property_pull_binary(TALLOC_CTX *mem_ctx, const struct Binary_r *bin,
+	size_t size, const char *type_name, ndr_pull_flags_fn_t pull)
+{
+	DATA_BLOB blob;
+	void *value;
+	if (bin == NULL || bin->cb == 0 || bin->lpb == NULL) return NULL;
+	value = talloc_zero_size(mem_ctx, size);
+	if (value == NULL) return NULL;
+	talloc_set_name_const(value, type_name);
+	blob.data = bin->lpb;
+	blob.length = bin->cb;
+	if (ndr_pull_struct_blob(&blob, value, value, pull) != NDR_ERR_SUCCESS) {
+		talloc_free(value);
+		return NULL;
+	}
+	return value;
+}
+
 /**
    \details Retrieve a RecurrencePattern structure from a binary blob
 
@@ -1297,36 +1316,8 @@ _PUBLIC_ bool set_SPropValue_proptag_date_timeval(struct SPropValue *lpProps, en
 _PUBLIC_ struct RecurrencePattern *get_RecurrencePattern(TALLOC_CTX *mem_ctx, 
 							 struct Binary_r *bin)
 {
-        struct RecurrencePattern	*RecurrencePattern = NULL;
-        struct ndr_pull			*ndr;
-        enum ndr_err_code		ndr_err_code;
-	
-        /* Sanity checks */
-        if (!bin) return NULL;
-        if (!bin->cb) return NULL;
-        if (!bin->lpb) return NULL;
-
-        ndr = talloc_zero(mem_ctx, struct ndr_pull);
-        if (ndr == NULL) return NULL;
-        ndr->offset = 0;
-        ndr->data = bin->lpb;
-        ndr->data_size = bin->cb;
-
-        ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-        RecurrencePattern = talloc_zero(mem_ctx, struct RecurrencePattern);
-        if (RecurrencePattern == NULL) { talloc_free(ndr); return NULL; }
-        ndr->current_mem_ctx = RecurrencePattern;
-        ndr_err_code = ndr_pull_RecurrencePattern(ndr, NDR_SCALARS, RecurrencePattern);
-
-        talloc_free(ndr);
-
-        if (ndr_err_code != NDR_ERR_SUCCESS) {
-                talloc_free(RecurrencePattern);
-                return NULL;
-        }
-	
-
-        return RecurrencePattern;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct RecurrencePattern), "struct RecurrencePattern",
+		(ndr_pull_flags_fn_t)ndr_pull_RecurrencePattern);
 }
 
 _PUBLIC_ size_t set_RecurrencePattern_size(const struct RecurrencePattern *rp)
@@ -1391,35 +1382,8 @@ _PUBLIC_ struct Binary_r *set_RecurrencePattern(TALLOC_CTX *mem_ctx, const struc
 _PUBLIC_ struct AppointmentRecurrencePattern *get_AppointmentRecurrencePattern(TALLOC_CTX *mem_ctx, 
 									       struct Binary_r *bin)
 {
-        struct AppointmentRecurrencePattern		*arp = NULL;
-        struct ndr_pull					*ndr;
-        enum ndr_err_code				ndr_err_code;
-
-        /* Sanity checks */
-        if (!bin) return NULL;
-        if (!bin->cb) return NULL;
-        if (!bin->lpb) return NULL;
-
-        ndr = talloc_zero(mem_ctx, struct ndr_pull);
-        if (ndr == NULL) return NULL;
-        ndr->offset = 0;
-        ndr->data = bin->lpb;
-        ndr->data_size = bin->cb;
-
-        ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-        arp = talloc_zero(mem_ctx, struct AppointmentRecurrencePattern);
-        if (arp == NULL) { talloc_free(ndr); return NULL; }
-        ndr->current_mem_ctx = arp;
-        ndr_err_code = ndr_pull_AppointmentRecurrencePattern(ndr, NDR_SCALARS, arp);
-
-        talloc_free(ndr);
-
-        if (ndr_err_code != NDR_ERR_SUCCESS) {
-                talloc_free(arp);
-                return NULL;
-        }
-
-        return arp;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct AppointmentRecurrencePattern), "struct AppointmentRecurrencePattern",
+		(ndr_pull_flags_fn_t)ndr_pull_AppointmentRecurrencePattern);
 }
 
 _PUBLIC_ size_t set_AppointmentRecurrencePattern_size(const struct AppointmentRecurrencePattern *arp)
@@ -1552,35 +1516,8 @@ size_t set_ExtendedException_size(uint32_t WriterVersion2, enum OverrideFlags fl
 _PUBLIC_ struct TimeZoneStruct *get_TimeZoneStruct(TALLOC_CTX *mem_ctx, 
 						   struct Binary_r *bin)
 {
-	struct TimeZoneStruct	*TimeZoneStruct = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (ndr == NULL) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	TimeZoneStruct = talloc_zero(mem_ctx, struct TimeZoneStruct);
-	if (TimeZoneStruct == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = TimeZoneStruct;
-	ndr_err_code = ndr_pull_TimeZoneStruct(ndr, NDR_SCALARS, TimeZoneStruct);
-
-	talloc_free(ndr);
-	
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(TimeZoneStruct);
-		return NULL;
-	}
-
-	return TimeZoneStruct;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct TimeZoneStruct), "struct TimeZoneStruct",
+		(ndr_pull_flags_fn_t)ndr_pull_TimeZoneStruct);
 }
 
 _PUBLIC_ struct Binary_r *set_TimeZoneStruct(TALLOC_CTX *mem_ctx, const struct TimeZoneStruct *TimeZoneStruct)
@@ -1650,35 +1587,8 @@ end:
  */
 _PUBLIC_ struct PtypServerId *get_PtypServerId(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct PtypServerId	*PtypServerId = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (ndr == NULL) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	PtypServerId = talloc_zero(mem_ctx, struct PtypServerId);
-	if (PtypServerId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = PtypServerId;
-	ndr_err_code = ndr_pull_PtypServerId(ndr, NDR_SCALARS, PtypServerId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(PtypServerId);
-		return NULL;
-	}
-
-	return PtypServerId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct PtypServerId), "struct PtypServerId",
+		(ndr_pull_flags_fn_t)ndr_pull_PtypServerId);
 }
 
 /**
@@ -1697,35 +1607,8 @@ _PUBLIC_ struct PtypServerId *get_PtypServerId(TALLOC_CTX *mem_ctx, struct Binar
 _PUBLIC_ struct GlobalObjectId *get_GlobalObjectId(TALLOC_CTX *mem_ctx,
 						   struct Binary_r *bin)
 {
-	struct GlobalObjectId	*GlobalObjectId = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (ndr == NULL) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	GlobalObjectId = talloc_zero(mem_ctx, struct GlobalObjectId);
-	if (GlobalObjectId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = GlobalObjectId;
-	ndr_err_code = ndr_pull_GlobalObjectId(ndr, NDR_SCALARS, GlobalObjectId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(GlobalObjectId);
-		return NULL;
-	}
-
-	return GlobalObjectId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct GlobalObjectId), "struct GlobalObjectId",
+		(ndr_pull_flags_fn_t)ndr_pull_GlobalObjectId);
 }
 
 /**
@@ -1743,35 +1626,8 @@ _PUBLIC_ struct GlobalObjectId *get_GlobalObjectId(TALLOC_CTX *mem_ctx,
  */
 _PUBLIC_ struct MessageEntryId *get_MessageEntryId(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct MessageEntryId	*MessageEntryId = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (ndr == NULL) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	MessageEntryId = talloc_zero(mem_ctx, struct MessageEntryId);
-	if (MessageEntryId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = MessageEntryId;
-	ndr_err_code = ndr_pull_MessageEntryId(ndr, NDR_SCALARS, MessageEntryId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(MessageEntryId);
-		return NULL;
-	}
-
-	return MessageEntryId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct MessageEntryId), "struct MessageEntryId",
+		(ndr_pull_flags_fn_t)ndr_pull_MessageEntryId);
 }
 
 /**
@@ -1788,35 +1644,8 @@ _PUBLIC_ struct MessageEntryId *get_MessageEntryId(TALLOC_CTX *mem_ctx, struct B
  */
 _PUBLIC_ struct FolderEntryId *get_FolderEntryId(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct FolderEntryId	*FolderEntryId = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (ndr == NULL) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	FolderEntryId = talloc_zero(mem_ctx, struct FolderEntryId);
-	if (FolderEntryId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = FolderEntryId;
-	ndr_err_code = ndr_pull_FolderEntryId(ndr, NDR_SCALARS, FolderEntryId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(FolderEntryId);
-		return NULL;
-	}
-
-	return FolderEntryId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct FolderEntryId), "struct FolderEntryId",
+		(ndr_pull_flags_fn_t)ndr_pull_FolderEntryId);
 }
 
 /**
@@ -1831,35 +1660,8 @@ _PUBLIC_ struct FolderEntryId *get_FolderEntryId(TALLOC_CTX *mem_ctx, struct Bin
  */
 _PUBLIC_ struct AddressBookEntryId *get_AddressBookEntryId(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct AddressBookEntryId	*AddressBookEntryId = NULL;
-	struct ndr_pull			*ndr;
-	enum ndr_err_code		ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (!ndr) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	AddressBookEntryId = talloc_zero(mem_ctx, struct AddressBookEntryId);
-	if (AddressBookEntryId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = AddressBookEntryId;
-	ndr_err_code = ndr_pull_AddressBookEntryId(ndr, NDR_SCALARS, AddressBookEntryId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(AddressBookEntryId);
-		return NULL;
-	}
-
-	return AddressBookEntryId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct AddressBookEntryId), "struct AddressBookEntryId",
+		(ndr_pull_flags_fn_t)ndr_pull_AddressBookEntryId);
 }
 
 /**
@@ -1875,35 +1677,8 @@ _PUBLIC_ struct AddressBookEntryId *get_AddressBookEntryId(TALLOC_CTX *mem_ctx, 
  */
 _PUBLIC_ struct OneOffEntryId *get_OneOffEntryId(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct OneOffEntryId	*OneOffEntryId = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (!ndr) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	OneOffEntryId = talloc_zero(mem_ctx, struct OneOffEntryId);
-	if (OneOffEntryId == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = OneOffEntryId;
-	ndr_err_code = ndr_pull_OneOffEntryId(ndr, NDR_SCALARS, OneOffEntryId);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(OneOffEntryId);
-		return NULL;
-	}
-
-	return OneOffEntryId;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct OneOffEntryId), "struct OneOffEntryId",
+		(ndr_pull_flags_fn_t)ndr_pull_OneOffEntryId);
 }
 
 /**
@@ -1919,35 +1694,8 @@ _PUBLIC_ struct OneOffEntryId *get_OneOffEntryId(TALLOC_CTX *mem_ctx, struct Bin
  */
 _PUBLIC_ struct PersistData *get_PersistData(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct PersistData	*PersistData = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (!ndr) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	PersistData = talloc_zero(mem_ctx, struct PersistData);
-	if (PersistData == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = PersistData;
-	ndr_err_code = ndr_pull_PersistData(ndr, NDR_SCALARS, PersistData);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(PersistData);
-		return NULL;
-	}
-
-	return PersistData;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct PersistData), "struct PersistData",
+		(ndr_pull_flags_fn_t)ndr_pull_PersistData);
 }
 
 /**
@@ -1963,35 +1711,8 @@ _PUBLIC_ struct PersistData *get_PersistData(TALLOC_CTX *mem_ctx, struct Binary_
  */
 _PUBLIC_ struct PersistDataArray *get_PersistDataArray(TALLOC_CTX *mem_ctx, struct Binary_r *bin)
 {
-	struct PersistDataArray	*PersistDataArray = NULL;
-	struct ndr_pull		*ndr;
-	enum ndr_err_code	ndr_err_code;
-
-	/* Sanity checks */
-	if (!bin) return NULL;
-	if (!bin->cb) return NULL;
-	if (!bin->lpb) return NULL;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-	if (!ndr) return NULL;
-	ndr->offset = 0;
-	ndr->data = bin->lpb;
-	ndr->data_size = bin->cb;
-
-	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
-	PersistDataArray = talloc_zero(mem_ctx, struct PersistDataArray);
-	if (PersistDataArray == NULL) { talloc_free(ndr); return NULL; }
-	ndr->current_mem_ctx = PersistDataArray;
-	ndr_err_code = ndr_pull_PersistDataArray(ndr, NDR_SCALARS|NDR_BUFFERS, PersistDataArray);
-
-	talloc_free(ndr);
-
-	if (ndr_err_code != NDR_ERR_SUCCESS) {
-		talloc_free(PersistDataArray);
-		return NULL;
-	}
-
-	return PersistDataArray;
+	return property_pull_binary(mem_ctx, bin, sizeof(struct PersistDataArray), "struct PersistDataArray",
+		(ndr_pull_flags_fn_t)ndr_pull_PersistDataArray);
 }
 
 /**

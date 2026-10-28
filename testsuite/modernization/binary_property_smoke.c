@@ -18,7 +18,7 @@
     CHECK(ndr_push_ ## type(push, NDR_SCALARS, &(source)) == NDR_ERR_SUCCESS); \
     bin.cb = push->offset; bin.lpb = push->data; \
     decoded = get_ ## type(owner, &bin); \
-    CHECK(decoded && talloc_parent(decoded) == owner); \
+    CHECK(decoded && talloc_parent(decoded) == owner && talloc_get_type(decoded, struct type) == decoded); \
     talloc_free(push); \
     CHECK(verify); \
     talloc_free(decoded); \

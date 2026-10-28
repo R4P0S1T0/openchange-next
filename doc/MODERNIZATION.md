@@ -518,6 +518,13 @@ fixtures also inspect nested elements and cleanup. Native, source-copy and
 ASan/UBSan checks pass (local leak detection disabled). This addresses ownership;
 all binary property formats still need further semantic and length-limit review.
 
+The fixed-structure binary readers share a small allocation/cleanup path through
+Samba's public ndr_pull_struct_blob API. Their exported signatures and talloc
+type names remain unchanged. The generated fixture checks also verify those
+types, nested ownership and cleanup; calendar and persistent-data fixtures pass
+with the shared reader, natively and with ASan/UBSan. This removes roughly 280
+lines of duplicated parser setup and error handling.
+
 ## Literal recipient directory lookup
 
 ModifyRecipients now escapes the complete legacyExchangeDN before an exact LDB
