@@ -44,7 +44,7 @@ jobs:
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapitest --no-server --database "$RUNNER_TEMP/profiles.ldb"
       - run: make check-mysql-utils
       - name: Check MySQL failure and pool paths with sanitizers
-        run: make -W testsuite/modernization/mysql_smoke.c check-mysql-utils CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+        run: make -W testsuite/modernization/mysql_smoke.c -W testsuite/modernization/mysql_backend_smoke.c check-mysql-utils CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - name: Check real MySQL database creation and cleanup
         run: make check-mysql-live
         env:

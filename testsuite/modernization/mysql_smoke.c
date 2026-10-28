@@ -4,9 +4,9 @@
 #include <assert.h>
 #include <stdarg.h>
 
-static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_POOL } failure;
-static bool need_database;
-static unsigned initialized, connected, closed;
+static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_CHARSET, FAIL_INIT_COMMAND, FAIL_POOL } failure;
+static bool need_database, charset_set, mode_set;
+static unsigned initialized, connected, closed, selections;
 static char logs[8192], query[512];
 static size_t logged;
 static void fixture_debug(const char *format, ...)
@@ -21,17 +21,29 @@ static void fixture_debug(const char *format, ...)
 static MYSQL *fixture_mysql_init(MYSQL *existing)
 {
     if (failure == FAIL_INIT) return NULL;
-    initialized++;
+    initialized++; charset_set = mode_set = false; selections = 0;
     return calloc(1, sizeof(MYSQL));
 }
 static int fixture_mysql_options(MYSQL *mysql, enum mysql_option option, const void *value)
-{ assert(mysql); return 0; }
+{
+    assert(mysql);
+    if (option == MYSQL_SET_CHARSET_NAME) {
+        if (failure == FAIL_CHARSET) return 1;
+        assert(!strcmp(value, "utf8mb4")); charset_set = true;
+    }
+    if (option == MYSQL_INIT_COMMAND) {
+        if (failure == FAIL_INIT_COMMAND) return 1;
+        assert(strstr(value, "NO_BACKSLASH_ESCAPES")); mode_set = true;
+    }
+    return 0;
+}
 static MYSQL *fixture_mysql_connect(MYSQL *mysql, const char *host, const char *user,
     const char *password, const char *database, unsigned port, const char *socket, unsigned long flags)
 {
-    assert(mysql && host && user);
+    assert(mysql && host && user && charset_set && mode_set);
     connected++;
-    if (failure == FAIL_AUTH || ((need_database || failure == FAIL_QUERY || failure == FAIL_SELECT) && database)) return NULL;
+    assert(database == NULL);
+    if (failure == FAIL_AUTH) return NULL;
     return mysql;
 }
 static void fixture_mysql_close(MYSQL *mysql) { assert(mysql); closed++; free(mysql); }
@@ -41,7 +53,8 @@ static int fixture_mysql_query(MYSQL *mysql, const char *sql)
     assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
     return failure == FAIL_QUERY;
 }
-static int fixture_mysql_select(MYSQL *mysql, const char *database) { return failure == FAIL_SELECT; }
+static int fixture_mysql_select(MYSQL *mysql, const char *database)
+{ return failure == FAIL_SELECT || (selections++ == 0 && (need_database || failure == FAIL_QUERY)); }
 
 #undef OC_DEBUG
 #define OC_DEBUG(level, ...) fixture_debug(__VA_ARGS__)
@@ -100,6 +113,17 @@ int main(void)
     CHECK(!parse_connection_string(limited, uri, &host, &port, &user, &password, &database));
     CHECK(host == NULL && user == NULL && password == NULL && database == NULL && port == 0);
     talloc_free(limited);
+    {
+        const char payload[] = {'a', '\\', '\'', ' ', 'O', 'R', ' ', '1', '=', '1', 0};
+        const char *escaped = _sql(ctx, payload);
+        CHECK(escaped && strlen(escaped) == strlen(payload) + 2);
+        CHECK(escaped[1] == '\\' && escaped[2] == '\\' && escaped[3] == '\\' && escaped[4] == '\'');
+        CHECK(!strcmp(payload + 3, escaped + 5));
+        limited = talloc_new(ctx); CHECK(limited && talloc_set_memlimit(limited, 1) == 0);
+        CHECK(_sql(limited, payload) == NULL);
+        CHECK(!strcmp(_sql(limited, "plain"), "plain"));
+        talloc_free(limited);
+    }
     for (failure = FAIL_INIT; failure <= FAIL_POOL; failure++) {
         unsigned before = closed, allocated = initialized;
         CHECK(create_connection(uri, &mysql) == NULL && mysql == NULL && ht.elems == 0);
@@ -121,7 +145,10 @@ int main(void)
     CHECK(!strcmp(query, "CREATE DATABASE `db``quoted`"));
     close_all_connections(); CHECK(closed == initialized && talloc_total_blocks(pool) == blocks);
     CHECK(strstr(logs, "fixture-secret") == NULL && strstr(logs, "mysql://") == NULL);
-    CHECK(connected > initialized);
+    CHECK(connected <= initialized);
+    query[0] = 0;
+    CHECK(execute_query(NULL, "SELECT 1") == MYSQL_ERROR);
+    CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
     talloc_free(ctx);
     puts("MySQL URI bounds, allocation/transport failure, pool cleanup, identifier quoting and credential-free diagnostics: OK");
     return 0;

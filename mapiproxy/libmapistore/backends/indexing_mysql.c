@@ -83,6 +83,7 @@ static memcached_st *_memcached_setup(struct indexing_context *ictx,
 				      const char *conn_str,
 				      const char *username)
 {
+	const char *escaped_username;
 	TALLOC_CTX		*mem_ctx;
 	char			*sql;
 	int			mret;
@@ -122,9 +123,15 @@ static memcached_st *_memcached_setup(struct indexing_context *ictx,
 	mem_ctx = talloc_new(NULL);
 	if (!mem_ctx) return NULL;
 
+	escaped_username = _sql(mem_ctx, username);
+	if (!escaped_username) {
+		talloc_free(mem_ctx);
+		memcached_free(memc);
+		return NULL;
+	}
 	sql = talloc_asprintf(mem_ctx, "SELECT fmid,url FROM "INDEXING_TABLE" "
 			      "WHERE username = '%s' AND soft_deleted = '%d'",
-			      _sql(mem_ctx, username), 0);
+			      escaped_username, 0);
 
 	mret = select_without_fetch(MYSQL(ictx), sql, &res);
 	if (mret != MYSQL_SUCCESS) {
@@ -345,6 +352,7 @@ static enum mapistore_error mysql_search_existing_fmid(struct indexing_context *
 						       const char *username,
 						       uint64_t fmid, bool *is_soft_deleted)
 {
+	const char *escaped_username;
 	int		ret;
 	uint64_t	soft_deleted;
 	char		*sql;
@@ -357,10 +365,12 @@ static enum mapistore_error mysql_search_existing_fmid(struct indexing_context *
 	MAPISTORE_RETVAL_IF(!is_soft_deleted, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 
 	mem_ctx = talloc_new(NULL);
+	escaped_username = _sql(mem_ctx, username);
+	MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	sql = talloc_asprintf(mem_ctx,
 		"SELECT soft_deleted FROM %s "
 		"WHERE username = '%s' AND fmid = '%"PRIu64"'",
-		INDEXING_TABLE, _sql(mem_ctx, username), fmid);
+		INDEXING_TABLE, escaped_username, fmid);
 	ret = select_first_uint(MYSQL(ictx), sql, &soft_deleted);
 	MAPI_RETVAL_IF(ret != MYSQL_SUCCESS, MAPISTORE_ERR_EXIST, mem_ctx);
 
@@ -388,6 +398,7 @@ static enum mapistore_error mysql_record_add(struct indexing_context *ictx,
 					   uint64_t fmid,
 					   const char *mapistore_URI)
 {
+	const char *escaped_username, *escaped_mapistore_URI;
 	enum mapistore_error	retval;
 	TALLOC_CTX		*mem_ctx;
 	int			ret;
@@ -405,12 +416,15 @@ static enum mapistore_error mysql_record_add(struct indexing_context *ictx,
 	MAPISTORE_RETVAL_IF(ret == MAPISTORE_SUCCESS, MAPISTORE_ERR_EXIST, NULL);
 
 	mem_ctx = talloc_new(NULL);
+	escaped_username = _sql(mem_ctx, username);
+	escaped_mapistore_URI = _sql(mem_ctx, mapistore_URI);
+	MAPISTORE_RETVAL_IF(!escaped_username || !escaped_mapistore_URI, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	sql = talloc_asprintf(mem_ctx,
 		"INSERT INTO %s "
 		"(username, fmid, url, soft_deleted) "
 		"VALUES ('%s', '%"PRIu64"', '%s', '%d')",
-		INDEXING_TABLE, _sql(mem_ctx, username), fmid,
-		_sql(mem_ctx, mapistore_URI), 0);
+		INDEXING_TABLE, escaped_username, fmid,
+		escaped_mapistore_URI, 0);
 
 	ret = execute_query(MYSQL(ictx), sql);
 	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
@@ -444,6 +458,7 @@ static enum mapistore_error mysql_record_update(struct indexing_context *ictx,
 						uint64_t fmid,
 						const char *mapistore_URI)
 {
+	const char *escaped_mapistore_URI, *escaped_username;
 	enum mapistore_error	retval;
 	int			ret;
 	char			*sql;
@@ -458,11 +473,14 @@ static enum mapistore_error mysql_record_update(struct indexing_context *ictx,
 	mem_ctx = talloc_new(NULL);
 	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
 
+	escaped_mapistore_URI = _sql(mem_ctx, mapistore_URI);
+	escaped_username = _sql(mem_ctx, username);
+	MAPISTORE_RETVAL_IF(!escaped_mapistore_URI || !escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	sql = talloc_asprintf(mem_ctx,
 		"UPDATE %s "
 		"SET url = '%s' "
 		"WHERE username = '%s' AND fmid = '%"PRIu64"'",
-		INDEXING_TABLE, _sql(mem_ctx, mapistore_URI), _sql(mem_ctx, username), fmid);
+		INDEXING_TABLE, escaped_mapistore_URI, escaped_username, fmid);
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 
 	ret = execute_query(MYSQL(ictx), sql);
@@ -507,6 +525,7 @@ static enum mapistore_error mysql_record_get_uri(struct indexing_context *ictx,
 						 char **urip,
 						 bool *soft_deletedp)
 {
+	const char *escaped_username;
 	int		ret;
 	char		*sql;
 	MYSQL_RES	*res = NULL;
@@ -520,10 +539,12 @@ static enum mapistore_error mysql_record_get_uri(struct indexing_context *ictx,
 	MAPISTORE_RETVAL_IF(!soft_deletedp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 
 
+	escaped_username = _sql(mem_ctx, username);
+	MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, NULL);
 	sql = talloc_asprintf(mem_ctx,
 		"SELECT url, soft_deleted FROM %s "
 		"WHERE username = '%s' AND fmid = '%"PRIu64"'",
-		INDEXING_TABLE, _sql(mem_ctx, username), fmid);
+		INDEXING_TABLE, escaped_username, fmid);
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, NULL);
 
 	ret = select_without_fetch(MYSQL(ictx), sql, &res);
@@ -562,6 +583,7 @@ static enum mapistore_error mysql_record_del(struct indexing_context *ictx,
 					     uint64_t fmid,
 					     uint8_t flags)
 {
+	const char *escaped_username;
 	enum mapistore_error	retval;
 	TALLOC_CTX		*mem_ctx;
 	int			ret;
@@ -584,17 +606,21 @@ static enum mapistore_error mysql_record_del(struct indexing_context *ictx,
 	case MAPISTORE_SOFT_DELETE:
 		/* nothing to do if the record is already soft deleted */
 		MAPISTORE_RETVAL_IF(IsSoftDeleted == true, MAPISTORE_SUCCESS, NULL);
+		escaped_username = _sql(mem_ctx, username);
+		MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf(mem_ctx,
 			"UPDATE %s "
 			"SET soft_deleted=1 "
 			"WHERE username = '%s' AND fmid = '%"PRIu64"'",
-			INDEXING_TABLE, _sql(mem_ctx, username), fmid);
+			INDEXING_TABLE, escaped_username, fmid);
 		break;
 	case MAPISTORE_PERMANENT_DELETE:
+		escaped_username = _sql(mem_ctx, username);
+		MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf(mem_ctx,
 			"DELETE FROM %s "
 			"WHERE username = '%s' AND fmid = '%"PRIu64"'",
-			INDEXING_TABLE, _sql(mem_ctx, username), fmid);
+			INDEXING_TABLE, escaped_username, fmid);
 		break;
 	default:
 		talloc_free(mem_ctx);
@@ -640,6 +666,7 @@ static enum mapistore_error mysql_record_get_fmid(struct indexing_context *ictx,
 						  uint64_t *fmidp,
 						  bool *soft_deletedp)
 {
+	const char *escaped_username, *escaped_uri_like, *escaped_uri;
 	enum mapistore_error	retval;
 	enum MYSQLRESULT	ret;
 	char			*sql, *uri_like;
@@ -664,19 +691,26 @@ static enum mapistore_error mysql_record_get_fmid(struct indexing_context *ictx,
 
 	mem_ctx = talloc_named(NULL, 0, "mysql_record_get_fmid");
 
+	escaped_username = _sql(mem_ctx, username);
+	MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	sql = talloc_asprintf(mem_ctx,
 		"SELECT fmid, soft_deleted FROM "INDEXING_TABLE" "
-		"WHERE username = '%s'", _sql(mem_ctx, username));
+		"WHERE username = '%s'", escaped_username);
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 
 	if (partial) {
 		uri_like = talloc_strdup(mem_ctx, uri);
 		MAPISTORE_RETVAL_IF(!uri_like, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		string_replace_m(uri_like, '*', '%');
+		escaped_uri_like = _sql(mem_ctx, uri_like);
+		MAPISTORE_RETVAL_IF(!escaped_uri_like, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf_append(sql, " AND url LIKE '%s'",
-					     _sql(mem_ctx, uri_like));
+					     escaped_uri_like);
 	} else {
+		escaped_uri = _sql(mem_ctx, uri);
+		MAPISTORE_RETVAL_IF(!escaped_uri, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf_append(sql, " AND url = '%s'",
-					     _sql(mem_ctx, uri));
+					     escaped_uri);
 	}
 
 	ret = select_without_fetch(MYSQL(ictx), sql, &res);
@@ -700,6 +734,7 @@ static enum mapistore_error mysql_record_allocate_fmids(struct indexing_context 
 						      int count,
 						      uint64_t *fmidp)
 {
+	const char *escaped_username;
 	int		ret;
 	uint64_t	next_fmid;
 	char		*sql;
@@ -719,10 +754,12 @@ static enum mapistore_error mysql_record_allocate_fmids(struct indexing_context 
 	mem_ctx = talloc_new(NULL);
 	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
 
+	escaped_username = _sql(mem_ctx, username);
+	MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	sql = talloc_asprintf(mem_ctx,
 		"SELECT next_fmid FROM %s "
 		"WHERE username = '%s'",
-		INDEXING_ALLOC_TABLE, _sql(mem_ctx, username));
+		INDEXING_ALLOC_TABLE, escaped_username);
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 
 	ret = select_first_uint(MYSQL(ictx), sql, &next_fmid);
@@ -732,22 +769,26 @@ static enum mapistore_error mysql_record_allocate_fmids(struct indexing_context 
 			next_fmid = MAX_PUBLIC_FOLDER_ID + 1;
 		}
 		// Update next fmid
+		escaped_username = _sql(mem_ctx, username);
+		MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf(mem_ctx,
 			"UPDATE %s SET next_fmid = %"PRIu64
 			" WHERE username='%s'",
 			INDEXING_ALLOC_TABLE,
 			next_fmid + count,
-			_sql(mem_ctx, username));
+			escaped_username);
 		MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		break;
 	case MYSQL_NOT_FOUND:
 		// First allocation, insert in the database
 		next_fmid = MAX_PUBLIC_FOLDER_ID + 1;
+		escaped_username = _sql(mem_ctx, username);
+		MAPISTORE_RETVAL_IF(!escaped_username, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf(mem_ctx,
 			"INSERT INTO %s (username, next_fmid) "
 			"VALUES('%s', %"PRIu64")",
 			INDEXING_ALLOC_TABLE,
-			_sql(mem_ctx, username),
+			escaped_username,
 			next_fmid + count);
 		MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		break;

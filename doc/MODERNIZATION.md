@@ -699,6 +699,40 @@ no fixture databases remaining; the daemon and directory were removed. CI now
 includes these checks with its own MariaDB service. Full storage-backend suites,
 SQL literal escaping/modes and query-data logging still require review.
 
+## SQL literal encoding and allocation failures
+
+The shared literal escape now protects both apostrophes and backslashes. Pooled
+connections explicitly select `utf8mb4` and remove only `NO_BACKSLASH_ESCAPES`
+from their session SQL mode. A checked initialization command reapplies that
+mode after reconnect, as specified by the [MariaDB Connector/C options API](https://mariadb.com/docs/connectors/mariadb-connector-c/api-functions/mysql_optionsv).
+Connection establishment no longer retries `mysql_real_connect` on the same
+handle after a missing-database failure: it connects once, then selects or
+creates the database. The previous retry lost the initialization command in
+the live failure test.
+
+Every current `_sql` call site checks escape allocation failure before formatting
+SQL, including list builders, table restrictions and message property writes.
+An active message transaction rolls back on that failure. Two previously raw
+MAPIStore URI writes now escape their literals, and table usernames are copied
+into table-owned storage. The query runner rejects null connections/queries.
+This covers the shared escape contract; it is not a complete audit of all SQL,
+transaction semantics or database permissions, nor a prepared-statement port.
+
+`make check-mysql-utils` now runs both substituted-driver and actual backend
+query-builder checks. The latter injects allocation failures before SQL and
+inside a message transaction, checks rollback, and covers mailbox/indexing
+builders. Native and ASan/UBSan/LeakSanitizer runs pass. `make all` also passes
+in the main and source-only validation trees.
+
+The real C live check covers new/existing databases, quoted identifiers,
+connection reuse, apostrophe/backslash/Unicode literal round trips, charset and
+SQL mode before/after a forced connection restart. It passes under sanitizers
+against a private MariaDB instance whose global mode includes
+`NO_BACKSLASH_ESCAPES`; its unique fixture databases and private server directory
+are removed afterward. This local database proof does not replace AD or mailbox
+server integration. The previous pool commit `bec73a14` also passed all four
+[GitHub CI jobs](https://github.com/R4P0S1T0/openchange-next/actions/runs/40731020676).
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

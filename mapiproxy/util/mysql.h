@@ -30,6 +30,8 @@
 #define THRESHOLD_SLOW_QUERIES 0.25
 #define _sql(A, B) _sql_escape(A, B, '\'')
 
+/* NULL on allocation failure; otherwise the input or a context-owned escaped copy.
+ * String literals require connections configured by create_connection(). */
 const char* _sql_escape(TALLOC_CTX *mem_ctx, const char *s, char c);
 
 enum MYSQLRESULT execute_query(MYSQL *, const char *);

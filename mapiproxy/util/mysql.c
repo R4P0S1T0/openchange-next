@@ -258,12 +258,20 @@ MYSQL *create_connection(const char *connection_string, MYSQL **conn)
 	if (candidate == NULL) goto end;
 	if (mysql_options(candidate, MYSQL_OPT_RECONNECT, &reconnect))
 		OC_DEBUG(1, "[MYSQL] Cannot set MYSQL_OPT_RECONNECT option");
+	/* Legacy literal escaping requires UTF-8 and backslash escapes on every reconnect. */
+	if (mysql_options(candidate, MYSQL_SET_CHARSET_NAME, "utf8mb4") ||
+	    mysql_options(candidate, MYSQL_INIT_COMMAND,
+		"SET SESSION sql_mode=TRIM(BOTH ',' FROM REPLACE(CONCAT(',',@@SESSION.sql_mode,','),"
+		"',NO_BACKSLASH_ESCAPES,',','))")) {
+		OC_DEBUG(1, "[MYSQL] Cannot configure SQL string encoding");
+		goto end;
+	}
 
-	if (!mysql_real_connect(candidate, host, user, passwd, db, port, NULL, 0)) {
-		if (!mysql_real_connect(candidate, host, user, passwd, NULL, port, NULL, 0)) {
-			OC_DEBUG(1, "[MYSQL] Cannot connect: %s", mysql_error(candidate));
-			goto end;
-		}
+	if (!mysql_real_connect(candidate, host, user, passwd, NULL, port, NULL, 0)) {
+		OC_DEBUG(1, "[MYSQL] Cannot connect: %s", mysql_error(candidate));
+		goto end;
+	}
+	if (mysql_select_db(candidate, db) != 0) {
 		quoted = mysql_quote_dbname(mem_ctx, db);
 		if (quoted == NULL) goto end;
 		sql = talloc_asprintf(mem_ctx, "CREATE DATABASE %s", quoted);
@@ -302,6 +310,8 @@ enum MYSQLRESULT execute_query(MYSQL *conn, const char *sql)
 {
 	struct timespec start, end;
 	float seconds_spent;
+
+	if (conn == NULL || sql == NULL) return MYSQL_ERROR;
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	if (mysql_query(conn, sql) != 0) {
@@ -537,14 +547,16 @@ const char* _sql_escape(TALLOC_CTX *mem_ctx, const char *s, char c)
 	len = strlen(s);
 	c_count = 0;
 	for (i = 0; i < len; i++) {
-		if (s[i] == c) c_count++;
+		if (s[i] == c || s[i] == '\\') c_count++;
 	}
 
 	if (c_count == 0) return s;
 
-	ret = talloc_zero_array(mem_ctx, char, len + c_count + 1);
+	if (c_count > SIZE_MAX - len - 1) return NULL;
+	ret = talloc_zero_size(mem_ctx, len + c_count + 1);
+	if (ret == NULL) return NULL;
 	for (i = 0, j = 0; i < len; i++) {
-		if (s[i] == c) ret[i + j++] = '\\';
+		if (s[i] == c || s[i] == '\\') ret[i + j++] = '\\';
 		ret[i + j] = s[i];
 	}
 

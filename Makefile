@@ -2107,8 +2107,9 @@ bin/binary-properties-check: testsuite/modernization/binary_property_smoke.c lib
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
 
 .PHONY: check-mysql-utils
-check-mysql-utils: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mysql-utils-check
+check-mysql-utils: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mysql-utils-check bin/mysql-backend-check
 	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mysql-utils-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mysql-backend-check
 
 bin/mysql-utils-check: testsuite/modernization/mysql_smoke.c mapiproxy/util/mysql.c mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
@@ -2121,3 +2122,8 @@ check-mysql-live: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mysql-li
 bin/mysql-live-check: testsuite/modernization/mysql_live_smoke.c mapiproxy/util/mysql.c mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -ffunction-sections -fdata-sections -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MYSQL_LIBS)
+
+
+bin/mysql-backend-check: testsuite/modernization/mysql_backend_smoke.c mapiproxy/util/mysql.c mapiproxy/libmapiproxy/backends/openchangedb_mysql.c mapiproxy/libmapistore/backends/indexing_mysql.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -ffunction-sections -fdata-sections -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_zero libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MYSQL_LIBS)

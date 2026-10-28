@@ -71,6 +71,13 @@ upgrade/restore validation beyond this first test milestone.
   scoping and cache-integrity review remain incomplete; the optional cache is
   not yet qualified for an enabled integration configuration.
 
+- SQL connection failures release unpublished resources and pooled metadata;
+  credentials are absent from DSN diagnostics. Literal escaping handles quotes
+  and backslashes under an explicitly configured UTF-8 session, including
+  reconnects. Current escape callers check allocation failure; message property
+  transactions roll back. Focused native/sanitizer tests and a private real
+  MariaDB check pass. Full SQL and storage integration review remains pending.
+
 These changes are not a complete security audit. The remaining native parser
 and server paths are part of the acceptance work above.
 
