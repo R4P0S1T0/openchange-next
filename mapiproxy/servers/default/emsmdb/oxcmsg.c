@@ -756,6 +756,11 @@ static enum MAPISTATUS oxcmsg_parse_ModifyRecipientRow(TALLOC_CTX *mem_ctx, stru
 	const uint16_t          prop_count = recipient_row->RecipientRow.prop_count;
 	uint8_t			prop_flag;
 
+	if (prop_count > modify_recipients_prop_count || (prop_count && properties == NULL) ||
+	    recipient_row->RecipientRow.layout > 1 ||
+	    (recipient_row->RecipientRow.prop_values.length &&
+	     recipient_row->RecipientRow.prop_values.data == NULL)) return MAPI_E_INVALID_PARAMETER;
+
 	recipient->type = recipient_row->RecipClass;
 
 	recipient->username = NULL;
@@ -767,7 +772,8 @@ static enum MAPISTATUS oxcmsg_parse_ModifyRecipientRow(TALLOC_CTX *mem_ctx, stru
 		OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, NULL);
 	}
 
-	recipient->data = talloc_array(mem_ctx, void *, modify_recipients_prop_count + 2);
+	recipient->data = talloc_zero_array(mem_ctx, void *, modify_recipients_prop_count + 2);
+	if (recipient->data == NULL) return MAPI_E_NOT_ENOUGH_MEMORY;
 
 	/* PR_DISPLAY_NAME_UNICODE */
 	switch ((recipient_row->RecipientRow.RecipientFlags & 0x210)) {
@@ -796,6 +802,10 @@ static enum MAPISTATUS oxcmsg_parse_ModifyRecipientRow(TALLOC_CTX *mem_ctx, stru
 	data_pos = 0;
 	for (i = 0; i < prop_count; i++) {
 		if (recipient_row->RecipientRow.layout) {
+			if (data_pos >= recipient_row->RecipientRow.prop_values.length) {
+				TALLOC_FREE(recipient->data);
+				return MAPI_E_CORRUPT_DATA;
+			}
 			prop_flag = recipient_row->RecipientRow.prop_values.data[data_pos];
 			data_pos++;
 
@@ -805,6 +815,10 @@ static enum MAPISTATUS oxcmsg_parse_ModifyRecipientRow(TALLOC_CTX *mem_ctx, stru
 			if (prop_flag != 0) {
 				recipient->data[i+2] = NULL;
 				if (prop_flag == PT_ERROR) {
+					if (recipient_row->RecipientRow.prop_values.length - data_pos < 4) {
+						TALLOC_FREE(recipient->data);
+						return MAPI_E_CORRUPT_DATA;
+					}
 					data_pos += 4;
 				}
 				else if (prop_flag != 1) {

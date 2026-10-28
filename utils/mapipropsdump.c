@@ -277,7 +277,8 @@ static int process_response(TALLOC_CTX *mem_ctx,
 	case op_MAPI_ModifyRecipients:
 		if (index < 0 || (size_t)index >= talloc_array_length(mapi_response->mapi_repl) ||
 		    mapi_response->mapi_repl[index].opnum != opnum ||
-		    mapi_response->mapi_repl[index].error_code != MAPI_E_SUCCESS) {
+		    (mapi_response->mapi_repl[index].error_code != MAPI_E_SUCCESS &&
+		     mapi_response->mapi_repl[index].error_code != MAPI_W_ERRORS_RETURNED)) {
 			OC_DEBUG(0, "Mismatching request vs reply");
 			talloc_free(sndr_pull);
 			return -1;
@@ -309,9 +310,12 @@ static int process_response(TALLOC_CTX *mem_ctx,
 		uint32_t		cn_propvals;
 
 		g = &(mapi_response->mapi_repl[index].u.mapi_GetProps);
-		emsmdb_get_SPropValue(mem_ctx, &g->prop_data, SPropTagArray,
-				      &lpProps, &cn_propvals, g->layout);
-		for (j = 0; j < SPropTagArray->cValues; j++) {
+		if (emsmdb_get_SPropValue(mem_ctx, &g->prop_data, SPropTagArray,
+				      &lpProps, &cn_propvals, g->layout) != MAPI_E_SUCCESS) {
+			talloc_free(sndr_pull);
+			return -1;
+		}
+		for (j = 0; j < cn_propvals; j++) {
 			mapidump_SPropValue(lpProps[j], "\t");
 		}
 	}
@@ -331,10 +335,13 @@ static int process_response(TALLOC_CTX *mem_ctx,
 		if (!emsmdb_get_SPropValue_offset(mem_ctx, &repl->row,
 						  SPropTagArray, &lpProps,
 						  &cn_propvals, &offset)) {
-			for (j = 0; j < SPropTagArray->cValues; j++) {
+			for (j = 0; j < cn_propvals; j++) {
 				mapidump_SPropValue(lpProps[j], "\t");
 			}
 			talloc_free(lpProps);
+		} else {
+			talloc_free(sndr_pull);
+			return -1;
 		}
 	}
 	break;
@@ -349,10 +356,13 @@ static int process_response(TALLOC_CTX *mem_ctx,
 			if (!emsmdb_get_SPropValue_offset(mem_ctx, &repl->RowData, SPropTagArray,
 							  &lpProps, &cn_propvals, &offset)) {
 				OC_DEBUG(0, "\nrow %d:", i);
-				for (j = 0; j < SPropTagArray->cValues; j++) {
+				for (j = 0; j < cn_propvals; j++) {
 					mapidump_SPropValue(lpProps[j], "\t");
 				}
 				talloc_free(lpProps);
+			} else {
+				talloc_free(sndr_pull);
+				return -1;
 			}
 		}
 	}

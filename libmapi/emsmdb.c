@@ -802,440 +802,302 @@ void free_emsmdb_property(struct SPropValue *lpProp, void *data)
    \return pointer on constant generic data on success, otherwise NULL
  */
 const void *pull_emsmdb_property(TALLOC_CTX *mem_ctx,
-				 uint32_t *offset, 
-				 enum MAPITAGS tag, 
+				 uint32_t *offset,
+				 enum MAPITAGS tag,
 				 DATA_BLOB *data)
 {
-	struct ndr_pull			*ndr;
-	const char			*pt_string8 = NULL;
-	const char			*pt_unicode = NULL;
-	uint16_t			*pt_i2 = NULL;
-	uint64_t			*pt_i8 = NULL;
-	uint32_t			*pt_long = NULL;
-	uint8_t				*pt_boolean = NULL;
-	double				*pt_double = NULL;
-	struct FILETIME			*pt_filetime = NULL;
-	struct GUID			*pt_clsid = NULL;
-	struct SBinary_short		pt_binary;
-	struct Binary_r			*sbin = NULL;
-	struct mapi_SLPSTRArray		pt_slpstr;
-	struct StringArray_r		*slpstr = NULL;
-	struct mapi_SLPSTRArrayW	pt_slpstrw;
-	struct StringArrayW_r		*slpstrw = NULL;
-	struct mapi_MV_LONG_STRUCT	pt_MVl;
-	struct LongArray_r		*MVl = NULL;
-	struct mapi_SBinaryArray	pt_MVbin;
-	struct BinaryArray_r		*MVbin = NULL;
-	uint32_t			i;
+	struct ndr_pull *ndr;
+	void *value = NULL;
+	enum ndr_err_code err = NDR_ERR_BAD_SWITCH;
+	uint32_t count = 0, i, min_size = 0, width = 0;
+	size_t position;
+	struct SBinary_short binary = {0};
+	struct mapi_MV_LONG_STRUCT longs = {0};
+	struct mapi_SLPSTRArray strings = {0};
+	struct mapi_SLPSTRArrayW wide_strings = {0};
+	struct mapi_SBinaryArray binaries = {0};
 
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (offset == NULL || data == NULL || data->data == NULL ||
+	    data->length > UINT32_MAX || *offset > data->length) return NULL;
+	ndr = ndr_pull_init_blob(data, mem_ctx);
+	if (ndr == NULL) return NULL;
 	ndr->offset = *offset;
-	ndr->data = data->data;
-	ndr->data_size = data->length;
+	ndr->current_mem_ctx = ndr;
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 
-	switch(tag & 0xFFFF) {
+	/* Generated array decoders allocate before reading their elements. */
+	switch (tag & 0xffff) {
+	case PT_MV_LONG: min_size = 4; break;
+	case PT_MV_STRING8: min_size = width = 1; break;
+	case PT_MV_UNICODE: min_size = width = 2; break;
+	case PT_MV_BINARY: min_size = 2; break;
+	case PT_STRING8: width = 1; count = 1; break;
+	case PT_UNICODE: width = 2; count = 1; break;
+	}
+	if (min_size != 0) {
+		if (ndr_pull_uint32(ndr, NDR_SCALARS, &count) != NDR_ERR_SUCCESS ||
+		    count > (data->length - ndr->offset) / min_size) goto failure;
+		ndr->offset = *offset;
+	}
+
+	/* Samba's null-terminated string reader also accepts end-of-buffer. */
+	position = *offset + (min_size != 0 ? 4 : 0);
+	for (i = 0; width != 0 && i < count; i++) {
+		for (;;) {
+			if (position > data->length || width > data->length - position) goto failure;
+			if (data->data[position] == 0 && (width == 1 || data->data[position + 1] == 0)) {
+				position += width;
+				break;
+			}
+			position += width;
+		}
+	}
+
+	switch (tag & 0xffff) {
 	case PT_I2:
-		pt_i2 = talloc_zero(mem_ctx, uint16_t);
-		ndr_pull_uint16(ndr, NDR_SCALARS, pt_i2);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_i2;
+		value = talloc_zero(ndr, uint16_t);
+		if (value == NULL) goto failure;
+		err = ndr_pull_uint16(ndr, NDR_SCALARS, value);
+		break;
 	case PT_ERROR:
 	case PT_LONG:
-		pt_long = talloc_zero(mem_ctx, uint32_t);
-		ndr_pull_uint32(ndr, NDR_SCALARS, pt_long);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_long;
+		value = talloc_zero(ndr, uint32_t);
+		if (value == NULL) goto failure;
+		err = ndr_pull_uint32(ndr, NDR_SCALARS, value);
+		break;
 	case PT_BOOLEAN:
-		pt_boolean = talloc_zero(mem_ctx, uint8_t);
-		ndr_pull_uint8(ndr, NDR_SCALARS, pt_boolean);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_boolean;
+		value = talloc_zero(ndr, uint8_t);
+		if (value == NULL) goto failure;
+		err = ndr_pull_uint8(ndr, NDR_SCALARS, value);
+		break;
 	case PT_I8:
-		pt_i8 = talloc_zero(mem_ctx, uint64_t);
-		ndr_pull_hyper(ndr, NDR_SCALARS, pt_i8);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_i8;
+		value = talloc_zero(ndr, uint64_t);
+		if (value == NULL) goto failure;
+		err = ndr_pull_hyper(ndr, NDR_SCALARS, value);
+		break;
 	case PT_DOUBLE:
-		pt_double = talloc_zero(mem_ctx, double);
-		ndr_pull_double(ndr, NDR_SCALARS, pt_double);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_double;
-	case PT_UNICODE:
-		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_STR_NULLTERM);
-		ndr_pull_string(ndr, NDR_SCALARS, &pt_unicode);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_unicode;
-	case PT_STRING8:
-		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_STR_RAW8|LIBNDR_FLAG_STR_NULLTERM);
-		ndr_pull_string(ndr, NDR_SCALARS, &pt_string8);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_string8;
+		value = talloc_zero(ndr, double);
+		if (value == NULL) goto failure;
+		err = ndr_pull_double(ndr, NDR_SCALARS, value);
+		break;
 	case PT_SYSTIME:
-		pt_filetime = talloc_zero(mem_ctx, struct FILETIME);
-		ndr_pull_hyper(ndr, NDR_SCALARS, (uint64_t *) pt_filetime);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_filetime;
+		value = talloc_zero(ndr, struct FILETIME);
+		if (value == NULL) goto failure;
+		err = ndr_pull_FILETIME(ndr, NDR_SCALARS, value);
+		break;
 	case PT_CLSID:
-		pt_clsid = talloc_zero(mem_ctx, struct GUID);
-		ndr_pull_GUID(ndr, NDR_SCALARS, pt_clsid);
-		*offset = ndr->offset;
-		talloc_free(ndr);
-		return (const void *) pt_clsid;
-	case 0xFB:
-	case PT_BINARY:
-		ndr_pull_SBinary_short(ndr, NDR_SCALARS, &pt_binary);
-		*offset = ndr->offset;
-		sbin = talloc_zero(mem_ctx, struct Binary_r);
-		sbin->cb = pt_binary.cb;
-		sbin->lpb = (uint8_t *)talloc_memdup(sbin, pt_binary.lpb, pt_binary.cb);
-		talloc_free(ndr);
-		return (const void *) sbin;
-	case PT_MV_LONG:
-		ndr_pull_mapi_MV_LONG_STRUCT(ndr, NDR_SCALARS, &pt_MVl);
-		*offset = ndr->offset;
-		MVl = talloc_zero(mem_ctx, struct LongArray_r);
-		MVl->cValues = pt_MVl.cValues;
-		MVl->lpl = talloc_array(mem_ctx, uint32_t, pt_MVl.cValues);
-		for (i = 0; i < MVl->cValues; i++) {
-			MVl->lpl[i] = pt_MVl.lpl[i];
-		}
-		talloc_free(ndr);
-		return (const void *) MVl;
-	case PT_MV_STRING8:
-		ndr_pull_mapi_SLPSTRArray(ndr, NDR_SCALARS, &pt_slpstr);
-		*offset = ndr->offset;
-		slpstr = talloc_zero(mem_ctx, struct StringArray_r);
-		slpstr->cValues = pt_slpstr.cValues;
-		slpstr->lppszA = talloc_array(mem_ctx, const char *, pt_slpstr.cValues);
-		for (i = 0; i < slpstr->cValues; i++) {
-			slpstr->lppszA[i] = talloc_strdup(mem_ctx, pt_slpstr.strings[i].lppszA);
-		}
-		talloc_free(ndr);
-		return (const void *) slpstr;
-	case PT_MV_UNICODE:
-		ndr_pull_mapi_SLPSTRArrayW(ndr, NDR_SCALARS, &pt_slpstrw);
-		*offset = ndr->offset;
-		slpstrw = talloc_zero(mem_ctx, struct StringArrayW_r);
-		slpstrw->cValues = pt_slpstrw.cValues;
-		slpstrw->lppszW = talloc_array(mem_ctx, const char *, pt_slpstrw.cValues);
-		for (i = 0; i < slpstrw->cValues; i++) {
-			slpstrw->lppszW[i] = talloc_strdup(mem_ctx, pt_slpstrw.strings[i].lppszW);
-		}
-		talloc_free(ndr);
-		return (const void *) slpstrw;
-	case PT_MV_BINARY:
-		ndr_pull_mapi_SBinaryArray(ndr, NDR_SCALARS, &pt_MVbin);
-		*offset = ndr->offset;
-		MVbin = talloc_zero(mem_ctx, struct BinaryArray_r);
-		MVbin->cValues = pt_MVbin.cValues;
-		MVbin->lpbin = talloc_array(mem_ctx, struct Binary_r, pt_MVbin.cValues);
-		for (i = 0; i < MVbin->cValues; i++) {
-			MVbin->lpbin[i].cb = pt_MVbin.bin[i].cb;
-			MVbin->lpbin[i].lpb = (uint8_t *)talloc_size(mem_ctx, MVbin->lpbin[i].cb);
-			memcpy(MVbin->lpbin[i].lpb, pt_MVbin.bin[i].lpb, MVbin->lpbin[i].cb);
-		}
-		talloc_free(ndr);
-		return (const void *) MVbin;
-	default:
-		fprintf (stderr, "unhandled type case in pull_emsmdb_property(): 0x%x\n", (tag & 0xFFFF));
-		return NULL;
+		value = talloc_zero(ndr, struct GUID);
+		if (value == NULL) goto failure;
+		err = ndr_pull_GUID(ndr, NDR_SCALARS, value);
+		break;
+	case PT_UNICODE:
+	case PT_STRING8:
+		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_STR_NULLTERM);
+		if ((tag & 0xffff) == PT_STRING8) ndr_set_flags(&ndr->flags, LIBNDR_FLAG_STR_RAW8);
+		err = ndr_pull_string(ndr, NDR_SCALARS, (const char **)&value);
+		break;
+	case PT_SVREID:
+	case PT_BINARY: {
+		struct Binary_r *result = talloc_zero(ndr, struct Binary_r);
+		if (result == NULL) goto failure;
+		err = ndr_pull_SBinary_short(ndr, NDR_SCALARS, &binary);
+		if (err != NDR_ERR_SUCCESS) goto failure;
+		result->cb = binary.cb;
+		result->lpb = talloc_steal(result, binary.lpb);
+		value = result;
+		break;
 	}
+	case PT_MV_LONG: {
+		struct LongArray_r *result = talloc_zero(ndr, struct LongArray_r);
+		if (result == NULL) goto failure;
+		err = ndr_pull_mapi_MV_LONG_STRUCT(ndr, NDR_SCALARS, &longs);
+		if (err != NDR_ERR_SUCCESS) goto failure;
+		result->cValues = longs.cValues;
+		result->lpl = talloc_steal(result, longs.lpl);
+		value = result;
+		break;
+	}
+	case PT_MV_STRING8: {
+		struct StringArray_r *result = talloc_zero(ndr, struct StringArray_r);
+		if (result == NULL) goto failure;
+		err = ndr_pull_mapi_SLPSTRArray(ndr, NDR_SCALARS, &strings);
+		if (err != NDR_ERR_SUCCESS) goto failure;
+		result->cValues = strings.cValues;
+		result->lppszA = talloc_array(result, const char *, strings.cValues);
+		if (result->lppszA == NULL) goto failure;
+		for (i = 0; i < strings.cValues; i++)
+			result->lppszA[i] = talloc_steal(result->lppszA, strings.strings[i].lppszA);
+		value = result;
+		break;
+	}
+	case PT_MV_UNICODE: {
+		struct StringArrayW_r *result = talloc_zero(ndr, struct StringArrayW_r);
+		if (result == NULL) goto failure;
+		err = ndr_pull_mapi_SLPSTRArrayW(ndr, NDR_SCALARS, &wide_strings);
+		if (err != NDR_ERR_SUCCESS) goto failure;
+		result->cValues = wide_strings.cValues;
+		result->lppszW = talloc_array(result, const char *, wide_strings.cValues);
+		if (result->lppszW == NULL) goto failure;
+		for (i = 0; i < wide_strings.cValues; i++)
+			result->lppszW[i] = talloc_steal(result->lppszW, wide_strings.strings[i].lppszW);
+		value = result;
+		break;
+	}
+	case PT_MV_BINARY: {
+		struct BinaryArray_r *result = talloc_zero(ndr, struct BinaryArray_r);
+		if (result == NULL) goto failure;
+		err = ndr_pull_mapi_SBinaryArray(ndr, NDR_SCALARS, &binaries);
+		if (err != NDR_ERR_SUCCESS) goto failure;
+		result->cValues = binaries.cValues;
+		result->lpbin = talloc_array(result, struct Binary_r, binaries.cValues);
+		if (result->lpbin == NULL) goto failure;
+		for (i = 0; i < binaries.cValues; i++) {
+			result->lpbin[i].cb = binaries.bin[i].cb;
+			result->lpbin[i].lpb = talloc_steal(result->lpbin, binaries.bin[i].lpb);
+		}
+		value = result;
+		break;
+	}
+	}
+	if (err != NDR_ERR_SUCCESS || value == NULL) goto failure;
+	*offset = ndr->offset;
+	talloc_steal(mem_ctx, value);
+	talloc_free(ndr);
+	return value;
+
+failure:
+	talloc_free(ndr);
+	return NULL;
 }
 
-
-/**
-   \details Get a SPropValue array from a DATA blob
-
-   \param mem_ctx pointer to the memory context
-   \param content pointer to the DATA blob content
-   \param tags pointer to a list of property tags to lookup
-   \param propvals pointer on pointer to the returned SPropValues
-   \param cn_propvals pointer to the number of propvals
-   \param flag describes the type data
-
-   \return MAPI_E_SUCCESS on success
- */
-enum MAPISTATUS emsmdb_get_SPropValue(TALLOC_CTX *mem_ctx,
-				      DATA_BLOB *content,
-				      struct SPropTagArray *tags,
-				      struct SPropValue **propvals, 
-				      uint32_t *cn_propvals,
-				      uint8_t flag)
+static enum MAPISTATUS emsmdb_pull_properties(TALLOC_CTX *mem_ctx,
+	DATA_BLOB *content, struct SPropTagArray *tags, uint8_t layout,
+	uint8_t flag_size, uint32_t *offset, struct SPropValue **propvals,
+	uint32_t *count)
 {
-	struct SPropValue	*p_propval;
-	uint32_t		i_propval;
-	uint32_t		i_tag;
-	int			proptag;
-	uint32_t		cn_tags;
-	uint32_t		offset = 0;
-	const void		*data;
+	struct SPropValue *values;
+	uint32_t position, i;
+	const void *data;
+	uint8_t flag;
 
-	i_propval = 0;
-	cn_tags = tags->cValues;
-	*cn_propvals = 0;
-	*propvals = talloc_array(mem_ctx, struct SPropValue, cn_tags + 1);
-
-	for (i_tag = 0; i_tag < cn_tags; i_tag++) {
-		if (flag) { 
-			if (((uint8_t)(*(content->data + offset))) == PT_ERROR) {
-				proptag = (int)tags->aulPropTag[i_tag];
-				proptag &= 0xFFFF0000;
-				proptag |= PT_ERROR;
-				tags->aulPropTag[i_tag] = (enum MAPITAGS) proptag;
-			}
-			offset += sizeof (uint8_t);
-		}
-
-		data = pull_emsmdb_property(mem_ctx, &offset, tags->aulPropTag[i_tag], content);
-		if (data) {
-			data = talloc_steal(*propvals, data);
-			p_propval = &((*propvals)[i_propval]);
-			p_propval->ulPropTag = tags->aulPropTag[i_tag];
-			p_propval->dwAlignPad = 0x0;
-
-			set_SPropValue(p_propval, data);
-			free_emsmdb_property(p_propval, (void *) data);
-			i_propval++;
-		}
-	}
-
-	(*propvals)[i_propval].ulPropTag = (enum MAPITAGS) 0x0;
-	*cn_propvals = i_propval;
-	return MAPI_E_SUCCESS;
-}
-
-
-/**
-   \details Get a SPropValue array from a DATA blob
-
-   \param mem_ctx pointer to the memory context
-   \param content pointer to the DATA blob content
-   \param tags pointer to a list of property tags to lookup
-   \param propvals pointer on pointer to the returned SPropValues
-   \param cn_propvals pointer to the number of propvals
-   \param _offset the offset to return
-
-   \return MAPI_E_SUCCESS on success
- */
-enum MAPISTATUS emsmdb_get_SPropValue_offset(TALLOC_CTX *mem_ctx,
-					     DATA_BLOB *content,
-					     struct SPropTagArray *tags,
-					     struct SPropValue **propvals,
-					     uint32_t *cn_propvals,
-					     uint32_t *_offset)
-{
-	struct SPropValue	*lpProps;
-	uint32_t		i_propval;
-	uint32_t		i_tag;
-	int			proptag;
-	uint32_t		cn_tags;
-	uint32_t		offset = *_offset;
-	const void		*data;
-	bool			is_FlaggedPropertyRow = false;
-	bool			havePropertyValue;
-	uint8_t			flag;
-
-	i_propval = 0;
-	cn_tags = tags->cValues;
-	*cn_propvals = 0;
-
-	if (0x1 == *(content->data + offset)) {
-		is_FlaggedPropertyRow = true;
-	} else {
-		is_FlaggedPropertyRow = false;
-	}
-	++offset;
-
-	lpProps = talloc_array(mem_ctx, struct SPropValue, cn_tags);
-	for (i_tag = 0; i_tag < cn_tags; i_tag++) {
-		havePropertyValue = true;
-		lpProps[i_tag].ulPropTag = tags->aulPropTag[i_tag];
-		if (is_FlaggedPropertyRow) {
-			flag = (uint8_t)(*(content->data + offset));
-			++offset;
-			switch (flag) {
-			case 0x0:
-				break;
-			case 0x1:
-				havePropertyValue = false;
-				break;
-			case PT_ERROR:
-				proptag = (int)tags->aulPropTag[i_tag];
-				proptag &= 0xFFFF0000;
-				proptag |= PT_ERROR;
-				lpProps[i_tag].ulPropTag = (enum MAPITAGS) proptag;
-				break;
-			default:
-				break;
-			}
-		}
-
-		if (havePropertyValue) {
-			lpProps[i_tag].dwAlignPad = 0x0;
-			data = pull_emsmdb_property(mem_ctx, &offset, lpProps[i_tag].ulPropTag, content);
-			talloc_steal(lpProps, data);
-			set_SPropValue(&lpProps[i_tag], data);
-			free_emsmdb_property(&lpProps[i_tag], (void *)data);
-			i_propval++;
-		}
-	}
-
-	*propvals = lpProps;
-	*cn_propvals = i_propval;
-	*_offset = offset;
-	return MAPI_E_SUCCESS;
-}
-
-
-/**
-   \details Get a SRowSet from a DATA blob
-
-   \param mem_ctx pointer on the memory context
-   \param rowset pointer on the returned SRowSe
-   \param proptags pointer on a list of property tags to lookup
-   \param content pointer on the DATA blob content
-
-   \return MAPI_E_SUCCESS on success
-
-   \note TODO: this doesn't yet handle the TypedPropertyValue and
-   FlaggedPropertyValueWithTypeSpecified variants
- */
-_PUBLIC_ void emsmdb_get_SRowSet(TALLOC_CTX *mem_ctx,
-				 struct SRowSet *rowset, 
-				 struct SPropTagArray *proptags, 
-				 DATA_BLOB *content)
-{
-	struct SRow		*rows;
-	struct SPropValue	*lpProps;
-	int			proptag;
-	uint32_t		idx;
-	uint32_t		prop;
-	uint32_t		offset = 0;
-	const void		*data;
-	uint32_t		row_count;
-	bool			is_FlaggedPropertyRow = false;
-	bool			havePropertyValue;
-	uint8_t			flag;
-
-	/* caller allocated */
-	rows = rowset->aRow;
-	row_count = rowset->cRows;
-
-	for (idx = 0; idx < row_count; idx++) {
-		if (0x1 == *(content->data + offset)) {
-			is_FlaggedPropertyRow = true;
-		} else {
-			is_FlaggedPropertyRow = false;
-		}
-		++offset;
-
-		lpProps = talloc_array(mem_ctx, struct SPropValue, proptags->cValues);
-		for (prop = 0; prop < proptags->cValues; prop++) {
-			havePropertyValue = true;
-			lpProps[prop].ulPropTag = proptags->aulPropTag[prop];
-			if (is_FlaggedPropertyRow) {
-				flag = (uint8_t)(*(content->data + offset));
-				++offset; /* advance offset for the flag */
-				switch (flag) {
-				case 0x0:
-					/* Property Value is valid */
-					break;
-				case 0x1:
-					/* Property Value is not present */
-					havePropertyValue = false;
-					break;
-				case PT_ERROR:
-					lpProps[prop].ulPropTag = proptags->aulPropTag[prop];
-					proptag = (int) lpProps[prop].ulPropTag;
-					proptag &= 0xFFFF0000;
-					proptag |= PT_ERROR;
-					lpProps[prop].ulPropTag = (enum MAPITAGS) proptag;
-					break;
-				default:
-					/* unknown FlaggedPropertyValue flag */
-					break;
-
+	if (propvals == NULL || count == NULL) return MAPI_E_INVALID_PARAMETER;
+	*propvals = NULL;
+	*count = 0;
+	if (content == NULL || tags == NULL || offset == NULL || layout > 1 ||
+	    (layout && flag_size == 0) || content->length > UINT32_MAX ||
+	    *offset > content->length || (content->length && content->data == NULL) ||
+	    (tags->cValues && tags->aulPropTag == NULL)) return MAPI_E_INVALID_PARAMETER;
+	position = *offset;
+	/* Every supported value or missing-value marker consumes at least one byte. */
+	if (tags->cValues > content->length - position) return MAPI_E_CORRUPT_DATA;
+	values = talloc_zero_array(mem_ctx, struct SPropValue, (size_t)tags->cValues + 1);
+	if (values == NULL) return MAPI_E_NOT_ENOUGH_MEMORY;
+	for (i = 0; i < tags->cValues; i++) {
+		values[i].ulPropTag = tags->aulPropTag[i];
+		if (layout) {
+			if (flag_size > content->length - position) goto malformed;
+			flag = content->data[position];
+			position += flag_size;
+			if (flag == 1 || flag == PT_ERROR) {
+				values[i].ulPropTag = (tags->aulPropTag[i] & 0xffff0000U) | PT_ERROR;
+				if (flag == 1) {
+					values[i].value.err = MAPI_E_NOT_FOUND;
+					continue;
 				}
-			}
-			if (havePropertyValue) {
-				lpProps[prop].dwAlignPad = 0x0;
-				data = pull_emsmdb_property(mem_ctx, &offset, lpProps[prop].ulPropTag, content);
-				talloc_steal(lpProps, data);
-				set_SPropValue(&lpProps[prop], data);
-				free_emsmdb_property(&lpProps[prop], (void *) data);
-			}
+			} else if (flag != 0) goto malformed;
 		}
-
-		rows[idx].ulAdrEntryPad = 0;
-		rows[idx].cValues = proptags->cValues;
-		rows[idx].lpProps = lpProps;
+		data = pull_emsmdb_property(values, &position, values[i].ulPropTag, content);
+		if (data == NULL || !set_SPropValue(&values[i], data)) goto malformed;
+		free_emsmdb_property(&values[i], discard_const(data));
 	}
+	*offset = position;
+	*count = tags->cValues;
+	*propvals = values;
+	return MAPI_E_SUCCESS;
+
+malformed:
+	talloc_free(values);
+	return MAPI_E_CORRUPT_DATA;
 }
 
-
-/**
-   \details Get a SRow from a DATA blob
-
-   \param mem_ctx pointer on the memory context
-   \param aRow pointer on the returned SRow
-   \param proptags pointer on a list of property tags to lookup
-   \param propcount number of SPropValue entries in aRow
-   \param content pointer on the DATA blob content
-   \param flag the type data
-   \param align alignment pad
-
-   \return MAPI_E_SUCCESS on success
-
-   \note TODO: We shouldn't have any alignment pad here
- */
-void emsmdb_get_SRow(TALLOC_CTX *mem_ctx,
-		     struct SRow *aRow, 
-		     struct SPropTagArray *proptags, 
-		     uint16_t propcount, 
-		     DATA_BLOB *content, 
-		     uint8_t flag, 
-		     uint8_t align)
+enum MAPISTATUS emsmdb_get_SPropValue(TALLOC_CTX *mem_ctx,
+	DATA_BLOB *content, struct SPropTagArray *tags,
+	struct SPropValue **propvals, uint32_t *count, uint8_t layout)
 {
-	uint32_t		i;
-	uint32_t		offset = 0;
-	enum MAPITAGS		aulPropTag = (enum MAPITAGS) 0;
-	int			proptag;
-	const void		*data;
+	uint32_t offset = 0;
+	return emsmdb_pull_properties(mem_ctx, content, tags, layout, 1,
+		&offset, propvals, count);
+}
 
-	aRow->cValues = propcount;
-	aRow->lpProps = talloc_array(mem_ctx, struct SPropValue, propcount);
+/** Decode one PropertyRow; publish its offset only after complete success. */
+enum MAPISTATUS emsmdb_get_SPropValue_offset(TALLOC_CTX *mem_ctx,
+	DATA_BLOB *content, struct SPropTagArray *tags,
+	struct SPropValue **propvals, uint32_t *count, uint32_t *offset)
+{
+	uint32_t position;
+	enum MAPISTATUS status;
+	if (propvals == NULL || count == NULL) return MAPI_E_INVALID_PARAMETER;
+	*propvals = NULL;
+	*count = 0;
+	if (content == NULL || offset == NULL || content->data == NULL ||
+	    content->length > UINT32_MAX || *offset >= content->length) return MAPI_E_CORRUPT_DATA;
+	position = *offset + 1;
+	status = emsmdb_pull_properties(mem_ctx, content, tags, content->data[*offset],
+		1, &position, propvals, count);
+	if (status == MAPI_E_SUCCESS) *offset = position;
+	return status;
+}
 
-	for (i = 0; i < propcount; i++) {
-		aulPropTag = proptags->aulPropTag[i];
-		if (flag) {
-			if (((uint8_t)(*(content->data + offset))) == PT_ERROR) {
-				proptag = (int) aulPropTag;
-				proptag &= 0xFFFF0000;
-				proptag |= 0xA;			
-				aulPropTag = (enum MAPITAGS)proptag;
-			}
-			offset += align;
-		} 
-
-		data = pull_emsmdb_property(mem_ctx, &offset, aulPropTag, content);
-		talloc_steal(aRow->lpProps, data);
-		aRow->lpProps[i].ulPropTag = aulPropTag;
-		aRow->lpProps[i].dwAlignPad = 0x0;
-		set_SPropValue(&(aRow->lpProps[i]), data);
-		free_emsmdb_property(&aRow->lpProps[i], (void *) data);
+/** Decode into temporary rows so a malformed final row exposes no partial set. */
+/**
+   \details Decode a row set into caller-allocated rows.
+   \return MAPI_E_SUCCESS, or a validation/allocation error with cRows set to zero.
+ */
+_PUBLIC_ enum MAPISTATUS emsmdb_get_SRowSet(TALLOC_CTX *mem_ctx,
+	struct SRowSet *rowset, struct SPropTagArray *tags, DATA_BLOB *content)
+{
+	TALLOC_CTX *tmp;
+	struct SRow *rows;
+	uint32_t i, offset = 0, count;
+	enum MAPISTATUS status;
+	if (rowset == NULL) return MAPI_E_INVALID_PARAMETER;
+	count = rowset->cRows;
+	rowset->cRows = 0;
+	if (content == NULL || (count && rowset->aRow == NULL)) return MAPI_E_INVALID_PARAMETER;
+	if (count > content->length) return MAPI_E_CORRUPT_DATA;
+	tmp = talloc_new(mem_ctx);
+	if (tmp == NULL) return MAPI_E_NOT_ENOUGH_MEMORY;
+	rows = talloc_zero_array(tmp, struct SRow, count);
+	if (rows == NULL) { talloc_free(tmp); return MAPI_E_NOT_ENOUGH_MEMORY; }
+	for (i = 0; i < count; i++) {
+		status = emsmdb_get_SPropValue_offset(rows, content, tags,
+			&rows[i].lpProps, &rows[i].cValues, &offset);
+		if (status != MAPI_E_SUCCESS) { talloc_free(tmp); return status; }
 	}
-	if (align) {
-		offset += align;
+	for (i = 0; i < count; i++) {
+		rowset->aRow[i] = rows[i];
+		talloc_steal(mem_ctx, rows[i].lpProps);
 	}
+	rowset->cRows = count;
+	talloc_free(tmp);
+	return MAPI_E_SUCCESS;
+}
+
+enum MAPISTATUS emsmdb_get_SRow(TALLOC_CTX *mem_ctx, struct SRow *row,
+	struct SPropTagArray *tags, uint16_t propcount, DATA_BLOB *content,
+	uint8_t layout, uint8_t align)
+{
+	struct SPropTagArray selected;
+	uint32_t offset = 0;
+	if (row == NULL) return MAPI_E_INVALID_PARAMETER;
+	row->cValues = 0;
+	row->lpProps = NULL;
+	row->ulAdrEntryPad = 0;
+	if (tags == NULL || propcount > tags->cValues) return MAPI_E_INVALID_PARAMETER;
+	selected = *tags;
+	selected.cValues = propcount;
+	return emsmdb_pull_properties(mem_ctx, content, &selected, layout, align,
+		&offset, &row->lpProps, &row->cValues);
 }
 
 /**

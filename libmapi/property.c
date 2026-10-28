@@ -1297,12 +1297,15 @@ _PUBLIC_ struct RecurrencePattern *get_RecurrencePattern(TALLOC_CTX *mem_ctx,
         if (!bin->lpb) return NULL;
 
         ndr = talloc_zero(mem_ctx, struct ndr_pull);
+        if (ndr == NULL) return NULL;
         ndr->offset = 0;
         ndr->data = bin->lpb;
         ndr->data_size = bin->cb;
 
         ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
         RecurrencePattern = talloc_zero(mem_ctx, struct RecurrencePattern);
+        if (RecurrencePattern == NULL) { talloc_free(ndr); return NULL; }
+        ndr->current_mem_ctx = RecurrencePattern;
         ndr_err_code = ndr_pull_RecurrencePattern(ndr, NDR_SCALARS, RecurrencePattern);
 
         talloc_free(ndr);
@@ -1312,16 +1315,6 @@ _PUBLIC_ struct RecurrencePattern *get_RecurrencePattern(TALLOC_CTX *mem_ctx,
                 return NULL;
         }
 	
-	/*Copy DeletedInstanceDates and ModifiedInstanceDates into memory*/ 
-	RecurrencePattern->DeletedInstanceDates = (uint32_t *) talloc_memdup(mem_ctx, RecurrencePattern->DeletedInstanceDates, 
-									     sizeof(uint32_t) * RecurrencePattern->DeletedInstanceCount);
-							      
-	RecurrencePattern->ModifiedInstanceDates = (uint32_t *) talloc_memdup(mem_ctx, RecurrencePattern->ModifiedInstanceDates, 
-									      sizeof(uint32_t) * RecurrencePattern->ModifiedInstanceCount);
-	
-	/*Set reference to parent so arrays get free with RecurrencePattern struct*/
-	RecurrencePattern->DeletedInstanceDates=talloc_reference(RecurrencePattern, RecurrencePattern->DeletedInstanceDates);
-	RecurrencePattern->ModifiedInstanceDates=talloc_reference(RecurrencePattern, RecurrencePattern->ModifiedInstanceDates);
 
         return RecurrencePattern;
 }
@@ -1398,12 +1391,15 @@ _PUBLIC_ struct AppointmentRecurrencePattern *get_AppointmentRecurrencePattern(T
         if (!bin->lpb) return NULL;
 
         ndr = talloc_zero(mem_ctx, struct ndr_pull);
+        if (ndr == NULL) return NULL;
         ndr->offset = 0;
         ndr->data = bin->lpb;
         ndr->data_size = bin->cb;
 
         ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
         arp = talloc_zero(mem_ctx, struct AppointmentRecurrencePattern);
+        if (arp == NULL) { talloc_free(ndr); return NULL; }
+        ndr->current_mem_ctx = arp;
         ndr_err_code = ndr_pull_AppointmentRecurrencePattern(ndr, NDR_SCALARS, arp);
 
         talloc_free(ndr);
@@ -1413,21 +1409,6 @@ _PUBLIC_ struct AppointmentRecurrencePattern *get_AppointmentRecurrencePattern(T
                 return NULL;
         }
 
-	/* Copy ExceptionInfo array into memory */ 
-	arp->ExceptionInfo = (struct ExceptionInfo *) talloc_memdup(mem_ctx,arp->ExceptionInfo, sizeof(struct ExceptionInfo) * arp->ExceptionCount);
-	
-	/* Copy DeletedInstanceDates and ModifiedInstanceDates into memory */ 
-	arp->RecurrencePattern.DeletedInstanceDates = (uint32_t *) talloc_memdup(mem_ctx, arp->RecurrencePattern.DeletedInstanceDates, 
-										 sizeof(uint32_t) * arp->RecurrencePattern.DeletedInstanceCount);
-							      
-	arp->RecurrencePattern.ModifiedInstanceDates = (uint32_t *) talloc_memdup(mem_ctx, arp->RecurrencePattern.ModifiedInstanceDates, 
-										  sizeof(uint32_t) * arp->RecurrencePattern.ModifiedInstanceCount);
-	
-	/* Set reference to parent so arrays get free with rest */
-	arp->ExceptionInfo = talloc_reference(arp, arp->ExceptionInfo);
-	arp->RecurrencePattern.DeletedInstanceDates = talloc_reference(arp,arp->RecurrencePattern.DeletedInstanceDates);
-	arp->RecurrencePattern.ModifiedInstanceDates = talloc_reference(arp, arp->RecurrencePattern.ModifiedInstanceDates);
-	
         return arp;
 }
 

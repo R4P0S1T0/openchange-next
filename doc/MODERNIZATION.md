@@ -128,6 +128,7 @@ With those prerequisites on PATH:
 ./configure --with-samba=/usr
 make -j2 all
 make check-propsdump
+make check-property-blobs check-recipient-blobs
 make check-libmapi-modernization
 make check-ocpf-lexer
 make check-mapiadmin
@@ -467,6 +468,38 @@ LDB-backed lifecycle harness covers wrong SID, missing/disabled accounts,
 missing account-control attributes, invalid handle type and zero UUID, alongside
 completion/cancellation cleanup. Native and ASan/UBSan checks pass; no real
 cross-domain authentication has been attempted.
+
+## Packed property and recurrence decoding
+
+The shared property reader now checks every NDR return value and publishes an
+offset only after a complete value has been decoded. Multi-value counts are
+bounded by the remaining wire bytes before generated code allocates arrays;
+string values must contain their one-byte or UTF-16 terminator. Decoded strings,
+binary data and nested arrays are owned by the returned value after the parser
+is freed. Unsupported types continue to fail rather than guessing their size.
+
+Row assembly uses the same checked path, rejects unknown layout/property flags,
+keeps caller column tags immutable and represents absent columns as PT_ERROR /
+MAPI_E_NOT_FOUND. A malformed row publishes neither partial properties nor an
+advanced cursor. `emsmdb_get_SRowSet` now returns MAPISTATUS and clears cRows on
+failure; table, message, recipient and capture-reader callers propagate parser
+errors. ModifyRecipients also rejects excess property counts and truncated
+layout/error bytes before indexing its property data.
+
+`make check-property-blobs check-recipient-blobs check-propsdump` exercises every
+previously supported scalar/array type, every truncated prefix of the fixtures,
+large counts, missing columns, invalid flags, allocation failure and real
+RPC-capture assembly. The existing recurrence test exposed another lifetime bug:
+recurrence dates and exception arrays were copied after their parser had freed
+them. Both recurrence readers now allocate nested data under their result,
+without the freed-memory copies or additional talloc references. The test checks
+nested content and complete result cleanup.
+
+Native and ASan/UBSan checks pass, including the 8 Check tests and EMSMDB boundary
+checks; local leak detection is disabled due to sandbox restrictions. The full
+source-copy build and 30-case offline client suite also pass (the known expected
+LZXpress failure remains). These are local parsing/lifetime checks, not evidence
+of live mailbox, recurrence or Outlook interoperability.
 
 ## Remaining blockers
 

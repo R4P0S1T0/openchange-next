@@ -186,8 +186,28 @@ START_TEST (test_get_AppointmentRecurrencePattern) {
 
 	for(i=0; i < nCases; i++) {
 		struct AppointmentRecurrencePattern *res;
+		size_t blocks = talloc_total_blocks(mem_ctx);
 		res = get_AppointmentRecurrencePattern(mem_ctx, &cases[i]);
 		ck_assert(res != NULL);
+		if (i == 3) {
+			ck_assert_uint_eq(res->RecurrencePattern.DeletedInstanceCount, 2);
+			ck_assert_uint_eq(res->RecurrencePattern.DeletedInstanceDates[0], 0x0cfbbce0);
+			ck_assert_uint_eq(res->RecurrencePattern.ModifiedInstanceCount, 1);
+			ck_assert_uint_eq(res->RecurrencePattern.ModifiedInstanceDates[0], 0x0cfc54c0);
+			ck_assert_uint_eq(res->ExceptionCount, 1);
+			ck_assert(talloc_parent(res->ExceptionInfo) == res);
+			ck_assert(talloc_parent(res->RecurrencePattern.DeletedInstanceDates) == res);
+		}
+		talloc_free(res);
+		ck_assert_uint_eq(talloc_total_blocks(mem_ctx), blocks);
+		if (i == 3) {
+			struct RecurrencePattern *pattern = get_RecurrencePattern(mem_ctx, &cases[i]);
+			ck_assert(pattern != NULL);
+			ck_assert_uint_eq(pattern->DeletedInstanceDates[0], 0x0cfbbce0);
+			ck_assert(talloc_parent(pattern->ModifiedInstanceDates) == pattern);
+			talloc_free(pattern);
+			ck_assert_uint_eq(talloc_total_blocks(mem_ctx), blocks);
+		}
 	}
 } END_TEST
 

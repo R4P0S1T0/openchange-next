@@ -2068,3 +2068,19 @@ ocsmanager-install::
 # add ocsmanager-install to the install target.
 #
 # install:: ocsmanager-install
+
+.PHONY: check-property-blobs
+check-property-blobs: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/property-blobs-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/property-blobs-check
+
+bin/property-blobs-check: testsuite/modernization/property_blob_smoke.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
+
+.PHONY: check-recipient-blobs
+check-recipient-blobs: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/recipient-blobs-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/recipient-blobs-check
+
+bin/recipient-blobs-check: testsuite/modernization/recipient_blob_smoke.c mapiproxy/servers/default/emsmdb/oxcmsg.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)

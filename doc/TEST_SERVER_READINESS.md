@@ -35,6 +35,10 @@ upgrade/restore validation beyond this first test milestone.
   checked against the authenticated SID; cross-account connection DNs and
   private mailbox logons are rejected. Backend and notification registration
   cleanup has focused regression coverage.
+- Packed property readers reject truncated values, missing string terminators,
+  excessive multi-value counts and unknown row flags. Nested values remain owned
+  after parser destruction; failed rows publish no partial results. Recipient
+  property counts/flags and recurrence array ownership have regression checks.
 - MAPI NDR lengths, handle tables, RPC frame sizes/flags, compressed plus XOR
   payloads and transaction handle indexes have focused checks. Output encoding
   rejects inconsistent or oversized buffers. These checks do not cover every

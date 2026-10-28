@@ -314,7 +314,8 @@ _PUBLIC_ enum MAPISTATUS QueryRows(mapi_object_t *obj_table,
 	reply = &mapi_response->mapi_repl->u.mapi_QueryRows;
 	rowSet->cRows = reply->RowCount;
 	rowSet->aRow = talloc_array((TALLOC_CTX *)table, struct SRow, rowSet->cRows);
-	emsmdb_get_SRowSet((TALLOC_CTX *)rowSet->aRow, rowSet, &table->proptags, &reply->RowData);
+	retval = emsmdb_get_SRowSet((TALLOC_CTX *)rowSet->aRow, rowSet, &table->proptags, &reply->RowData);
+	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 
 	talloc_free(mapi_response);
 	talloc_free(mem_ctx);
@@ -1354,7 +1355,8 @@ _PUBLIC_ enum MAPISTATUS FindRow(mapi_object_t *obj_table,
 	reply = &mapi_response->mapi_repl->u.mapi_FindRow;
 	SRowSet->cRows = 1;
 	SRowSet->aRow = talloc_array((TALLOC_CTX *)table, struct SRow, SRowSet->cRows);
-	emsmdb_get_SRowSet((TALLOC_CTX *)table, SRowSet, &table->proptags, &reply->row);
+	retval = emsmdb_get_SRowSet((TALLOC_CTX *)table, SRowSet, &table->proptags, &reply->row);
+	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 
 	talloc_free(mapi_response);
 	talloc_free(mem_ctx);
@@ -1640,7 +1642,8 @@ _PUBLIC_ enum MAPISTATUS ExpandRow(mapi_object_t *obj_table,
 	reply = &mapi_response->mapi_repl->u.mapi_ExpandRow;
 	rowData->cRows = reply->RowCount;
 	rowData->aRow = talloc_array((TALLOC_CTX *)table, struct SRow, reply->RowCount);
-	emsmdb_get_SRowSet((TALLOC_CTX *)table, rowData, &table->proptags, &reply->RowData);
+	retval = emsmdb_get_SRowSet((TALLOC_CTX *)table, rowData, &table->proptags, &reply->RowData);
+	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 	*expandedRowCount = reply->ExpandedRowCount;
 
 	talloc_free(mapi_response);

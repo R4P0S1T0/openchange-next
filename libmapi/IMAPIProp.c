@@ -165,6 +165,7 @@ _PUBLIC_ enum MAPISTATUS GetProps(mapi_object_t *obj,
 					   &mapi_response->mapi_repl->u.mapi_GetProps.prop_data,
 					   &properties, lpProps, PropCount,
 					   mapi_response->mapi_repl->u.mapi_GetProps.layout);
+	OPENCHANGE_RETVAL_IF(mapistatus != MAPI_E_SUCCESS, mapistatus, mem_ctx);
 	OPENCHANGE_RETVAL_IF(!mapistatus && (retval == MAPI_W_ERRORS_RETURNED), retval, mem_ctx);
 
 	talloc_free(mapi_response);

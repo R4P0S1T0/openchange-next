@@ -65,6 +65,24 @@ int main(void)
     CHECK(process_response(ctx, call, path, tags, opnum, 0) == -1); /* Failed ROP has no property union. */
     CHECK(process_response(ctx, call, path, tags, opnum, -1) == -1);
     CHECK(process_response(ctx, call, path, tags, opnum, 10000) == -1);
+    /* Successful ROPs still need complete packed property data. */
+    replies[0].error_code = MAPI_E_SUCCESS;
+    for (int valid = 0; valid < 2; valid++) {
+        static uint8_t name[] = {'B', 0, 'o', 0, 'b', 0, 0, 0};
+        replies[0].u.mapi_GetProps.prop_data.data = name;
+        replies[0].u.mapi_GetProps.prop_data.length = valid ? sizeof(name) : 0;
+        rop = ndr_push_init_ctx(ctx); CHECK(rop); rop->flags |= LIBNDR_FLAG_NOALIGN;
+        CHECK(ndr_push_EcDoRpc_MAPI_REPL(rop, NDR_SCALARS, &replies[0]) == NDR_ERR_SUCCESS);
+        response.length = rop->offset + 2; response.mapi_len = response.length + 4;
+        header.Size = header.SizeActual = response.mapi_len;
+        wire = ndr_push_init_ctx(ctx); CHECK(wire); wire->flags |= LIBNDR_FLAG_NOALIGN;
+        CHECK(ndr_push_RPC_HEADER_EXT(wire, NDR_SCALARS, &header) == NDR_ERR_SUCCESS);
+        CHECK(ndr_push_mapi_response(wire, NDR_SCALARS, &response) == NDR_ERR_SUCCESS);
+        rpc.out.rgbOut = wire->data; output_size = wire->offset;
+        capture = ndr_push_init_ctx(ctx); CHECK(capture);
+        CHECK(ndr_push_EcDoRpcExt2(capture, NDR_OUT, &rpc) == NDR_ERR_SUCCESS && save_capture(path, capture));
+        CHECK(process_response(ctx, call, path, tags, opnum, 0) == (valid ? 0 : -1));
+    }
     capture->offset = 3; CHECK(save_capture(path, capture));
     CHECK(process_request(ctx, call, path, &opnum, &index) == NULL);
     unlink(path); talloc_free(ctx);

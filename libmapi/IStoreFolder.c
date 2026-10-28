@@ -157,11 +157,15 @@ _PUBLIC_ enum MAPISTATUS OpenMessage(mapi_object_t *obj_store,
 	message->SPropTagArray.aulPropTag = talloc_steal(message, reply->RecipientColumns.aulPropTag);
 
 	for (i = 0; i < reply->RowCount; i++) {
-		emsmdb_get_SRow((TALLOC_CTX *)message,
+		retval = emsmdb_get_SRow((TALLOC_CTX *)message,
 				&(message->SRowSet.aRow[i]), &message->SPropTagArray, 
 				reply->RecipientRows[i].RecipientRow.prop_count,
 				&reply->RecipientRows[i].RecipientRow.prop_values,
 				reply->RecipientRows[i].RecipientRow.layout, 1);
+		if (retval != MAPI_E_SUCCESS) {
+			talloc_free(message);
+			OPENCHANGE_RETVAL_ERR(retval, mem_ctx);
+		}
 
 		lpProp.ulPropTag = PR_RECIPIENT_TYPE;
 		lpProp.value.l = reply->RecipientRows[i].RecipientType;
@@ -275,11 +279,15 @@ _PUBLIC_ enum MAPISTATUS ReloadCachedInformation(mapi_object_t *obj_message)
 	message->SPropTagArray.aulPropTag = talloc_steal(message, reply->RecipientColumns.aulPropTag);
 
 	for (i = 0; i < reply->RowCount; i++) {
-		emsmdb_get_SRow((TALLOC_CTX *)message,
+		retval = emsmdb_get_SRow((TALLOC_CTX *)message,
 				&(message->SRowSet.aRow[i]), &message->SPropTagArray, 
 				reply->RecipientRows[i].RecipientRow.prop_count,
 				&reply->RecipientRows[i].RecipientRow.prop_values,
 				reply->RecipientRows[i].RecipientRow.layout, 1);
+		if (retval != MAPI_E_SUCCESS) {
+			talloc_free(message);
+			OPENCHANGE_RETVAL_ERR(retval, mem_ctx);
+		}
 
 		lpProp.ulPropTag = PR_RECIPIENT_TYPE;
 		lpProp.value.l = reply->RecipientRows[i].RecipientType;
