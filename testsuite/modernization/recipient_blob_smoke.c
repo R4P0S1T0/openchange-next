@@ -6,6 +6,53 @@
     return 1; \
 } } while (0)
 
+static int directory_names(TALLOC_CTX *ctx)
+{
+    struct emsmdbp_context backend = {0};
+    struct ldb_context *db = ldb_init(ctx, NULL);
+    struct ldb_dn *base;
+    struct ldb_message *message;
+    static const char * const names[][2] = {
+        {"/o=Test/cn=Alice", "alice"},
+        {"/o=Test/cn=AliceOther", "other"},
+        {"/o=Test/cn=Alice (Ops)*\\Example", "special"}
+    };
+    char path[] = "/tmp/openchange-recipient-XXXXXX";
+    char *name;
+    int fd = mkstemp(path);
+    CHECK(db && fd >= 0); close(fd); unlink(path);
+    CHECK(ldb_connect(db, path, 0, NULL) == LDB_SUCCESS);
+    base = ldb_dn_new(db, db, "DC=test");
+    CHECK(base && ldb_set_opaque(db, "defaultNamingContext", base) == LDB_SUCCESS);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        message = ldb_msg_new(ctx); CHECK(message);
+        message->dn = ldb_dn_new_fmt(message, db, "CN=user%zu,DC=test", i);
+        CHECK(message->dn && ldb_msg_add_string(message, "legacyExchangeDN", names[i][0]) == LDB_SUCCESS);
+        CHECK(ldb_msg_add_string(message, "sAMAccountName", names[i][1]) == LDB_SUCCESS);
+        CHECK(ldb_add(db, message) == LDB_SUCCESS); talloc_free(message);
+    }
+    backend.samdb_ctx = db; backend.szDNPrefix = "/o=Test/";
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 0, names[0][0], &name) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(name, "alice") && talloc_parent(name) == ctx); talloc_free(name);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 8, "cn=Alice", &name) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(name, "alice")); talloc_free(name);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 0, names[2][0], &name) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(name, "special")); talloc_free(name);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 0, "/o=Test/cn=AliceO*", &name) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(name, "/o=Test/cn=AliceO*")); talloc_free(name);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 9, "cn=Alice", &name) == MAPI_E_INVALID_PARAMETER && name == NULL);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 0, NULL, &name) == MAPI_E_INVALID_PARAMETER && name == NULL);
+    message = ldb_msg_new(ctx); CHECK(message);
+    message->dn = ldb_dn_new(message, db, "CN=duplicate,DC=test");
+    CHECK(message->dn && ldb_msg_add_string(message, "legacyExchangeDN", names[0][0]) == LDB_SUCCESS);
+    CHECK(ldb_msg_add_string(message, "sAMAccountName", "duplicate") == LDB_SUCCESS && ldb_add(db, message) == LDB_SUCCESS);
+    talloc_free(message);
+    CHECK(oxcmsg_resolve_partial_x500name(ctx, &backend, 0, names[0][0], &name) == MAPI_E_SUCCESS);
+    CHECK(!strcmp(name, names[0][0])); talloc_free(name);
+    talloc_free(db); unlink(path);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
@@ -14,7 +61,7 @@ int main(void)
     struct mapistore_message_recipient recipient = {0};
     uint8_t bytes[] = {'a', 0, 0, 0, 0};
     size_t blocks;
-    CHECK(ctx);
+    CHECK(ctx && directory_names(ctx) == 0);
     row.RecipientRow.prop_count = 1;
     row.RecipientRow.prop_values.data = bytes;
     row.RecipientRow.prop_values.length = 2;
@@ -42,6 +89,6 @@ int main(void)
     CHECK(oxcmsg_parse_ModifyRecipientRow(ctx, NULL, &row, 2, tags, &recipient) != MAPI_E_SUCCESS);
     CHECK(recipient.data == NULL && talloc_total_blocks(ctx) == blocks);
     talloc_free(ctx);
-    puts("Recipient property counts, absent/truncated flags, error payload bounds and string truncation: OK");
+    puts("Recipient directory filter literals, ambiguity, prefix bounds and packed property checks: OK");
     return 0;
 }

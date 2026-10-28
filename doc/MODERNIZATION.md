@@ -517,6 +517,21 @@ fixtures also inspect nested elements and cleanup. Native, source-copy and
 ASan/UBSan checks pass (local leak detection disabled). This addresses ownership;
 all binary property formats still need further semantic and length-limit review.
 
+## Literal recipient directory lookup
+
+ModifyRecipients now escapes the complete legacyExchangeDN before an exact LDB
+search. A wildcard, parenthesis or backslash in a supplied name cannot become
+filter syntax and select another account. Full and prefix-compressed names are
+validated, duplicate matches remain unresolved, and directory errors are
+returned rather than treated as successful external-name resolution. Returned
+names are copied under the caller before temporary search data is freed.
+
+The real temporary LDB in `make check-recipient-blobs` covers normal and
+compressed names, literal filter characters, wildcard attempts, invalid prefixes
+and duplicate directory entries. Native/source-copy and ASan/UBSan checks pass,
+alongside EMSMDB regression checks. Broader recipient-resolution behavior and
+actual directory interoperability remain integration work.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary

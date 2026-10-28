@@ -695,52 +695,41 @@ end:
    \return MAPI_E_SUCCESS on success, otherwise MAPI error
  */
 static enum MAPISTATUS oxcmsg_resolve_partial_x500name(TALLOC_CTX *mem_ctx,
-						       struct emsmdbp_context *emsmdbp_ctx,
-						       uint8_t prefix_size, const char *x500name,
-						       char **username_p)
+	struct emsmdbp_context *emsmdbp_ctx, uint8_t prefix_size,
+	const char *x500name, char **username_p)
 {
-	char			*x500dn;
-	char			*username;
-	const char * const	attrs[] = { "sAMAccountName", NULL };
-	int			ret;
-	struct ldb_result	*res = NULL;
+	TALLOC_CTX *tmp;
+	char *x500dn, *encoded, *username;
+	const char *account;
+	const char * const attrs[] = { "sAMAccountName", NULL };
+	struct ldb_result *res = NULL;
+	int ret;
 
-	OPENCHANGE_RETVAL_IF(!username_p, MAPI_E_INVALID_PARAMETER, NULL);
-
-	/* Step 0. Restore full x500dn */
-	if (prefix_size != 0) {
-		/* sanity check for DNPrefix valid length */
-		OPENCHANGE_RETVAL_IF(!emsmdbp_ctx->szDNPrefix, MAPI_E_INVALID_PARAMETER, NULL);
-		if (prefix_size > strlen(emsmdbp_ctx->szDNPrefix)) {
-			OC_DEBUG(0, "Requested x500name prefix is beyond what we have for DNPrefix=[%s]\n",
-					emsmdbp_ctx->szDNPrefix);
-			return MAPI_E_INVALID_PARAMETER;
-		}
-
-		/* concatenate x500name suffix with szDNPrefix we are using at the moment */
-		size_t name_len = prefix_size + strlen(x500name) + 1;
-		x500dn = talloc_zero_array(mem_ctx, char, name_len);
-		OPENCHANGE_RETVAL_IF(!x500dn, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
-
-		strncpy(x500dn, emsmdbp_ctx->szDNPrefix, prefix_size);
-		strcpy(x500dn + prefix_size, x500name);
-	} else {
-		x500dn = discard_const_p(char, x500name);
-	}
-
-	/* Step 1. Try to find out an account with x500dn we have */
-	ret = ldb_search(emsmdbp_ctx->samdb_ctx, mem_ctx, &res,
-			 ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx), LDB_SCOPE_SUBTREE,
-			 attrs, "legacyExchangeDN=%s", x500dn);
-	if (ret != LDB_SUCCESS || res->count != 1) {
-		/* no such user, just pass what we have */
-		username = x500dn;
-	} else {
-		username = discard_const_p(char, ldb_msg_find_attr_as_string(res->msgs[0], "sAMAccountName", x500dn));
-	}
-
+	if (username_p == NULL) return MAPI_E_INVALID_PARAMETER;
+	*username_p = NULL;
+	if (emsmdbp_ctx == NULL || emsmdbp_ctx->samdb_ctx == NULL ||
+	    x500name == NULL || x500name[0] == '\0') return MAPI_E_INVALID_PARAMETER;
+	if (prefix_size && (emsmdbp_ctx->szDNPrefix == NULL ||
+	    prefix_size > strlen(emsmdbp_ctx->szDNPrefix))) return MAPI_E_INVALID_PARAMETER;
+	tmp = talloc_new(mem_ctx);
+	if (tmp == NULL) return MAPI_E_NOT_ENOUGH_MEMORY;
+	if (prefix_size) x500dn = talloc_asprintf(tmp, "%.*s%s", prefix_size,
+		emsmdbp_ctx->szDNPrefix, x500name);
+	else x500dn = talloc_strdup(tmp, x500name);
+	if (x500dn == NULL) { talloc_free(tmp); return MAPI_E_NOT_ENOUGH_MEMORY; }
+	encoded = ldb_binary_encode_string(tmp, x500dn);
+	if (encoded == NULL) { talloc_free(tmp); return MAPI_E_NOT_ENOUGH_MEMORY; }
+	ret = ldb_search(emsmdbp_ctx->samdb_ctx, tmp, &res,
+		ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx), LDB_SCOPE_SUBTREE,
+		attrs, "(legacyExchangeDN=%s)", encoded);
+	if (ret != LDB_SUCCESS) { talloc_free(tmp); return MAPI_E_CALL_FAILED; }
+	/* Unresolved external names keep their full DN; never pick an ambiguous user. */
+	account = res->count == 1 ? ldb_msg_find_attr_as_string(res->msgs[0],
+		"sAMAccountName", x500dn) : x500dn;
+	username = talloc_strdup(mem_ctx, account);
+	talloc_free(tmp);
+	if (username == NULL) return MAPI_E_NOT_ENOUGH_MEMORY;
 	*username_p = username;
-
 	return MAPI_E_SUCCESS;
 }
 
