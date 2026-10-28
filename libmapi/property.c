@@ -1552,12 +1552,15 @@ _PUBLIC_ struct TimeZoneStruct *get_TimeZoneStruct(TALLOC_CTX *mem_ctx,
 	if (!bin->lpb) return NULL;
 
 	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (ndr == NULL) return NULL;
 	ndr->offset = 0;
 	ndr->data = bin->lpb;
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	TimeZoneStruct = talloc_zero(mem_ctx, struct TimeZoneStruct);
+	if (TimeZoneStruct == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = TimeZoneStruct;
 	ndr_err_code = ndr_pull_TimeZoneStruct(ndr, NDR_SCALARS, TimeZoneStruct);
 
 	talloc_free(ndr);
@@ -1647,12 +1650,15 @@ _PUBLIC_ struct PtypServerId *get_PtypServerId(TALLOC_CTX *mem_ctx, struct Binar
 	if (!bin->lpb) return NULL;
 
 	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (ndr == NULL) return NULL;
 	ndr->offset = 0;
 	ndr->data = bin->lpb;
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	PtypServerId = talloc_zero(mem_ctx, struct PtypServerId);
+	if (PtypServerId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = PtypServerId;
 	ndr_err_code = ndr_pull_PtypServerId(ndr, NDR_SCALARS, PtypServerId);
 
 	talloc_free(ndr);
@@ -1691,12 +1697,15 @@ _PUBLIC_ struct GlobalObjectId *get_GlobalObjectId(TALLOC_CTX *mem_ctx,
 	if (!bin->lpb) return NULL;
 
 	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (ndr == NULL) return NULL;
 	ndr->offset = 0;
 	ndr->data = bin->lpb;
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	GlobalObjectId = talloc_zero(mem_ctx, struct GlobalObjectId);
+	if (GlobalObjectId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = GlobalObjectId;
 	ndr_err_code = ndr_pull_GlobalObjectId(ndr, NDR_SCALARS, GlobalObjectId);
 
 	talloc_free(ndr);
@@ -1734,12 +1743,15 @@ _PUBLIC_ struct MessageEntryId *get_MessageEntryId(TALLOC_CTX *mem_ctx, struct B
 	if (!bin->lpb) return NULL;
 
 	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (ndr == NULL) return NULL;
 	ndr->offset = 0;
 	ndr->data = bin->lpb;
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	MessageEntryId = talloc_zero(mem_ctx, struct MessageEntryId);
+	if (MessageEntryId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = MessageEntryId;
 	ndr_err_code = ndr_pull_MessageEntryId(ndr, NDR_SCALARS, MessageEntryId);
 
 	talloc_free(ndr);
@@ -1776,12 +1788,15 @@ _PUBLIC_ struct FolderEntryId *get_FolderEntryId(TALLOC_CTX *mem_ctx, struct Bin
 	if (!bin->lpb) return NULL;
 
 	ndr = talloc_zero(mem_ctx, struct ndr_pull);
+	if (ndr == NULL) return NULL;
 	ndr->offset = 0;
 	ndr->data = bin->lpb;
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	FolderEntryId = talloc_zero(mem_ctx, struct FolderEntryId);
+	if (FolderEntryId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = FolderEntryId;
 	ndr_err_code = ndr_pull_FolderEntryId(ndr, NDR_SCALARS, FolderEntryId);
 
 	talloc_free(ndr);
@@ -1823,7 +1838,8 @@ _PUBLIC_ struct AddressBookEntryId *get_AddressBookEntryId(TALLOC_CTX *mem_ctx, 
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	AddressBookEntryId = talloc_zero(mem_ctx, struct AddressBookEntryId);
-	if (!AddressBookEntryId) return NULL;
+	if (AddressBookEntryId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = AddressBookEntryId;
 	ndr_err_code = ndr_pull_AddressBookEntryId(ndr, NDR_SCALARS, AddressBookEntryId);
 
 	talloc_free(ndr);
@@ -1866,7 +1882,8 @@ _PUBLIC_ struct OneOffEntryId *get_OneOffEntryId(TALLOC_CTX *mem_ctx, struct Bin
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	OneOffEntryId = talloc_zero(mem_ctx, struct OneOffEntryId);
-	if (!OneOffEntryId) return NULL;
+	if (OneOffEntryId == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = OneOffEntryId;
 	ndr_err_code = ndr_pull_OneOffEntryId(ndr, NDR_SCALARS, OneOffEntryId);
 
 	talloc_free(ndr);
@@ -1909,7 +1926,8 @@ _PUBLIC_ struct PersistData *get_PersistData(TALLOC_CTX *mem_ctx, struct Binary_
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	PersistData = talloc_zero(mem_ctx, struct PersistData);
-	if (!PersistData) return NULL;
+	if (PersistData == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = PersistData;
 	ndr_err_code = ndr_pull_PersistData(ndr, NDR_SCALARS, PersistData);
 
 	talloc_free(ndr);
@@ -1952,7 +1970,8 @@ _PUBLIC_ struct PersistDataArray *get_PersistDataArray(TALLOC_CTX *mem_ctx, stru
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
 	PersistDataArray = talloc_zero(mem_ctx, struct PersistDataArray);
-	if (!PersistDataArray) return NULL;
+	if (PersistDataArray == NULL) { talloc_free(ndr); return NULL; }
+	ndr->current_mem_ctx = PersistDataArray;
 	ndr_err_code = ndr_pull_PersistDataArray(ndr, NDR_SCALARS|NDR_BUFFERS, PersistDataArray);
 
 	talloc_free(ndr);
@@ -1981,8 +2000,10 @@ _PUBLIC_ struct SizedXid *get_SizedXidArray(TALLOC_CTX *mem_ctx, struct Binary_r
 {
 	enum ndr_err_code	ndr_err_code;
 	struct ndr_pull		*ndr;
-	struct SizedXid		*sized_xid_list, sized_xid;
+	struct SizedXid		*sized_xid_list, *grown, sized_xid;
 	uint32_t		count;
+
+	if (count_p) *count_p = 0;
 
 	/* Sanity checks */
 	if (!bin) return NULL;
@@ -2003,6 +2024,7 @@ _PUBLIC_ struct SizedXid *get_SizedXidArray(TALLOC_CTX *mem_ctx, struct Binary_r
 	ndr->data_size = bin->cb;
 
 	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN);
+	ndr->current_mem_ctx = sized_xid_list;
 	while (ndr->offset < ndr->data_size) {
 		ndr_err_code = ndr_pull_SizedXid(ndr, NDR_SCALARS, &sized_xid);
 		if (ndr_err_code != NDR_ERR_SUCCESS) goto error;
@@ -2010,8 +2032,10 @@ _PUBLIC_ struct SizedXid *get_SizedXidArray(TALLOC_CTX *mem_ctx, struct Binary_r
 		memcpy(&sized_xid_list[count], &sized_xid, sizeof(struct SizedXid));
 		count++;
 
-		sized_xid_list = talloc_realloc(mem_ctx, sized_xid_list, struct SizedXid, count + 1);
-		if (!sized_xid_list) goto error;
+		grown = talloc_realloc(mem_ctx, sized_xid_list, struct SizedXid, count + 1);
+		if (grown == NULL) goto error;
+		sized_xid_list = grown;
+		ndr->current_mem_ctx = sized_xid_list;
 	}
 	talloc_free(ndr);
 

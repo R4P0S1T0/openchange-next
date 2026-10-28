@@ -255,9 +255,17 @@ START_TEST (test_get_PersistDataArray) {
 	for (i = 0; i < CASES_NUM; i++) {
 		bin.cb = cases_size[i];
 		bin.lpb = (uint8_t *) cases[i];
+		size_t blocks = talloc_total_blocks(mem_ctx);
 		res = get_PersistDataArray(mem_ctx, &bin);
 		ck_assert(res != NULL);
 		ck_assert_int_eq(res->cValues, cases_cValues[i]);
+		ck_assert(res->lpPersistData != NULL);
+		if (i == 0) {
+			ck_assert_int_eq(res->lpPersistData[0].PersistID, RSF_PID_RSS_SUBSCRIPTION);
+			ck_assert(res->lpPersistData[0].DataElements.lpPersistElement != NULL);
+		}
+		talloc_free(res);
+		ck_assert_uint_eq(talloc_total_blocks(mem_ctx), blocks);
 	}
 
 } END_TEST

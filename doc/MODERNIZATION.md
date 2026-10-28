@@ -128,7 +128,7 @@ With those prerequisites on PATH:
 ./configure --with-samba=/usr
 make -j2 all
 make check-propsdump
-make check-property-blobs check-recipient-blobs
+make check-binary-properties check-property-blobs check-recipient-blobs
 make check-libmapi-modernization
 make check-ocpf-lexer
 make check-mapiadmin
@@ -500,6 +500,22 @@ checks; local leak detection is disabled due to sandbox restrictions. The full
 source-copy build and 30-case offline client suite also pass (the known expected
 LZXpress failure remains). These are local parsing/lifetime checks, not evidence
 of live mailbox, recurrence or Outlook interoperability.
+
+## Binary property ownership
+
+The property wrappers for global object IDs, address-book and one-off entry IDs,
+folder/message/server IDs, time zones and persistent data now allocate decoded
+children under the returned object before freeing the NDR context. Allocation
+failure frees the parser as well. SizedXid arrays retain their nested LocalId
+blobs across result growth, preserve the old allocation on realloc failure and
+clear the output count on failure.
+
+`make check-binary-properties` uses generated binary fixtures, frees the wire
+buffer and then reads the decoded nested data. It checks complete result cleanup
+and sweeps allocation limits while parsing two XIDs. The existing persistent-data
+fixtures also inspect nested elements and cleanup. Native, source-copy and
+ASan/UBSan checks pass (local leak detection disabled). This addresses ownership;
+all binary property formats still need further semantic and length-limit review.
 
 ## Remaining blockers
 

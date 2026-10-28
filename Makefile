@@ -2084,3 +2084,11 @@ check-recipient-blobs: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/rec
 bin/recipient-blobs-check: testsuite/modernization/recipient_blob_smoke.c mapiproxy/servers/default/emsmdb/oxcmsg.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
+
+.PHONY: check-binary-properties
+check-binary-properties: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/binary-properties-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/binary-properties-check
+
+bin/binary-properties-check: testsuite/modernization/binary_property_smoke.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)

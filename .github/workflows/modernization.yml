@@ -32,9 +32,9 @@ jobs:
           make mapitest-install
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapiprofile --newdb --database "$RUNNER_TEMP/profiles.ldb" --ldif setup/profiles
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapitest --no-server --database "$RUNNER_TEMP/profiles.ldb"
-      - run: make check-property-blobs check-recipient-blobs
+      - run: make check-binary-properties check-property-blobs check-recipient-blobs
       - name: Check packed properties and recurrence ownership with sanitizers
-        run: make -W libmapi/emsmdb.c -W libmapi/property.c check-property-blobs check-recipient-blobs check-libmapi-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+        run: make -W libmapi/emsmdb.c -W libmapi/property.c check-binary-properties check-property-blobs check-recipient-blobs check-libmapi-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - name: Restore the native property decoders
         run: make -W libmapi/emsmdb.c -W libmapi/property.c libmapi
       - run: make check-propsdump
