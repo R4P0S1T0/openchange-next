@@ -12,4 +12,15 @@ char **str_list_make(TALLOC_CTX *mem_ctx, const char *string, const char *separa
 const char **str_list_add(const char **list, const char *value);
 char *str_list_join(TALLOC_CTX *mem_ctx, const char **list, char separator);
 
+/* Exported SAM database ABI absent from installed headers. Checked against
+ * Samba 4.22.10 source4/dsdb/samdb/samdb.c.
+ */
+struct ldb_context;
+struct tevent_context;
+struct loadparm_context;
+struct auth_session_info;
+struct tsocket_address;
+struct ldb_context *samdb_connect(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, const struct tsocket_address *, unsigned int);
+int samdb_connect_url(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, unsigned int, const char *, const struct tsocket_address *, struct ldb_context **, char **);
+
 #endif

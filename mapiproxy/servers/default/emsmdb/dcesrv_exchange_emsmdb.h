@@ -60,14 +60,6 @@ struct emsmdbp_context {
 	struct GUID				session_uuid;
 };
 
-struct exchange_emsmdb_session {
-	uint32_t			pullTimeStamp;
-	struct mpm_session		*session;
-        struct GUID                     uuid;
-	struct exchange_emsmdb_session	*prev;
-	struct exchange_emsmdb_session	*next;
-};
-
 struct emsmdbp_stream {
 	size_t			position;
 	DATA_BLOB		buffer;
@@ -297,7 +289,6 @@ struct emsmdbp_special_folder {
 __BEGIN_DECLS
 
 NTSTATUS	samba_init_module(void);
-struct ldb_context *samdb_connect_url(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, unsigned int, const char *);
 
 /* definitions from emsmdbp.c */
 struct emsmdbp_context	*emsmdbp_init(struct loadparm_context *, const char *, void *);
@@ -310,7 +301,7 @@ enum MAPISTATUS		emsmdbp_resolve_recipient(TALLOC_CTX *, struct emsmdbp_context 
 enum MAPISTATUS		emsmdbp_fetch_organizational_units(TALLOC_CTX *, struct emsmdbp_context *, char **, char **);
 enum MAPISTATUS		emsmdbp_get_org_dn(struct emsmdbp_context *, struct ldb_dn **);
 
-const struct GUID *const	MagicGUIDp;
+extern const struct GUID *const	MagicGUIDp;
 int				emsmdbp_guid_to_replid(struct emsmdbp_context *, const char *username, const struct GUID *, uint16_t *);
 int				emsmdbp_replid_to_guid(struct emsmdbp_context *, const char *username, const uint16_t, struct GUID *);
 int				emsmdbp_source_key_from_fmid(TALLOC_CTX *, struct emsmdbp_context *, const char *username, uint64_t, struct Binary_r **);

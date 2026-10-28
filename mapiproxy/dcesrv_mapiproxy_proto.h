@@ -36,10 +36,6 @@ __BEGIN_DECLS
 
 /* definitions from dcesrv_mapiproxy.c */
 NTSTATUS dcerpc_server_mapiproxy_init(void);
-NTSTATUS samba_init_module(void);
-
-NTSTATUS dcerpc_server_exchange_nsp_init(void);
-NTSTATUS dcerpc_server_exchange_emsmdb_init(void);
 
 /* definitions from dcesrv_mapiproxy_nspi.c */
 bool mapiproxy_NspiGetProps(struct dcesrv_call_state *, struct NspiGetProps *);
@@ -51,20 +47,20 @@ bool mapiproxy_RfrGetNewDSA(struct dcesrv_call_state *, struct RfrGetNewDSA *);
 
 /* init functions definitions from gen_ndr/ndr_exchange_s.c */
 
-NTSTATUS dcerpc_server_exchange_store_admin3_init(void);
-NTSTATUS dcerpc_server_exchange_store_admin2_init(void);
-NTSTATUS dcerpc_server_exchange_store_admin1_init(void);
-NTSTATUS dcerpc_server_exchange_ds_rfr_init(void);
-NTSTATUS dcerpc_server_exchange_sysatt_cluster_init(void);
-NTSTATUS dcerpc_server_exchange_system_attendant_init(void);
-NTSTATUS dcerpc_server_exchange_mta_init(void);
-NTSTATUS dcerpc_server_exchange_drs_init(void);
-NTSTATUS dcerpc_server_exchange_xds_init(void);
-NTSTATUS dcerpc_server_exchange_mta_qadmin_init(void);
-NTSTATUS dcerpc_server_exchange_store_information_init(void);
-NTSTATUS dcerpc_server_exchange_nsp_init(void);
-NTSTATUS dcerpc_server_exchange_emsmdb_init(void);
-NTSTATUS dcerpc_server_exchange_unknown_init(void);
+NTSTATUS dcerpc_server_exchange_store_admin3_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_store_admin2_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_store_admin1_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_ds_rfr_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_sysatt_cluster_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_system_attendant_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_mta_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_drs_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_xds_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_mta_qadmin_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_store_information_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_nsp_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_emsmdb_init(TALLOC_CTX *);
+NTSTATUS dcerpc_server_exchange_unknown_init(TALLOC_CTX *);
 
 /* definitions from samba4: librpc/ndr/ndr_table.c */
 NTSTATUS				ndr_table_init(void);

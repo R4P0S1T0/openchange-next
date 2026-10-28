@@ -123,11 +123,11 @@ gen_ndr/%.h: %.idl | gen_ndr
 	@echo "Generating $@"
 	@$(PIDL) --outputdir=gen_ndr --header -- $<
 
-.c.o:
+%.o: %.c libmapi/mapidefs.h | idl libmapi/version.h
 	@echo "Compiling $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-.c.po:
+%.po: %.c libmapi/mapidefs.h | idl libmapi/version.h
 	@echo "Compiling $< with -fPIC"
 	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fPIC -c $< -o $@
 
@@ -681,13 +681,13 @@ libocpf.$(SHLIBEXT).$(PACKAGE_VERSION):		\
 libocpf.$(SHLIBEXT).$(LIBOCPF_SO_VERSION): libocpf.$(SHLIBEXT).$(PACKAGE_VERSION)
 	ln -fs $< $@
 
-libocpf/lex.yy.c:		libocpf/lex.l
+libocpf/lex.yy.c:		libocpf/lex.l libocpf/ocpf.tab.h
 	@echo "Generating $@"
 	@$(FLEX) -t $< > $@
 
-libocpf/ocpf.tab.c:	libocpf/ocpf.y
+libocpf/ocpf.tab.c libocpf/ocpf.tab.h &: libocpf/ocpf.y
 	@echo "Generating $@"
-	@$(BISON) -d $< -o $@
+	@$(BISON) -d $< -o libocpf/ocpf.tab.c
 
 # Avoid warnings
 libocpf/lex.yy.o: CFLAGS=
@@ -747,20 +747,29 @@ mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT): 	mapiproxy/dcesrv_mapiproxy.po		\
 						mapiproxy/dcesrv_mapiproxy_nspi.po	\
 						mapiproxy/dcesrv_mapiproxy_rfr.po	\
 						mapiproxy/dcesrv_mapiproxy_unused.po	\
-						ndr_mapi.po				\
-						gen_ndr/ndr_exchange.po
+						mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
+						libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $^ -L. $(LDFLAGS) $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	@$(CC) -o $@ $(DSOOPT) $^ -L. $(LDFLAGS) $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS)
+
+mapiproxy/dcesrv_mapiproxy.po mapiproxy/dcesrv_mapiproxy_nspi.po mapiproxy/dcesrv_mapiproxy_rfr.po mapiproxy/dcesrv_mapiproxy_unused.po: mapiproxy/dcesrv_mapiproxy.h mapiproxy/dcesrv_mapiproxy_proto.h mapiproxy/samba_compat.h
 
 mapiproxy/dcesrv_mapiproxy.c: gen_ndr/ndr_exchange_s.c gen_ndr/ndr_exchange.c
 
 
 mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT):	mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.po	\
-						gen_ndr/ndr_asyncemsmdb.po
+						mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
+						libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
+						mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) \
+						mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $^ -L. $(LDFLAGS) $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) $(NANOMSG_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)		\
+	@$(CC) -o $@ $(DSOOPT) $^ -L. $(LDFLAGS) $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) $(NANOMSG_LIBS)
 
+mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.po: mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/samba_compat.h
+
+$(patsubst %.c,%.po,$(wildcard mapiproxy/servers/default/emsmdb/*.c)): mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/samba_compat.h
+$(patsubst %.c,%.po,$(wildcard mapiproxy/servers/default/nspi/*.c)): mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/samba_compat.h
 
 mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c: gen_ndr/ndr_asyncemsmdb_s.c gen_ndr/ndr_asyncemsmdb.c
 
@@ -833,7 +842,7 @@ libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION): mapiproxy/libmapiproxy.$(SH
 # libmapiserver
 #################
 
-libmapiserver: mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
+libmapiserver: mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION)
 
 libmapiserver-install:
 	$(INSTALL) -m 0755 mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
@@ -871,12 +880,11 @@ mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION):	mapiproxy/libmapiserver/
 							mapiproxy/libmapiserver/libmapiserver_oxorule.po	\
 							mapiproxy/libmapiserver/libmapiserver_oxcperm.po	\
 							mapiproxy/libmapiserver/libmapiserver_oxcdata.po	\
-							ndr_mapi.po				\
-							gen_ndr/ndr_exchange.po
+		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiserver.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) $^ $(LIBS)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION) $^ $(LIBS)
 
-mapiproxy/libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION): libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
+libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION): mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	ln -fs $< $@
 
 
@@ -1052,18 +1060,22 @@ mapiproxy/modules/mpm_downgrade.$(SHLIBEXT): mapiproxy/modules/mpm_downgrade.po
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 mapiproxy/modules/mpm_pack.$(SHLIBEXT):	mapiproxy/modules/mpm_pack.po	\
-					ndr_mapi.po			\
-					gen_ndr/ndr_exchange.po
+					mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
+		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS)
+
+mapiproxy/modules/mpm_pack.po: libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 mapiproxy/modules/mpm_cache.$(SHLIBEXT): mapiproxy/modules/mpm_cache.po		\
 					 mapiproxy/modules/mpm_cache_ldb.po	\
 					 mapiproxy/modules/mpm_cache_stream.po	\
-					 ndr_mapi.po				\
-					 gen_ndr/ndr_exchange.po
+					 mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
+		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS)
+
+mapiproxy/modules/mpm_cache.po mapiproxy/modules/mpm_cache_ldb.po mapiproxy/modules/mpm_cache_stream.po: mapiproxy/modules/mpm_cache.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 mapiproxy/modules/mpm_dummy.$(SHLIBEXT): mapiproxy/modules/mpm_dummy.po
 	@echo "Linking $@"
@@ -1132,7 +1144,8 @@ clean:: mapiproxy-servers-clean
 mapiproxy/servers/exchange_nsp.$(SHLIBEXT):	mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.po	\
 						mapiproxy/servers/default/nspi/emsabp.po		\
 						mapiproxy/servers/default/nspi/emsabp_tdb.po		\
-						mapiproxy/servers/default/nspi/emsabp_property.po
+						mapiproxy/servers/default/nspi/emsabp_property.po \
+		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(TDB_LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
@@ -1151,13 +1164,16 @@ mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/
 						mapiproxy/servers/default/emsmdb/oxomsg.po			\
 						mapiproxy/servers/default/emsmdb/oxosfld.po			\
 						mapiproxy/servers/default/emsmdb/oxorule.po			\
-						mapiproxy/servers/default/emsmdb/oxcperm.po
+						mapiproxy/servers/default/emsmdb/oxcperm.po \
+		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
+		mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
 						mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)		\
 						mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION)
 
-mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT):	mapiproxy/servers/default/rfr/dcesrv_exchange_ds_rfr.po
+mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT):	mapiproxy/servers/default/rfr/dcesrv_exchange_ds_rfr.po \
+		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
@@ -1725,6 +1741,72 @@ check-mapiproxy-registries: libmapi bin/mapiproxy-registries
 bin/mapiproxy-registries: testsuite/modernization/registry_smoke.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_module.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_server.c mapiproxy/libmapiproxy/dcesrv_mapiproxy_session.c mapiproxy/libmapistore/mapistore_backend.c mapiproxy/libmapistore/gen_ndr/mapistore_notification.h libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $(filter %.c,$^) $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_memdup -Wl,--wrap=talloc_strdup -Wl,--wrap=_talloc_realloc_array libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(TDB_LIBS) $(SAMBASERVER_LIBS)
+
+.PHONY: check-mapiproxy-rpc
+check-mapiproxy-rpc: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) bin/mapiproxy-rpc
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/mapiproxy-rpc
+
+bin/mapiproxy-rpc: testsuite/modernization/rpc_smoke.c mapiproxy/dcesrv_mapiproxy.h mapiproxy/dcesrv_mapiproxy_proto.h mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -Wl,--export-dynamic -o $@ $< $(LDFLAGS) mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
+
+.PHONY: check-asyncemsmdb
+check-asyncemsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT) bin/asyncemsmdb
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/asyncemsmdb
+
+bin/asyncemsmdb: testsuite/modernization/asyncemsmdb_smoke.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=getsockname -Wl,--wrap=close mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(NANOMSG_LIBS)
+
+.PHONY: check-ocpf-lexer
+check-ocpf-lexer: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/ocpf-lexer
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/ocpf-lexer
+
+bin/ocpf-lexer: testsuite/modernization/ocpf_lexer_smoke.c libocpf/lex.yy.c libocpf/ocpf.tab.h libmapi/mapidefs.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
+
+.PHONY: check-nspi
+check-nspi: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/exchange_nsp.$(SHLIBEXT) bin/nspi bin/nspi-backend
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/nspi
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/nspi-backend
+
+bin/nspi: testsuite/modernization/nspi_smoke.c mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.c mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_nsp.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_memdup mapiproxy/servers/exchange_nsp.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
+
+bin/nspi-backend: testsuite/modernization/nspi_backend_smoke.c mapiproxy/servers/default/nspi/emsabp.c mapiproxy/servers/default/nspi/emsabp_tdb.c mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_nsp.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=tdb_open -Wl,--wrap=tdb_close -Wl,--wrap=tdb_store mapiproxy/servers/exchange_nsp.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS)
+
+.PHONY: check-emsmdb
+check-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) bin/emsmdb bin/emsmdb-backend
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb-backend
+
+bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=talloc_strdup mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
+
+bin/emsmdb-backend: testsuite/modernization/emsmdb_backend_smoke.c mapiproxy/servers/default/emsmdb/emsmdbp.c mapiproxy/libmapiproxy/mapi_handles.c mapiproxy/servers/default/emsmdb/oxcstor.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=tdb_open -Wl,--wrap=tdb_close -Wl,--wrap=tdb_store mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS)
+
+.PHONY: check-mpm-pack
+check-mpm-pack: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/modules/mpm_pack.$(SHLIBEXT) bin/mpm-pack
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/mpm-pack
+
+bin/mpm-pack: testsuite/modernization/pack_smoke.c mapiproxy/modules/mpm_pack.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -Wl,--wrap=_talloc_zero_array -Wl,--wrap=_talloc_memdup mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
+
+.PHONY: check-mpm-cache
+check-mpm-cache: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/modules/mpm_cache.$(SHLIBEXT) bin/mpm-cache
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/mpm-cache
+
+bin/mpm-cache: testsuite/modernization/cache_smoke.c mapiproxy/modules/mpm_cache.c mapiproxy/modules/mpm_cache_stream.c mapiproxy/modules/mpm_cache_ldb.c mapiproxy/modules/mpm_cache.h mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< mapiproxy/modules/mpm_cache_ldb.c $(LDFLAGS) -Wl,--wrap=fork -Wl,--wrap=waitpid mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
 
 clean-python:
 	rm -f pymapi/*.o

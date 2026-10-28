@@ -95,11 +95,12 @@ __BEGIN_DECLS
 
 NTSTATUS       	samba_init_module(void);
 
-NTSTATUS	mpm_cache_ldb_createdb(struct dcesrv_context *, const char *, struct ldb_context **);
+NTSTATUS	mpm_cache_ldb_createdb(TALLOC_CTX *, const char *, struct ldb_context **);
 NTSTATUS	mpm_cache_ldb_add_message(TALLOC_CTX *, struct ldb_context *, struct mpm_message *);
 NTSTATUS	mpm_cache_ldb_add_attachment(TALLOC_CTX *, struct ldb_context *, struct mpm_attachment *);
 NTSTATUS	mpm_cache_ldb_add_stream(struct mpm_cache *, struct ldb_context *, struct mpm_stream *);
 
+int		mpm_cache_open_root(const struct mpm_cache *);
 NTSTATUS	mpm_cache_stream_open(struct mpm_cache *, struct mpm_stream *);
 NTSTATUS	mpm_cache_stream_close(struct mpm_stream *);
 NTSTATUS	mpm_cache_stream_write(struct mpm_stream *, uint16_t, uint8_t *);

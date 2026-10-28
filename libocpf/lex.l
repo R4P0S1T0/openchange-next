@@ -29,9 +29,9 @@
 #include "libocpf/lex.h"
 
 #define	YY_EXTRA_TYPE	struct ocpf_context *
-#define	YY_NO_UNPUT
 
 static void unterminated(struct ocpf_context *, const char *, unsigned int);
+static bool string_append(struct ocpf_context *, char *, size_t *, int);
 
 %}
 
@@ -81,7 +81,7 @@ PT_MV_BINARY	{ return kw_PT_MV_BINARY; }
 			    int level = 1;
 			    int seen_star = 0;
 			    int seen_slash = 0;
-			    while((c = input(yyscanner)) != EOF) {
+			    while((c = input(yyscanner)) != 0) {
 				if(c == '/') {
 				    if(seen_star) {
 					if(--level == 0)
@@ -113,121 +113,59 @@ PT_MV_BINARY	{ return kw_PT_MV_BINARY; }
 				    continue;
 				}
 			    }
-			    if(c == EOF)
+			    if(c == 0) {
 				unterminated(ctx, "comment", start_lineno);
-			}
-"\""			{ 
-			    struct ocpf_context *ctx = yyextra;
-			    int start_lineno = ctx->lineno;
-			    int c, c2;
-			    char buf[0x4000];
-			    char *p = buf;
-			    int f = 0;
-			    int skip_ws = 0;
-			    
-			    while((c = input(yyscanner)) != EOF) {
-				if(isspace(c) && skip_ws) {
-				    if(c == '\n')
-					ctx->lineno++;
-				    continue;
-				}
-				skip_ws = 0;
-
-				if (c == '\\') {
-					c2 = c;
-					c = input(yyscanner);
-					if (c == '"') { 
-						*p++ = c;
-						c = input(yyscanner);
-					} else {
-						*p++ = c2;
-					}
-				}
-
-				if(c == '"') {
-					if(f) {
-						*p++ = '"';
-						f = 0;
-					} else {
-						f = 1;
-					}
-					continue;
-				}
-				if(f == 1) {
-					unput(c);
-					break;
-				}
-				if(c == '\n') {
-				    ctx->lineno++;
-				    while(p > buf && isspace((unsigned char)p[-1]))
-					p--;
-				    skip_ws = 1;
-				    continue;
-				}
-				*p++ = c;
+				return YYerror;
 			    }
-			    if(c == EOF)
-				unterminated(ctx, "string", start_lineno);
-			    *p++ = '\0';
-			    yylval->name = buf;
-			    return STRING; 
 			}
-W"\""			{ 
-			    struct ocpf_context *ctx = yyextra;
-			    int start_lineno = ctx->lineno;
-			    int c, c2;
-			    char buf[0x4000];
-			    char *p = buf;
-			    int f = 0;
-			    int skip_ws = 0;
-			    
-			    while((c = input(yyscanner)) != EOF) {
-				if(isspace(c) && skip_ws) {
-				    if(c == '\n')
-					ctx->lineno++;
-				    continue;
-				}
-				skip_ws = 0;
-
-				if (c == '\\') {
-					c2 = c;
-					c = input(yyscanner);
-					if (c == '"') { 
-						*p++ = c;
-						c = input(yyscanner);
-					} else {
-						*p++ = c2;
-					}
-				}
-
-				if(c == '"') {
-					if(f) {
-						*p++ = '"';
-						f = 0;
-					} else {
-						f = 1;
-					}
-					continue;
-				}
-				if(f == 1) {
-					unput(c);
-					break;
-				}
-				if(c == '\n') {
-				    ctx->lineno++;
-				    while(p > buf && isspace((unsigned char)p[-1]))
-					p--;
-				    skip_ws = 1;
-				    continue;
-				}
-				*p++ = c;
-			    }
-			    if(c == EOF)
-				unterminated(ctx, "string", start_lineno);
-			    *p++ = '\0';
-			    yylval->name = buf;
-			    return UNICODE; 
-			}
+W?"\"" {
+    struct ocpf_context *ctx = yyextra;
+    unsigned start_lineno = ctx->lineno;
+    bool unicode = yytext[0] == 'W', closed = false, skip_ws = false;
+    char *buf = talloc_array(ctx, char, 0x4000);
+    size_t used = 0;
+    int c;
+    if (buf == NULL) { ocpf_error_message(ctx, "out of memory\n"); return YYerror; }
+    while ((c = input(yyscanner)) != 0) {
+        if (isspace((unsigned char)c) && skip_ws) {
+            if (c == '\n') ctx->lineno++;
+            continue;
+        }
+        skip_ws = false;
+        if (c == '\\') {
+            c = input(yyscanner);
+            if (c != '"' && !string_append(ctx, buf, &used, '\\')) goto string_failure;
+            if (c == 0) break;
+            if (c == '"') {
+                if (!string_append(ctx, buf, &used, c)) goto string_failure;
+                c = input(yyscanner);
+                if (c == 0) break;
+            }
+        }
+        if (c == '"') {
+            if (closed) {
+                if (!string_append(ctx, buf, &used, c)) goto string_failure;
+                closed = false;
+            } else closed = true;
+            continue;
+        }
+        if (closed) { unput(c); break; }
+        if (c == '\n') {
+            ctx->lineno++;
+            while (used > 0 && isspace((unsigned char)buf[used - 1])) used--;
+            skip_ws = true;
+            continue;
+        }
+        if (!string_append(ctx, buf, &used, c)) goto string_failure;
+    }
+    if (!closed) { unterminated(ctx, "string", start_lineno); goto string_failure; }
+    buf[used] = '\0';
+    yylval->name = buf;
+    return unicode ? UNICODE : STRING;
+string_failure:
+    talloc_free(buf);
+    return YYerror;
+}
 \$[-A-Za-z0-9_]+      	{ char *y = yytext + 1;
 			  yylval->var = strdup((const char *)y);
 			  return VAR;
@@ -337,4 +275,14 @@ unterminated(struct ocpf_context *ctx, const char *type, unsigned int start_line
 {
     ocpf_error_message(ctx, "unterminated %s, possibly started on line %d\n", type, start_lineno);
     fflush(0);
+}
+
+static bool string_append(struct ocpf_context *ctx, char *buffer, size_t *used, int c)
+{
+    if (*used == 0x3fff) {
+        ocpf_error_message(ctx, "string exceeds 16383 bytes\n");
+        return false;
+    }
+    buffer[(*used)++] = c;
+    return true;
 }

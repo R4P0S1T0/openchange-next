@@ -50,7 +50,7 @@ _PUBLIC_ TDB_CONTEXT *emsabp_tdb_init(TALLOC_CTX *mem_ctx,
 	enum MAPISTATUS			retval;
 	TDB_CONTEXT			*tdb_ctx;
 	TDB_DATA			key;
-	TDB_DATA			dbuf;
+	TDB_DATA			dbuf = {0};
 	int				ret;
 
 	/* Sanity checks */
@@ -67,13 +67,15 @@ _PUBLIC_ TDB_CONTEXT *emsabp_tdb_init(TALLOC_CTX *mem_ctx,
 		key.dsize = strlen(EMSABP_TDB_DATA_REC);
 
 		dbuf.dptr = (unsigned char *) talloc_asprintf(mem_ctx, "0x%x", EMSABP_TDB_MID_START);
+		if (dbuf.dptr == NULL) return NULL;
 		dbuf.dsize = strlen((const char *)dbuf.dptr);
 
 		ret = tdb_store(tdb_ctx, key, dbuf, TDB_INSERT);
+		talloc_free(dbuf.dptr);
 		if (ret == -1) {
 			OC_DEBUG(3, "Unable to create %s record: %s",
 				  EMSABP_TDB_DATA_REC, tdb_errorstr(tdb_ctx));
-			tdb_close(tdb_ctx);
+			/* The shared database is owned by libmapiproxy, including on failure. */
 			return NULL;
 		}
 	} else {
@@ -102,15 +104,18 @@ _PUBLIC_ TDB_CONTEXT *emsabp_tdb_init_tmp(TALLOC_CTX *mem_ctx)
 
 	/* Step 0. Initialize the temporary TDB database */
 	tdb_ctx = tdb_open(NULL, 0, TDB_INTERNAL, O_RDWR|O_CREAT, 0600);
+	if (tdb_ctx == NULL) return NULL;
 	
 	/* Step 1. Create EMSABP_TMP_TDB_DATA_REC record */
 	key.dptr = (unsigned char *) EMSABP_TDB_DATA_REC;
 	key.dsize = strlen(EMSABP_TDB_DATA_REC);
 
 	dbuf.dptr = (unsigned char *) talloc_asprintf(mem_ctx, "0x%x", EMSABP_TDB_TMP_MID_START);
+	if (dbuf.dptr == NULL) { tdb_close(tdb_ctx); return NULL; }
 	dbuf.dsize = strlen((const char *)dbuf.dptr);
 
 	ret = tdb_store(tdb_ctx, key, dbuf, TDB_INSERT);
+	talloc_free(dbuf.dptr);
 	if (ret == -1) {
 		OC_DEBUG(3, "Unable to create %s record: %s",
 			  EMSABP_TDB_DATA_REC, tdb_errorstr(tdb_ctx));

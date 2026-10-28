@@ -30,33 +30,50 @@
 #include "mapiproxy/modules/mpm_cache.h"
 #include "libmapi/libmapi.h"
 #include "libmapi/libmapi_private.h"
+#include <sys/stat.h>
 
 /**
    \details Create the cache database
 
-   \param dce_ctx pointer to the session context
+   \param mem_ctx owner of the database and event contexts
    \param database the complete path to the tdb store
    \param ldb_ctx pointer to pointer on the the LDB context
 
    \return NT_STATUS_OK on success, otherwise NT_ERROR:
    NT_STATUS_NO_MEMORY, NT_STATUS_NOT_FOUND.
  */
-NTSTATUS mpm_cache_ldb_createdb(struct dcesrv_context *dce_ctx, 
+NTSTATUS mpm_cache_ldb_createdb(TALLOC_CTX *mem_ctx,
 				const char *database, 
 				struct ldb_context **ldb_ctx)
 {
 	struct ldb_context	*tmp_ctx;
 	struct tevent_context	*ev;
 	int			ret;
+	struct stat sb;
 
-	ev = tevent_context_init(dce_ctx);
+	if (database == NULL || ldb_ctx == NULL || strncmp(database, "tdb://", 6) != 0) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	ret = lstat(database + 6, &sb);
+	if (ret == 0) {
+		if (!S_ISREG(sb.st_mode) || sb.st_nlink != 1 || sb.st_uid != geteuid()) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+	} else if (errno != ENOENT) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	ev = tevent_context_init(mem_ctx);
 	if (!ev) return NT_STATUS_NO_MEMORY;
 
-	tmp_ctx = ldb_init(dce_ctx, ev);
-	if (!tmp_ctx) return NT_STATUS_NO_MEMORY;
+	tmp_ctx = ldb_init(mem_ctx, ev);
+	if (!tmp_ctx) { talloc_free(ev); return NT_STATUS_NO_MEMORY; }
 	
+	ldb_set_create_perms(tmp_ctx, 0600);
 	ret = ldb_connect(tmp_ctx, database, 0, NULL);
 	if (ret != LDB_SUCCESS) {
+		talloc_free(tmp_ctx);
+		talloc_free(ev);
 		return NT_STATUS_NOT_FOUND;
 	}
 
@@ -76,7 +93,7 @@ NTSTATUS mpm_cache_ldb_createdb(struct dcesrv_context *dce_ctx,
 
    \return NT_STATUS_OK on success, otherwise NT_STATUS_NOT_FOUND
  */
-static NTSTATUS  mpm_cache_ldb_add_folder(TALLOC_CTX *mem_ctx, 
+static NTSTATUS  mpm_cache_ldb_add_folder(TALLOC_CTX *mem_ctx,
 					  struct ldb_context *ldb_ctx,
 					  uint64_t FolderId)
 {
@@ -117,7 +134,7 @@ static NTSTATUS  mpm_cache_ldb_add_folder(TALLOC_CTX *mem_ctx,
 
    \return NT_STATUS_OK on success, otherwise a NT error
  */
-NTSTATUS mpm_cache_ldb_add_message(TALLOC_CTX *mem_ctx, 
+NTSTATUS mpm_cache_ldb_add_message(TALLOC_CTX *mem_ctx,
 				   struct ldb_context *ldb_ctx, 
 				   struct mpm_message *message)
 {
@@ -286,7 +303,7 @@ NTSTATUS mpm_cache_ldb_add_stream(struct mpm_cache *mpm,
 			stream->filename = talloc_strdup(mem_ctx, basedn);
 			stream->cached = true;
 			stream->ahead = false;
-			mpm_cache_stream_open(mpm, stream);
+			NT_STATUS_NOT_OK_RETURN(mpm_cache_stream_open(mpm, stream));
 
 			return NT_STATUS_OK;
 		}
@@ -316,7 +333,7 @@ NTSTATUS mpm_cache_ldb_add_stream(struct mpm_cache *mpm,
 			stream->filename = talloc_strdup(mem_ctx, basedn);
 			stream->cached = true;
 			stream->ahead = false;
-			mpm_cache_stream_open(mpm, stream);
+			NT_STATUS_NOT_OK_RETURN(mpm_cache_stream_open(mpm, stream));
 
 			return NT_STATUS_OK;
 		}
@@ -329,7 +346,7 @@ NTSTATUS mpm_cache_ldb_add_stream(struct mpm_cache *mpm,
 	}
 
 	stream->cached = false;
-	mpm_cache_stream_open(mpm, stream);
+	NT_STATUS_NOT_OK_RETURN(mpm_cache_stream_open(mpm, stream));
 
 	msg = ldb_msg_new(mem_ctx);
 	if (msg == NULL) return NT_STATUS_NO_MEMORY;

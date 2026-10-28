@@ -21,6 +21,7 @@
 
 #include "mapiproxy/dcesrv_mapiproxy.h"
 #include "mapiproxy/dcesrv_mapiproxy_proto.h"
+#include <util/substitute.h>
 #include "libmapi/mapidefs.h"
 #include "libmapi/property_altnames.h"
 
@@ -132,7 +133,7 @@ bool mapiproxy_NspiQueryRows(struct dcesrv_call_state *dce_call, struct NspiQuer
 	char			*lpszA;
 	char			*exchname;
 
-	private = dce_call->context->private_data;
+	private = mapiproxy_private(dce_call);
 
 	/* Sanity checks */
 	if (!r->out.ppRows) return false;
@@ -159,14 +160,14 @@ bool mapiproxy_NspiQueryRows(struct dcesrv_call_state *dce_call, struct NspiQuer
 
 	if (private->exchname) {
 		if (strstr(lpProp->value.lpszA, private->exchname)) {
-			lpProp->value.lpszA = string_sub_talloc((TALLOC_CTX *) dce_call, lpProp->value.lpszA, private->exchname, 
+			lpProp->value.lpszA = talloc_string_sub((TALLOC_CTX *) dce_call, lpProp->value.lpszA, private->exchname,
 								lpcfg_netbios_name(dce_call->conn->dce_ctx->lp_ctx));	
 		}
 	} else {
 		lpszA = talloc_strdup(dce_call, lpProp->value.lpszA);
 		if ((exchname = x500_get_servername(lpszA))) {
-			private->exchname = talloc_strdup(NULL, exchname);
-			lpProp->value.lpszA = string_sub_talloc((TALLOC_CTX *) dce_call, lpProp->value.lpszA, exchname, 
+			private->exchname = talloc_strdup(private, exchname);
+			lpProp->value.lpszA = talloc_string_sub((TALLOC_CTX *) dce_call, lpProp->value.lpszA, exchname,
 								lpcfg_netbios_name(dce_call->conn->dce_ctx->lp_ctx));
 			talloc_free(exchname);
 		}
@@ -194,14 +195,14 @@ bool mapiproxy_NspiDNToMId(struct dcesrv_call_state *dce_call, struct NspiDNToMI
 	const char			*proxyname;
 	uint32_t			i;
 
-	private = dce_call->context->private_data;
+	private = mapiproxy_private(dce_call);
 	proxyname = lpcfg_netbios_name(dce_call->conn->dce_ctx->lp_ctx);
 
 	if (!private->exchname) return false;
 
 	for (i = 0; i < r->in.pNames->Count; i++) {
 		if (strstr(r->in.pNames->Strings[i], proxyname)) {
-			r->in.pNames->Strings[i] = string_sub_talloc((TALLOC_CTX *) dce_call, r->in.pNames->Strings[i], proxyname, private->exchname);
+			r->in.pNames->Strings[i] = talloc_string_sub((TALLOC_CTX *) dce_call, r->in.pNames->Strings[i], proxyname, private->exchname);
 			return true;
 		}
 	}

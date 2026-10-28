@@ -21,7 +21,9 @@
 #ifndef __MAPIDEFS_H__
 #define __MAPIDEFS_H__
 
-#define PROP_TAG(type, id) (((id << 16))| (type))
+#include <stdint.h>
+
+#define PROP_TAG(type, id) (((uint32_t)(id) << 16) | (uint32_t)(type))
 #define MV_FLAG			0x1000
 
 /* UNICODE flags */

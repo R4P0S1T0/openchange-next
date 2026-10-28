@@ -31,17 +31,6 @@
 #include "mapiproxy/libmapiserver/libmapiserver.h"
 #include "mapiproxy/libmapiproxy/fault_util.h"
 
-#include <ldap_ndr.h>
-
-/* Expose samdb_connect prototype */
-struct ldb_context *samdb_connect(TALLOC_CTX *, struct tevent_context *,
-				  struct loadparm_context *,
-				  struct auth_session_info *,
-				  unsigned int);
-
-/* Single connection to samdb */
-static struct ldb_context *samdb_ctx = NULL;
-
 static struct GUID MagicGUID = {
 	.time_low = 0xbeefface,
 	.time_mid = 0xcafe,
@@ -51,38 +40,18 @@ static struct GUID MagicGUID = {
 };
 const struct GUID *const MagicGUIDp = &MagicGUID;
 
-/**
-   \details Initialize ldb_context to samdb, creates one for all emsmdbp
-   contexts
-
-   \param lp_ctx pointer to the loadparm context
- */
-static struct ldb_context *samdb_init(struct loadparm_context *lp_ctx)
+/* Directory state is owned by one EMSMDB session. */
+static struct ldb_context *samdb_init(TALLOC_CTX *owner, struct loadparm_context *lp_ctx)
 {
-	TALLOC_CTX		*mem_ctx;
-	struct tevent_context	*ev;
-	const char		*samdb_url;
-
-	if (samdb_ctx) return samdb_ctx;
-
-	mem_ctx = talloc_autofree_context();
-	ev = tevent_context_init(mem_ctx);
-	if (!ev) {
-		OC_PANIC(false, ("Fail to initialize tevent_context\n"));
-		return NULL;
-	}
-	tevent_loop_allow_nesting(ev);
-
-	/* Retrieve samdb url (local or external) */
-	samdb_url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
-
-	if (!samdb_url) {
-		samdb_ctx = samdb_connect(mem_ctx, ev, lp_ctx, system_session(lp_ctx), 0);
-	} else {
-		samdb_ctx = samdb_connect_url(mem_ctx, ev, lp_ctx, system_session(lp_ctx),
-					      LDB_FLG_RECONNECT, samdb_url);
-	}
-
+	struct tevent_context *ev = tevent_context_init(owner);
+	struct ldb_context *samdb_ctx = NULL;
+	const char *url;
+	char *error = NULL;
+	if (ev == NULL) return NULL;
+	url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
+	if (url == NULL) return samdb_connect(owner, ev, lp_ctx, system_session(lp_ctx), NULL, 0);
+	if (samdb_connect_url(owner, ev, lp_ctx, system_session(lp_ctx),
+		LDB_FLG_RECONNECT, url, NULL, &samdb_ctx, &error) != LDB_SUCCESS) return NULL;
 	return samdb_ctx;
 }
 
@@ -100,26 +69,7 @@ static int emsmdbp_mapi_store_destructor(void *data)
 
 	mapistore_release(mstore_ctx);
 	OC_DEBUG(6, "MAPISTORE context released\n");
-	return true;
-}
-
-/**
-   \details Release the MAPI handles context used by EMSMDB provider
-   context
-
-   \param data pointer on data to destroy
-
-   \return 0 on success, otherwise -1
- */
-static int emsmdbp_mapi_handles_destructor(void *data)
-{
-	enum MAPISTATUS			retval;
-	struct mapi_handles_context	*handles_ctx = (struct mapi_handles_context *) data;
-
-	retval = mapi_handles_release(handles_ctx);
-	OC_DEBUG(6, "MAPI handles context released (%s)\n", mapi_get_errstr(retval));
-
-	return (retval == MAPI_E_SUCCESS) ? 0 : -1;
+	return 0;
 }
 
 /**
@@ -137,27 +87,26 @@ _PUBLIC_ struct emsmdbp_context *emsmdbp_init(struct loadparm_context *lp_ctx,
 					      const char *username,
 					      void *oc_ctx)
 {
-	TALLOC_CTX		*mem_ctx;
+	TALLOC_CTX		*mem_ctx = NULL;
 	struct emsmdbp_context	*emsmdbp_ctx;
 	enum mapistore_error	ret;
 
 	/* Sanity Checks */
-	if (!lp_ctx) return NULL;
+	if (!lp_ctx || !username || !username[0]) return NULL;
 
-	mem_ctx  = talloc_named(NULL, 0, "emsmdbp_init");
-
-	emsmdbp_ctx = talloc_zero(mem_ctx, struct emsmdbp_context);
+	emsmdbp_ctx = talloc_zero(NULL, struct emsmdbp_context);
 	if (!emsmdbp_ctx) {
 		talloc_free(mem_ctx);
 		return NULL;
 	}
 
-	emsmdbp_ctx->mem_ctx = mem_ctx;
+	mem_ctx = emsmdbp_ctx;
+	emsmdbp_ctx->mem_ctx = emsmdbp_ctx;
 
 	/* Save a pointer to the loadparm context */
 	emsmdbp_ctx->lp_ctx = lp_ctx;
 
-	emsmdbp_ctx->samdb_ctx = samdb_init(lp_ctx);
+	emsmdbp_ctx->samdb_ctx = samdb_init(emsmdbp_ctx, lp_ctx);
 	if (!emsmdbp_ctx->samdb_ctx) {
 		talloc_free(mem_ctx);
 		OC_DEBUG(0, "Connection to \"sam.ldb\" failed\n");
@@ -175,14 +124,14 @@ _PUBLIC_ struct emsmdbp_context *emsmdbp_init(struct loadparm_context *lp_ctx,
 		return NULL;
 	}
 
+	talloc_set_destructor((void *)emsmdbp_ctx->mstore_ctx, (int (*)(void *))emsmdbp_mapi_store_destructor);
+
 	ret = mapistore_set_connection_info(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->samdb_ctx, emsmdbp_ctx->oc_ctx, username);
 	if (ret != MAPISTORE_SUCCESS) {
 		OC_DEBUG(0, "MAPISTORE connection info initialization failed\n");
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	talloc_set_destructor((void *)emsmdbp_ctx->mstore_ctx, (int (*)(void *))emsmdbp_mapi_store_destructor);
-
 	/* Initialize MAPI handles context */
 	emsmdbp_ctx->handles_ctx = mapi_handles_init(mem_ctx);
 	if (!emsmdbp_ctx->handles_ctx) {
@@ -190,7 +139,6 @@ _PUBLIC_ struct emsmdbp_context *emsmdbp_init(struct loadparm_context *lp_ctx,
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	talloc_set_destructor((void *)emsmdbp_ctx->handles_ctx, (int (*)(void *))emsmdbp_mapi_handles_destructor);
 
 	return emsmdbp_ctx;
 }
@@ -233,16 +181,7 @@ _PUBLIC_ void *emsmdbp_openchangedb_init(struct loadparm_context *lp_ctx)
 
 _PUBLIC_ bool emsmdbp_destructor(void *data)
 {
-	struct emsmdbp_context	*emsmdbp_ctx = (struct emsmdbp_context *)data;
-
-	if (!emsmdbp_ctx) return false;
-
-	talloc_unlink(emsmdbp_ctx, emsmdbp_ctx->oc_ctx);
-	talloc_free(emsmdbp_ctx->mem_ctx);
-
-	OC_DEBUG(0, "emsmdbp_ctx found and released\n");
-
-	return true;
+	return data != NULL && talloc_free(data) == 0;
 }
 
 
@@ -262,17 +201,22 @@ _PUBLIC_ bool emsmdbp_verify_user(struct dcesrv_call_state *dce_call,
 	const char		*username = NULL;
 	int			msExchUserAccountControl;
 	struct ldb_result	*res = NULL;
-	const char * const	recipient_attrs[] = { "msExchUserAccountControl", NULL };
+	char *encoded;
+	const char * const	recipient_attrs[] = { "msExchUserAccountControl", "objectSid", NULL };
 
 	username = dcesrv_call_account_name(dce_call);
+	if (!username || !username[0]) return false;
+	encoded = ldb_binary_encode_string(emsmdbp_ctx, username);
+	if (!encoded) return false;
 
 	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res,
 			 ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx),
 			 LDB_SCOPE_SUBTREE, recipient_attrs, "sAMAccountName=%s",
-			 ldb_binary_encode_string(emsmdbp_ctx, username));
+			 encoded);
+	talloc_free(encoded);
 
 	/* If the search failed */
-	if (ret != LDB_SUCCESS || !res->count) {
+	if (ret != LDB_SUCCESS || res->count != 1) {
 		return false;
 	}
 
@@ -283,13 +227,18 @@ _PUBLIC_ bool emsmdbp_verify_user(struct dcesrv_call_state *dce_call,
 
 	/* If the attribute exists check its value */
 	msExchUserAccountControl = ldb_msg_find_attr_as_int(res->msgs[0], "msExchUserAccountControl", 2);
-	if (msExchUserAccountControl == 2) {
+	if (msExchUserAccountControl != 0) {
 		return false;
 	}
 
+	if (!mapiproxy_call_owns_account(dce_call, res->msgs[0])) return false;
+
 	/* Get a copy of the username for later use and setup missing conn_info components */
 	emsmdbp_ctx->username = talloc_strdup(emsmdbp_ctx, username);
-	openchangedb_get_MailboxReplica(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, &emsmdbp_ctx->mstore_ctx->conn_info->repl_id, &emsmdbp_ctx->mstore_ctx->conn_info->replica_guid);
+	if (emsmdbp_ctx->username == NULL || emsmdbp_ctx->mstore_ctx->conn_info == NULL) return false;
+	if (openchangedb_get_MailboxReplica(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username,
+		&emsmdbp_ctx->mstore_ctx->conn_info->repl_id,
+		&emsmdbp_ctx->mstore_ctx->conn_info->replica_guid) != MAPI_E_SUCCESS) return false;
 
 	return true;
 }
@@ -317,26 +266,38 @@ _PUBLIC_ bool emsmdbp_verify_userdn(struct dcesrv_call_state *dce_call,
 	int			ret;
 	int			msExchUserAccountControl;
 	struct ldb_result	*res = NULL;
+	char *encoded;
+	const char *account, *username;
 	const char * const	recipient_attrs[] = { "*", NULL };
 
 	/* Sanity Checks */
-	if (!legacyExchangeDN) return false;
+	if (msg) *msg = NULL;
+	if (!legacyExchangeDN || !legacyExchangeDN[0]) return false;
+	encoded = ldb_binary_encode_string(emsmdbp_ctx, legacyExchangeDN);
+	if (!encoded) return false;
 
 	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res,
 			 ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx),
 			 LDB_SCOPE_SUBTREE, recipient_attrs, "(legacyExchangeDN=%s)",
-			 ldb_binary_encode_string(emsmdbp_ctx, legacyExchangeDN));
+			 encoded);
+	talloc_free(encoded);
 
 	/* If the search failed */
-	if (ret != LDB_SUCCESS || !res->count) {
+	if (ret != LDB_SUCCESS || res->count != 1) {
 		return false;
 	}
 
 	/* Checks msExchUserAccountControl value */
 	msExchUserAccountControl = ldb_msg_find_attr_as_int(res->msgs[0], "msExchUserAccountControl", 2);
-	if (msExchUserAccountControl == 2) {
+	if (msExchUserAccountControl != 0) {
 		return false;
 	}
+
+	/* Connect-as delegation requires an explicit policy; never infer it from a DN. */
+	account = ldb_msg_find_attr_as_string(res->msgs[0], "sAMAccountName", NULL);
+	username = dcesrv_call_account_name(dce_call);
+	if (account == NULL || username == NULL || strcasecmp(account, username) != 0 ||
+	    !mapiproxy_call_owns_account(dce_call, res->msgs[0])) return false;
 
 	if (msg) {
 		*msg = res->msgs[0];

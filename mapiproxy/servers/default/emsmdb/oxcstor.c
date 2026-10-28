@@ -54,6 +54,7 @@ static enum MAPISTATUS RopLogon_Mailbox(TALLOC_CTX *mem_ctx,
 	enum MAPISTATUS		ret;
 	struct ldb_result	*res = NULL;
 	const char		*username;
+	char			*encoded;
 	struct tm		*LogonTime;
 	time_t			t;
 	NTTIME			nttime;
@@ -65,18 +66,26 @@ static enum MAPISTATUS RopLogon_Mailbox(TALLOC_CTX *mem_ctx,
 	OPENCHANGE_RETVAL_IF(!request->EssDN, MAPI_E_INVALID_PARAMETER, NULL);
 
 	/* Step 0. Retrieve user record */
-	ret = ldb_search(emsmdbp_ctx->samdb_ctx, mem_ctx, &res, ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx), LDB_SCOPE_SUBTREE, attrs, "legacyExchangeDN=%s", request->EssDN);
+	encoded = ldb_binary_encode_string(mem_ctx, request->EssDN);
+	OPENCHANGE_RETVAL_IF(encoded == NULL, MAPI_E_NOT_ENOUGH_RESOURCES, NULL);
+	ret = ldb_search(emsmdbp_ctx->samdb_ctx, mem_ctx, &res, ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx), LDB_SCOPE_SUBTREE, attrs, "legacyExchangeDN=%s", encoded);
+	talloc_free(encoded);
 	OPENCHANGE_RETVAL_IF((ret || res->count != 1), ecUnknownUser, NULL);
 
 	/* Step 1. Retrieve username from record */
 	username = ldb_msg_find_attr_as_string(res->msgs[0], "sAMAccountName", NULL);
 	OPENCHANGE_RETVAL_IF(!username, ecUnknownUser, NULL);
+	/* Mailbox delegation is not implemented; logon must preserve the owner. */
+	OPENCHANGE_RETVAL_IF(emsmdbp_ctx->username == NULL ||
+		strcasecmp(username, emsmdbp_ctx->username) != 0 ||
+		ldb_msg_find_attr_as_int(res->msgs[0], "msExchUserAccountControl", -1) != 0,
+		MAPI_E_NO_ACCESS, NULL);
 
 	/* Step 2. Init and or update the user mailbox (auto-provisioning) */
 	ret = emsmdbp_mailbox_provision(emsmdbp_ctx, username);
 	OPENCHANGE_RETVAL_IF(ret != MAPI_E_SUCCESS, MAPI_E_DISK_ERROR, NULL);
 	/* TODO: freebusy entry should be created only during freebusy lookups */
-	if (strncmp(username, emsmdbp_ctx->username, strlen(username)) == 0) {
+	if (strcasecmp(username, emsmdbp_ctx->username) == 0) {
 		ret = emsmdbp_mailbox_provision_public_freebusy(emsmdbp_ctx, request->EssDN);
 		OPENCHANGE_RETVAL_IF(ret != MAPI_E_SUCCESS, MAPI_E_DISK_ERROR, NULL);
 	}
@@ -229,32 +238,30 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopLogon(TALLOC_CTX *mem_ctx,
 
 	if (request->LogonFlags & LogonPrivate) {
 		retval = RopLogon_Mailbox(mem_ctx, emsmdbp_ctx, mapi_req, mapi_repl);
-		mapi_repl->error_code = retval;
-		*size += libmapiserver_RopLogon_size(mapi_req, mapi_repl);
 	} else {
 		retval = RopLogon_PublicFolder(mem_ctx, emsmdbp_ctx, mapi_req, mapi_repl);
-		/* mapi_repl->error_code = MAPI_E_LOGON_FAILED; */
-		mapi_repl->error_code = retval;
 		mailboxstore = false;
-		*size += libmapiserver_RopLogon_size(mapi_req, mapi_repl);
 
 		/*
 		 * EssDN for public logons may be empty string
 		 * In this case, fallback to emsmdbp_ctx->szUserDN
 		 */
-		if (strlen(essDN) == 0) {
+		if (essDN == NULL || essDN[0] == '\0') {
 			essDN = emsmdbp_ctx->szUserDN;
 		}
 	}
 
-	if (mapi_repl->error_code == MAPI_E_SUCCESS) {
+	if (retval == MAPI_E_SUCCESS) {
 		retval = mapi_handles_add(emsmdbp_ctx->handles_ctx, 0, &rec);
-		object = emsmdbp_object_mailbox_init((TALLOC_CTX *)rec, emsmdbp_ctx, essDN, mailboxstore);
-		retval = mapi_handles_set_private_data(rec, object);
-
-		handles[mapi_repl->handle_idx] = rec->handle;
+		if (retval == MAPI_E_SUCCESS) {
+			object = emsmdbp_object_mailbox_init(rec, emsmdbp_ctx, essDN, mailboxstore);
+			retval = object == NULL ? MAPI_E_NOT_ENOUGH_RESOURCES : mapi_handles_set_private_data(rec, object);
+			if (retval == MAPI_E_SUCCESS) handles[mapi_repl->handle_idx] = rec->handle;
+			else mapi_handles_delete(emsmdbp_ctx->handles_ctx, rec->handle);
+		}
 	}
-
+	mapi_repl->error_code = retval;
+	*size += libmapiserver_RopLogon_size(mapi_req, mapi_repl);
 	return retval;
 }
 

@@ -19,6 +19,64 @@ array-bound and union-switch regression checks. Python-only tooling checks are:
 
     python3 -m unittest discover -s testsuite/modernization -v
 
+With Samba 4.22.10 and matching PIDL, the main RPC module can be checked without
+starting a server or installing plugins:
+
+    make check-mapiproxy-rpc
+
+This loads the actual module and uses Samba's state registry with synthetic
+authentication tokens. Outgoing connections and the transport server ID are
+substituted. It covers interface selection, bind/unbind, authentication state
+isolation, malformed requests, credential ownership, remote association IDs and
+connection retries; it does not validate network authentication or Outlook.
+
+The asynchronous RPC lifecycle can be checked separately:
+
+    make check-asyncemsmdb
+
+This builds the asynchronous module and compiles its callback code into a
+harness with real Samba state APIs and tevent. Storage/directory access,
+nanomsg, RPC replies and private NDR registration are substituted. It exercises
+ownership checks, setup failures, multiple contexts and handles, wait completion,
+cancellation, call destruction and resource cleanup. It does not test real
+notification delivery or an AD DC.
+
+Default address-book and mailbox boundaries have separate checks:
+
+    make check-nspi check-emsmdb
+
+These use actual server entry points, real Samba policy handles and local
+LDB/TDB fixtures. They cover identity/SID and handle ownership, failed setup,
+disconnect/association cleanup, mailbox authorization before provisioning,
+notification registration cleanup, table arithmetic and malformed RPC buffers.
+Directory/storage factories, cache transport and selected allocation failures
+are substituted. They do not start AD, memcached or a network RPC server.
+The OCPF scanner can be checked with `make check-ocpf-lexer`; it generates the
+actual Flex scanner and covers owned strings, size limits, Unicode, quoting and
+truncated input.
+The NDR checks also exercise request/reply payload ownership, length bounds,
+compressed/XOR frames and nonzero serialization offsets.
+
+The custom pack plugin's parser and transformations have an additional check:
+
+    make check-mpm-pack
+
+It exercises actual serialization round trips, mixed and >255-operation
+requests, truncated/malformed positions and wrappers, 16-bit length bounds,
+configuration validation, allocation failure and nested payload ownership.
+The main RPC smoke test also substitutes failing plugin hooks to verify that
+their errors stop processing and that malformed NDR never reaches decoded hooks.
+
+Cache file I/O and synchronization process handling can be checked with:
+
+    make check-mpm-cache
+
+This uses real disposable private files and LDB data, external sync programs,
+links/FIFOs and a simulated RPC transport identity. It checks path confinement,
+permissions, size bounds, bounded read replies, configuration failure and child
+process handling. It does not validate cache isolation across accounts, complete
+request/reply handle matching, atomic cache completion or sync timeouts.
+
 For the Python runtime tests and isolated SQL database options, see
 [the modernization guide](../doc/MODERNIZATION.md).
 

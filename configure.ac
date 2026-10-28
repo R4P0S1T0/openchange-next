@@ -465,6 +465,8 @@ dnl ---------------------------------------------------------------------------
 PKG_CHECK_MODULES(TALLOC, talloc)
 PKG_CHECK_MODULES(SAMBA, dcerpc ndr samba-hostconfig samba-util tevent samba-credentials)
 PKG_CHECK_MODULES(SAMBASERVER, dcerpc_server samdb, [], [AC_MSG_WARN(No mapiproxy support)])
+AC_CHECK_LIB([dcerpc-server-core], [_dcesrv_iface_state_find_conn],
+    [SAMBASERVER_LIBS="$SAMBASERVER_LIBS -ldcerpc-server-core"], [], [$SAMBASERVER_LIBS])
 PKG_CHECK_MODULES(TDB, tdb)
 PKG_CHECK_MODULES(LDB, ldb)
 

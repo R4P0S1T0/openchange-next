@@ -30,6 +30,13 @@
 #include "libmapi/libmapi_private.h"
 #include "libmapiproxy.h"
 
+static int mapi_handles_destructor(struct mapi_handles_context *ctx)
+{
+	if (ctx->tdb_ctx != NULL) tdb_close(ctx->tdb_ctx);
+	return 0;
+}
+
+
 /**
    \details Initialize MAPI handles context
 
@@ -47,6 +54,8 @@ _PUBLIC_ struct mapi_handles_context *mapi_handles_init(TALLOC_CTX *mem_ctx)
 
 	/* Step 2. Initialize the TDB context */
 	handles_ctx->tdb_ctx = tdb_open(NULL, 0, TDB_INTERNAL, O_RDWR|O_CREAT, 0600);
+	if (handles_ctx->tdb_ctx == NULL) { talloc_free(handles_ctx); return NULL; }
+	talloc_set_destructor(handles_ctx, mapi_handles_destructor);
 
 	/* Step 3. Initialize the handles list */
 	handles_ctx->handles = NULL;
@@ -70,7 +79,6 @@ _PUBLIC_ enum MAPISTATUS mapi_handles_release(struct mapi_handles_context *handl
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!handles_ctx, MAPI_E_NOT_INITIALIZED, NULL);
 
-	tdb_close(handles_ctx->tdb_ctx);
 	talloc_free(handles_ctx);
 
 	return MAPI_E_SUCCESS;

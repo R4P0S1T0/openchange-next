@@ -44,13 +44,14 @@ struct asyncemsmdb_private_data {
 	struct tevent_fd			*fd_event;
 	int					sock;
 	int					fd;
-	int					lock;
+	struct tevent_req			*wait;
 };
 
 struct exchange_asyncemsmdb_session {
 	struct asyncemsmdb_private_data		*data;
 	struct GUID				uuid;
-	struct mapistore_context		*mstore_ctx;
+	struct asyncemsmdb_connection		*connection;
+	bool					resolver_registered;
 	char					*cn;
 	char					*bind_addr;
 	struct exchange_asyncemsmdb_session	*prev;
@@ -72,14 +73,11 @@ struct exchange_asyncemsmdb_session {
 
 __BEGIN_DECLS
 
-NTSTATUS dcerpc_server_asyncemsmdb_init(void);
+NTSTATUS dcerpc_server_asyncemsmdb_init(TALLOC_CTX *);
 NTSTATUS ndr_table_register(const struct ndr_interface_table *);
-NTSTATUS samba_init_module(void);
+NTSTATUS samba_init_module(TALLOC_CTX *);
 
 
-/* Expose samdb_connect prototype */
-struct ldb_context *samdb_connect(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, unsigned int);
-struct ldb_context *samdb_connect_url(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, unsigned int, const char *);
 void tevent_loop_allow_nesting(struct tevent_context *);
 
 __END_DECLS

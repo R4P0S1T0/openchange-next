@@ -32,48 +32,27 @@
 #include "dcesrv_exchange_nsp.h"
 #include "ldb.h"
 
-/* Expose samdb_connect prototype */
-struct ldb_context *samdb_connect(TALLOC_CTX *, struct tevent_context *,
-				  struct loadparm_context *,
-				  struct auth_session_info *,
-				  unsigned int);
-
-/* Single connection to samdb */
-static struct ldb_context *samdb_ctx = NULL;
-
-/**
-   \details Initialize ldb_context to samdb, creates one for all emsabp
-   contexts
-
-   \param lp_ctx pointer to the loadparm context
- */
-static struct ldb_context *samdb_init(struct loadparm_context *lp_ctx)
+/* The directory connection belongs to the NSPI handle's context. */
+static struct ldb_context *samdb_init(TALLOC_CTX *mem_ctx, struct loadparm_context *lp_ctx)
 {
-	TALLOC_CTX		*mem_ctx;
-	struct tevent_context	*ev;
-	const char		*samdb_url;
-
-	if (samdb_ctx) return samdb_ctx;
-
-	mem_ctx = talloc_autofree_context();
-	ev = tevent_context_init(mem_ctx);
-	if (!ev) {
-		OC_PANIC(false, ("Fail to initialize tevent_context\n"));
-		return NULL;
+	struct tevent_context *ev = tevent_context_init(mem_ctx);
+	struct ldb_context *samdb_ctx = NULL;
+	const char *url;
+	char *error = NULL;
+	if (ev == NULL) return NULL;
+	url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
+	if (url == NULL) {
+		return samdb_connect(mem_ctx, ev, lp_ctx, system_session(lp_ctx), NULL, 0);
 	}
-	tevent_loop_allow_nesting(ev);
-
-	/* Retrieve samdb url (local or external) */
-	samdb_url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
-
-	if (!samdb_url) {
-		samdb_ctx = samdb_connect(mem_ctx, ev, lp_ctx, system_session(lp_ctx), 0);
-	} else {
-		samdb_ctx = samdb_connect_url(mem_ctx, ev, lp_ctx, system_session(lp_ctx),
-					      LDB_FLG_RECONNECT, samdb_url);
-	}
-
+	if (samdb_connect_url(mem_ctx, ev, lp_ctx, system_session(lp_ctx),
+		LDB_FLG_RECONNECT, url, NULL, &samdb_ctx, &error) != LDB_SUCCESS) return NULL;
 	return samdb_ctx;
+}
+
+static int emsabp_context_destructor(struct emsabp_context *ctx)
+{
+	if (ctx->ttdb_ctx != NULL) tdb_close(ctx->ttdb_ctx);
+	return 0;
 }
 
 /**
@@ -94,20 +73,16 @@ _PUBLIC_ struct emsabp_context *emsabp_init(struct loadparm_context *lp_ctx,
 	/* Sanity checks */
 	if (!lp_ctx) return NULL;
 
-	mem_ctx = talloc_named(NULL, 0, "emsabp_init");
-
-	emsabp_ctx = talloc_zero(mem_ctx, struct emsabp_context);
-	if (!emsabp_ctx) {
-		talloc_free(mem_ctx);
-		return NULL;
-	}
-
-	emsabp_ctx->mem_ctx = mem_ctx;
+	emsabp_ctx = talloc_zero(NULL, struct emsabp_context);
+	if (!emsabp_ctx) return NULL;
+	mem_ctx = emsabp_ctx;
+	emsabp_ctx->mem_ctx = emsabp_ctx;
+	talloc_set_destructor(emsabp_ctx, emsabp_context_destructor);
 
 	/* Save a pointer to the loadparm context */
 	emsabp_ctx->lp_ctx = lp_ctx;
 
-	emsabp_ctx->samdb_ctx = samdb_init(lp_ctx);
+	emsabp_ctx->samdb_ctx = samdb_init(emsabp_ctx, lp_ctx);
 	if (!emsabp_ctx->samdb_ctx) {
 		talloc_free(mem_ctx);
 		OC_DEBUG(0, "[nspi] Connection to \"sam.ldb\" failed");
@@ -122,7 +97,7 @@ _PUBLIC_ struct emsabp_context *emsabp_init(struct loadparm_context *lp_ctx,
 	emsabp_ctx->ttdb_ctx = emsabp_tdb_init_tmp(emsabp_ctx->mem_ctx);
 	if (!emsabp_ctx->ttdb_ctx) {
 		talloc_free(mem_ctx);
-		OC_PANIC(false, ("[nspi] Unable to create on-memory TDB database\n"));
+		OC_DEBUG(0, "[nspi] Unable to create on-memory TDB database");
 		return NULL;
 	}
 
@@ -132,18 +107,7 @@ _PUBLIC_ struct emsabp_context *emsabp_init(struct loadparm_context *lp_ctx,
 
 _PUBLIC_ bool emsabp_destructor(void *data)
 {
-	struct emsabp_context	*emsabp_ctx = (struct emsabp_context *)data;
-
-	if (emsabp_ctx) {
-		if (emsabp_ctx->ttdb_ctx) {
-			tdb_close(emsabp_ctx->ttdb_ctx);
-		}
-
-		talloc_free(emsabp_ctx->mem_ctx);
-		return true;
-	}
-
-	return false;
+	return data != NULL && talloc_free(data) == 0;
 }
 
 _PUBLIC_ void emsabp_enable_debug(struct emsabp_context *emsabp_ctx)
@@ -172,11 +136,16 @@ _PUBLIC_ enum MAPISTATUS emsabp_get_account_info(TALLOC_CTX *mem_ctx,
 	int			msExchUserAccountControl;
 	struct ldb_result	*res = NULL;
 	const char * const	recipient_attrs[] = { "*", NULL };
+	char *encoded;
+
+	OPENCHANGE_RETVAL_IF(username == NULL || username[0] == '\0', MAPI_E_NOT_FOUND, NULL);
+	encoded = ldb_binary_encode_string(mem_ctx, username);
+	OPENCHANGE_RETVAL_IF(encoded == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 
 	ret = ldb_search(emsabp_ctx->samdb_ctx, mem_ctx, &res,
 			 ldb_get_default_basedn(emsabp_ctx->samdb_ctx),
 			 LDB_SCOPE_SUBTREE, recipient_attrs, "sAMAccountName=%s",
-			 ldb_binary_encode_string(mem_ctx, username));
+			 encoded);
 	OPENCHANGE_RETVAL_IF((ret != LDB_SUCCESS || !res->count), MAPI_E_NOT_FOUND, NULL);
 
 	/* Check if more than one record was found */
@@ -227,6 +196,10 @@ _PUBLIC_ bool emsabp_verify_user(struct dcesrv_call_state *dce_call,
 
 	retval = emsabp_get_account_info(mem_ctx, emsabp_ctx, username, &ldb_msg);
 	if (retval != MAPI_E_SUCCESS) goto end;
+	if (!mapiproxy_call_owns_account(dce_call, ldb_msg)) {
+		retval = MAPI_E_LOGON_FAILED;
+		goto end;
+	}
 
 	/* cache both account_name and organization upon success */
 	exdn = ldb_msg_find_attr_as_string(ldb_msg, "legacyExchangeDN", NULL);
@@ -237,7 +210,7 @@ _PUBLIC_ bool emsabp_verify_user(struct dcesrv_call_state *dce_call,
 	}
 	exdn0 = strstr(exdn, "/o=");
 	exdn1 = strstr(exdn, "/ou=");
-	if (!exdn0 || !exdn1) {
+	if (!exdn0 || !exdn1 || exdn1 <= exdn0 + 3) {
 		OC_DEBUG(0, "User %s has bad formed legacyExchangeDN attribute: %s\n",
 			  username, exdn);
 		retval = MAPI_E_NOT_FOUND;

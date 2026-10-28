@@ -35,197 +35,174 @@
 NTSTATUS samba_init_module(void);
 
 static struct mpm_pack {
-	uint8_t		*mapi_calls;
-	bool		lasthop;
+	bool mapi_calls[256];
+	bool lasthop;
 } *mpm = NULL;
 
-
-static uint32_t proxypack(TALLOC_CTX *mem_ctx, struct EcDoRpc_MAPI_REQ *mapi_req, 
-			  struct ndr_push *ndr)
+static int pack_config_destructor(struct mpm_pack *config)
 {
-	struct proxypack_req	request;
-	uint32_t		size;
-
-	/* Fill in the proxypack operation */
-	size = 0;	
-	request.bin.cb = ndr->offset;
-	size += sizeof (uint16_t);
-	request.bin.lpb = talloc_memdup(mem_ctx, ndr->data, ndr->offset);
-	size += ndr->offset;
-
-	/* Fill the MAPI_REQ request */
-	mapi_req->opnum = op_MAPI_proxypack;
-	mapi_req->logon_id = 0;
-	mapi_req->handle_idx = 0;
-	mapi_req->u.mapi_proxypack = request;
-	size += 5;
-
-	return size;
+	if (mpm == config) mpm = NULL;
+	return 0;
 }
 
-/**
-   \details unpack proxypack contents and restore the original EcDoRpc
-   request
- */
-static bool unpack(TALLOC_CTX *mem_ctx, struct EcDoRpc *EcDoRpc)
+/* Decoded request arrays are talloc-owned and terminated by a zero opnum. */
+static NTSTATUS request_count(const struct mapi_request *request, uint32_t *count)
 {
-	struct EcDoRpc_MAPI_REQ	*mapi_req;
-	struct EcDoRpc_MAPI_REQ	*mapi_newreq;
-	struct ndr_pull		*ndr;
-	bool			found;
-	uint32_t		i;
-	uint8_t			pos;
-	uint32_t		count;
-	uint32_t		nopack_count = 0;
-	uint32_t		nopack_idx = 0;
-	uint32_t		pack_idx = 0;
+	size_t capacity, i;
 
-	mapi_req = EcDoRpc->in.mapi_request->mapi_req;
-
-	/* Seek the unpack call */
-	for (i = 0, found = false; mapi_req[i].opnum; i++) {
-		if (mapi_req[i].opnum == op_MAPI_proxypack) {
-			found = true;
-			break;
+	if (request == NULL || request->length < 2 ||
+	    request->mapi_len < request->length ||
+	    (request->mapi_len - request->length) % sizeof(uint32_t) != 0 ||
+	    request->mapi_req == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	capacity = talloc_array_length(request->mapi_req);
+	for (i = 0; i < capacity && i <= UINT16_MAX / 3; i++) {
+		if (request->mapi_req[i].opnum == 0) {
+			*count = i;
+			return NT_STATUS_OK;
 		}
 	}
-	/* Nothing to unpack */
-	if (found == false) return false;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_pull);
-
-	ndr->data_size = mapi_req[i].u.mapi_proxypack.bin.cb;
-	ndr->data = mapi_req[i].u.mapi_proxypack.bin.lpb;
-
-	for (nopack_count = 0; mapi_req[nopack_count].opnum; nopack_count++);
-
-	/* Merge unpacked and non packed calls < last packed call position */
-	mapi_newreq = talloc_zero(mem_ctx, struct EcDoRpc_MAPI_REQ);
-	for (count = 0; ndr->offset != ndr->data_size; count++) {
-		NDR_CHECK(ndr_pull_uint8(ndr, NDR_SCALARS, &pos));
-		if (pack_idx < pos) {
-			while (pack_idx < pos) {
-				if (nopack_idx >= nopack_count) break;
-				
-				mapi_newreq = talloc_realloc(mem_ctx, mapi_newreq, struct EcDoRpc_MAPI_REQ, pack_idx + 2);
-				mapi_newreq[pack_idx] = mapi_req[nopack_idx];
-				nopack_idx++;
-				pack_idx++;
-			}
-		}
-		
-		if (pos > pack_idx) {
-			pack_idx = pos;
-		}
-		
-		mapi_newreq = talloc_realloc(mem_ctx, mapi_newreq, struct EcDoRpc_MAPI_REQ, pack_idx + 2);
-		NDR_CHECK(ndr_pull_EcDoRpc_MAPI_REQ(ndr, NDR_SCALARS, &mapi_newreq[pos]));
-		pack_idx++;
-	}
-
-	/* Append remaining non packed calls */
-	mapi_newreq[pack_idx].opnum = 0;
-	while (mapi_req[nopack_idx].opnum) {
-		if (nopack_idx > nopack_count) break;
-		
-		if (mapi_req[nopack_idx].opnum != op_MAPI_proxypack) {
-			mapi_newreq = talloc_realloc(mem_ctx, mapi_newreq, struct EcDoRpc_MAPI_REQ, pack_idx + 2);
-			mapi_newreq[pack_idx] = mapi_req[nopack_idx];
-			pack_idx++;
-			mapi_newreq[pack_idx].opnum = 0;
-		}
-		nopack_idx++;
-	}
-
-	/* Update mapi_request length and mapi_req pointer */
-	EcDoRpc->in.mapi_request->mapi_len -= (5 + count);
-	EcDoRpc->in.mapi_request->length -= (5 + count);
-	EcDoRpc->in.mapi_request->mapi_req = mapi_newreq;
-
-	return true;
+	return NT_STATUS_INVALID_PARAMETER;
 }
 
-/**
-   \details pack EcDoRpc calls into proxypack
- */
-static bool pack(TALLOC_CTX *mem_ctx, struct EcDoRpc *EcDoRpc)
+static NTSTATUS replace_requests(TALLOC_CTX *mem_ctx, struct mapi_request *request,
+				 struct EcDoRpc_MAPI_REQ *records, uint32_t count)
 {
-	struct EcDoRpc_MAPI_REQ	*mapi_req;
-	struct EcDoRpc_MAPI_REQ	*mapi_newreq;
-	struct ndr_push		*ndr;
-	struct ndr_push		*nopack_ndr;
-	uint32_t		size;
-	uint32_t		handle_size;
-	uint32_t		i, j;
-	uint32_t		idx;
-	bool			found;
+	struct ndr_push *ndr = ndr_push_init_ctx(records);
+	uint32_t i, length, handles = request->mapi_len - request->length;
 
-	mapi_req = EcDoRpc->in.mapi_request->mapi_req;
-
-	ndr = talloc_zero(mem_ctx, struct ndr_push);
-
-	nopack_ndr = talloc_zero(mem_ctx, struct ndr_push);
-
-	mapi_newreq = talloc_array(mem_ctx, struct EcDoRpc_MAPI_REQ, 2);
-
-	for (i = 0, idx = 0; mapi_req[i].opnum; i++) {
-		found = false;
-		for (j = 0; mpm->mapi_calls[j]; j++) {
-			if (mapi_req[i].opnum == mpm->mapi_calls[j]) {
-				ndr_push_uint8(ndr, NDR_SCALARS, i);
-				ndr_push_EcDoRpc_MAPI_REQ(ndr, NDR_SCALARS, &mapi_req[i]);
-				found = true;
-				break;
-			}
-		}
-		if (found == false) {
-			mapi_newreq = talloc_realloc(mem_ctx, mapi_newreq, struct EcDoRpc_MAPI_REQ, idx + 2);
-			ndr_push_EcDoRpc_MAPI_REQ(nopack_ndr, NDR_SCALARS, &mapi_req[i]);
-			mapi_newreq[idx] = mapi_req[i];
-			idx++;
+	if (ndr == NULL) return NT_STATUS_NO_MEMORY;
+	for (i = 0; i < count; i++) {
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_push_EcDoRpc_MAPI_REQ(ndr, NDR_SCALARS, &records[i]))) {
+			talloc_free(ndr);
+			return NT_STATUS_INVALID_PARAMETER;
 		}
 	}
-
-	if (ndr->offset == 0) {
-		talloc_free(mapi_newreq);
-		talloc_free(nopack_ndr);
+	if (ndr->offset > UINT16_MAX - 2) {
 		talloc_free(ndr);
-		return false;
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	OC_DEBUG(3, "============ non packed =============");
-	dump_data(3, nopack_ndr->data, nopack_ndr->offset);
-	OC_DEBUG(3, "=====================================");
-
-	OC_DEBUG(3, "");
-	OC_DEBUG(3, "============ packed =============");
-	dump_data(3, ndr->data, ndr->offset);
-	OC_DEBUG(3, "=================================");
-
-
-	/* Fill in the proxypack operation */
-	mapi_newreq = talloc_realloc(mem_ctx, mapi_newreq, struct EcDoRpc_MAPI_REQ, idx + 2);
-	size = proxypack(mem_ctx, &mapi_newreq[idx], ndr);
+	length = ndr->offset + 2;
 	talloc_free(ndr);
+	if (handles > UINT32_MAX - length) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	records[count].opnum = 0;
+	talloc_steal(mem_ctx, records);
+	/* Unchanged records can still refer to payloads owned by the old array. */
+	talloc_steal(records, request->mapi_req);
+	request->mapi_req = records;
+	request->length = length;
+	request->mapi_len = length + handles;
+	return NT_STATUS_OK;
+}
 
-	if (!size) return false;
+static NTSTATUS unpack(TALLOC_CTX *mem_ctx, struct EcDoRpc *rpc)
+{
+	struct mapi_request *request = rpc->in.mapi_request;
+	struct EcDoRpc_MAPI_REQ *records, *input;
+	struct ndr_pull *ndr;
+	DATA_BLOB blob;
+	TALLOC_CTX *tmp;
+	NTSTATUS status;
+	uint32_t count, i, wrapper = UINT32_MAX, next = 0, output = 0, capacity;
+	uint8_t pos;
 
-	idx++;
-	mapi_newreq[idx].opnum = 0;
+	status = request_count(request, &count);
+	if (!NT_STATUS_IS_OK(status)) return status;
+	input = request->mapi_req;
+	for (i = 0; i < count; i++) {
+		if (input[i].opnum != op_MAPI_proxypack) continue;
+		if (wrapper != UINT32_MAX) return NT_STATUS_INVALID_PARAMETER;
+		wrapper = i;
+	}
+	if (wrapper == UINT32_MAX) return NT_STATUS_NOT_FOUND;
+	blob.data = input[wrapper].u.mapi_proxypack.bin.lpb;
+	blob.length = input[wrapper].u.mapi_proxypack.bin.cb;
+	if (blob.length == 0 || blob.data == NULL) return NT_STATUS_INVALID_PARAMETER;
 
-	/* Recalculate the EcDoRpc request size */
-	handle_size = EcDoRpc->in.mapi_request->mapi_len - EcDoRpc->in.mapi_request->length;
-	EcDoRpc->in.mapi_request->mapi_len = nopack_ndr->offset + size + handle_size;
-	EcDoRpc->in.mapi_request->length = nopack_ndr->offset + size;
+	tmp = talloc_new(mem_ctx);
+	if (tmp == NULL) return NT_STATUS_NO_MEMORY;
+	/* A packed entry needs at least one position byte and three ROP bytes. */
+	capacity = blob.length / 4;
+	if (capacity > UINT8_MAX + 1) capacity = UINT8_MAX + 1;
+	capacity += count;
+	records = talloc_zero_array(tmp, struct EcDoRpc_MAPI_REQ, capacity);
+	ndr = ndr_pull_init_blob(&blob, tmp);
+	status = NT_STATUS_NO_MEMORY;
+	if (records == NULL || ndr == NULL) goto done;
+	ndr_set_flags(&ndr->flags, LIBNDR_FLAG_NOALIGN | LIBNDR_FLAG_REF_ALLOC);
+	ndr->current_mem_ctx = records;
+	status = NT_STATUS_INVALID_PARAMETER;
+	while (ndr->offset < ndr->data_size) {
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_pull_uint8(ndr, NDR_SCALARS, &pos))) goto done;
+		if (pos < output) goto done;
+		while (output < pos) {
+			if (next == wrapper) next++;
+			if (next >= count || output + 1 >= capacity) goto done;
+			records[output++] = input[next++];
+		}
+		if (output + 1 >= capacity ||
+		    !NDR_ERR_CODE_IS_SUCCESS(ndr_pull_EcDoRpc_MAPI_REQ(ndr, NDR_SCALARS, &records[output])) ||
+		    records[output].opnum == 0 || records[output].opnum == op_MAPI_proxypack) goto done;
+		output++;
+	}
+	while (next < count) {
+		if (next == wrapper) { next++; continue; }
+		if (output + 1 >= capacity) goto done;
+		records[output++] = input[next++];
+	}
+	status = replace_requests(mem_ctx, request, records, output);
 
-	/* Replace EcDoRpc_MAPI_REQ */
-	talloc_free(EcDoRpc->in.mapi_request->mapi_req);
-	EcDoRpc->in.mapi_request->mapi_req = mapi_newreq;
+done:
+	talloc_free(tmp);
+	return status;
+}
 
-	/* Free memory */
-	talloc_free(nopack_ndr);
+static NTSTATUS pack(TALLOC_CTX *mem_ctx, struct EcDoRpc *rpc)
+{
+	struct mapi_request *request = rpc->in.mapi_request;
+	struct EcDoRpc_MAPI_REQ *records;
+	struct ndr_push *ndr;
+	TALLOC_CTX *tmp;
+	NTSTATUS status;
+	uint32_t count, i, output = 0;
 
-	return true;
+	status = request_count(request, &count);
+	if (!NT_STATUS_IS_OK(status)) return status;
+	tmp = talloc_new(mem_ctx);
+	if (tmp == NULL) return NT_STATUS_NO_MEMORY;
+	records = talloc_zero_array(tmp, struct EcDoRpc_MAPI_REQ, count + 2);
+	ndr = ndr_push_init_ctx(tmp);
+	status = NT_STATUS_NO_MEMORY;
+	if (records == NULL || ndr == NULL) goto done;
+	status = NT_STATUS_INVALID_PARAMETER;
+	for (i = 0; i < count; i++) {
+		/* The custom wire format has only one byte for a packed position. */
+		if (i <= UINT8_MAX && mpm->mapi_calls[request->mapi_req[i].opnum]) {
+			if (!NDR_ERR_CODE_IS_SUCCESS(ndr_push_uint8(ndr, NDR_SCALARS, i)) ||
+			    !NDR_ERR_CODE_IS_SUCCESS(ndr_push_EcDoRpc_MAPI_REQ(ndr, NDR_SCALARS, &request->mapi_req[i]))) goto done;
+		} else {
+			records[output++] = request->mapi_req[i];
+		}
+	}
+	status = NT_STATUS_NOT_FOUND;
+	if (ndr->offset == 0) goto done;
+	status = NT_STATUS_INVALID_PARAMETER;
+	if (ndr->offset > UINT16_MAX) goto done;
+	records[output].opnum = op_MAPI_proxypack;
+	records[output].u.mapi_proxypack.bin.cb = ndr->offset;
+	records[output].u.mapi_proxypack.bin.lpb = talloc_memdup(records, ndr->data, ndr->offset);
+	if (records[output].u.mapi_proxypack.bin.lpb == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+	status = replace_requests(mem_ctx, request, records, output + 1);
+
+done:
+	talloc_free(tmp);
+	return status;
 }
 
 static NTSTATUS pack_push(struct dcesrv_call_state *dce_call,
@@ -251,30 +228,17 @@ static NTSTATUS pack_ndr_pull(struct dcesrv_call_state *dce_call, TALLOC_CTX *me
  */
 static NTSTATUS pack_pull(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx, void *r)
 {
-	struct EcDoRpc		*EcDoRpc;
-	bool			ret = false;
+	struct EcDoRpc *rpc = r;
+	NTSTATUS status;
 
-	if (dce_call->pkt.u.request.opnum != 0x2) {
-		return NT_STATUS_OK;
+	if (dce_call->pkt.u.request.opnum != NDR_ECDORPC) return NT_STATUS_OK;
+	if (rpc == NULL || rpc->in.mapi_request == NULL || mpm == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	EcDoRpc = (struct EcDoRpc *) r;
-	if (!EcDoRpc->in.mapi_request->mapi_req) return NT_STATUS_OK;
-
-	/* If this is an idle request, do not go further */
-	if (EcDoRpc->in.mapi_request->length == 2) {
-		return NT_STATUS_OK;
-	}
-
-	/* If this is not a last-hop */
-	if (mpm->lasthop == false) return NT_STATUS_OK;
-
-	ret = unpack(mem_ctx, EcDoRpc);
-	if (ret == false) {
-		ret = pack(mem_ctx, EcDoRpc);
-	}
-
-	return NT_STATUS_OK;
+	if (!mpm->lasthop || rpc->in.mapi_request->length == 2) return NT_STATUS_OK;
+	status = unpack(mem_ctx, rpc);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) status = pack(mem_ctx, rpc);
+	return NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND) ? NT_STATUS_OK : status;
 }
 
 
@@ -289,45 +253,33 @@ static NTSTATUS pack_pull(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ct
  */
 static NTSTATUS pack_init(struct dcesrv_context *dce_ctx)
 {
-	char			**calls;
-	unsigned long		opnum;
-	int			i;
-	int			j;
-	struct loadparm_context	*lp_ctx;
+	struct mpm_pack *config;
+	const char **calls;
+	char *end;
+	unsigned long opnum;
+	uint32_t i;
 
-	/* Fetch the mapi call list from smb.conf */
-	calls = str_list_make(dce_ctx, lpcfg_parm_string(dce_ctx->lp_ctx, NULL, MPM_NAME, "opnums"), NULL);
-
-	mpm = talloc_zero(dce_ctx, struct mpm_pack);
-	mpm->mapi_calls = talloc_zero(mpm, uint8_t);
-
+	config = talloc_zero(dce_ctx, struct mpm_pack);
+	if (config == NULL) return NT_STATUS_NO_MEMORY;
+	talloc_set_destructor(config, pack_config_destructor);
+	calls = lpcfg_parm_string_list(config, dce_ctx->lp_ctx, NULL, MPM_NAME, "opnums", NULL);
+	if (calls == NULL || calls[0] == NULL) {
+		talloc_free(config);
+		return NT_STATUS_INVALID_PARAMETER;
+	}
 	for (i = 0; calls[i]; i++) {
-		opnum = strtol(calls[i], NULL, 16);
-		if (opnum <= 0 || opnum >= 0xFF) {
-			OC_DEBUG(0, "%s: invalid MAPI opnum 0x%.2x", MPM_PACK_ERROR, (uint32_t)opnum);
-			talloc_free(mpm);
+		errno = 0;
+		opnum = strtoul(calls[i], &end, 16);
+		if (errno != 0 || end == calls[i] || *end != '\0' || opnum == 0 ||
+		    opnum >= UINT8_MAX || opnum == op_MAPI_proxypack || config->mapi_calls[opnum]) {
+			talloc_free(config);
 			return NT_STATUS_INVALID_PARAMETER;
 		}
-		/* avoid duplicated opnums */
-		for (j = 0; j < i; j++) {
-			if (opnum == mpm->mapi_calls[j]) {
-				OC_DEBUG(0, "%s: duplicated opnum: 0x%.2x", MPM_PACK_ERROR, (uint32_t)opnum);
-				talloc_free(mpm);
-				return NT_STATUS_INVALID_PARAMETER;
-			}
-		}
-		mpm->mapi_calls = talloc_realloc(mpm, mpm->mapi_calls, uint8_t, i + 2);
-		mpm->mapi_calls[i] = (uint8_t) opnum;
+		config->mapi_calls[opnum] = true;
 	}
-	mpm->mapi_calls[i] = 0;
-
-	/* Fetch the lasthop parameter from smb.conf */
-	mpm->lasthop = lpcfg_parm_bool(dce_ctx->lp_ctx, NULL, MPM_NAME, "lasthop", true);
-
-	lp_ctx = loadparm_init(dce_ctx);
-	lpcfg_load_default(lp_ctx);
-	dcerpc_init();
-
+	config->lasthop = lpcfg_parm_bool(dce_ctx->lp_ctx, NULL, MPM_NAME, "lasthop", true);
+	talloc_free(mpm);
+	mpm = config;
 	return NT_STATUS_OK;
 }
 
@@ -339,7 +291,7 @@ static NTSTATUS pack_init(struct dcesrv_context *dce_ctx)
  */
 NTSTATUS samba_init_module(void)
 {
-	struct mapiproxy_module	module;
+	struct mapiproxy_module	module = {0};
 	NTSTATUS		ret;
 
 	/* Fill in our name */

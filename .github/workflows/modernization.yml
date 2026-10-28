@@ -26,7 +26,35 @@ jobs:
           echo PERL5LIB=/tmp/samba-4.22.10/pidl/lib >> "$GITHUB_ENV"
       - run: ./autogen.sh && ./configure --with-samba=/usr
       - run: make check-libmapi-modernization
+      - name: Check the custom NDR parser with sanitizers
+        run: make -W ndr_mapi.c -W testsuite/modernization/ndr_smoke.c check-ndr-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Restore the native NDR library
+        run: make -W ndr_mapi.c -W testsuite/modernization/ndr_smoke.c check-ndr-modernization
+      - run: make check-ocpf-lexer
+      - name: Check OCPF strings with sanitizers
+        run: make -W testsuite/modernization/ocpf_lexer_smoke.c check-ocpf-lexer CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - run: make check-mapiproxy-registries
+      - run: make check-mapiproxy-rpc
+      - run: make check-asyncemsmdb
+      - run: make check-nspi
+      - run: make check-emsmdb
+      - run: make mapiproxy
+      - run: make check-mpm-pack
+      - run: make check-mpm-cache
+      - name: Check default server boundaries with sanitizers
+        run: make -W testsuite/modernization/nspi_smoke.c -W testsuite/modernization/nspi_backend_smoke.c -W testsuite/modernization/emsmdb_smoke.c -W testsuite/modernization/emsmdb_backend_smoke.c check-nspi check-emsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Load the default servers
+        run: LD_LIBRARY_PATH=.:mapiproxy python3 -c 'import ctypes; [ctypes.CDLL("./mapiproxy/servers/" + name + ".so") for name in ("exchange_nsp", "exchange_emsmdb", "exchange_ds_rfr")]'
+      - name: Check cache files and sync command with sanitizers
+        run: make -W testsuite/modernization/cache_smoke.c check-mpm-cache CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Check pack parser memory handling with sanitizers
+        run: make -W testsuite/modernization/pack_smoke.c check-mpm-pack CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Load the asynchronous RPC module
+        run: LD_LIBRARY_PATH=.:mapiproxy python3 -c 'import ctypes; ctypes.CDLL("./mapiproxy/dcesrv_asyncemsmdb.so")'
+      - name: Check asynchronous RPC lifecycle with UndefinedBehaviorSanitizer
+        run: make -W testsuite/modernization/asyncemsmdb_smoke.c check-asyncemsmdb CC='gcc -fsanitize=undefined -fno-omit-frame-pointer'
+      - name: Check RPC module with UndefinedBehaviorSanitizer
+        run: make -W mapiproxy/dcesrv_mapiproxy.c -W mapiproxy/dcesrv_mapiproxy_nspi.c -W testsuite/modernization/rpc_smoke.c check-mapiproxy-rpc CC='gcc -fsanitize=undefined -fno-omit-frame-pointer'
       - name: Check registry memory handling with sanitizers
         run: make -W testsuite/modernization/registry_smoke.c check-mapiproxy-registries CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - run: python3 -c 'import ctypes; ctypes.CDLL("./libmapi.so.2.3")'

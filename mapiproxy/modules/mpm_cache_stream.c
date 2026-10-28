@@ -36,83 +36,108 @@
 
 #include <errno.h>
 
-/**
-   \details Create a file: message or attachment in the cache
+/* Require a private root owned by the service; children are opened relative to it. */
+int mpm_cache_open_root(const struct mpm_cache *mpm)
+{
+	struct stat sb;
+	int fd;
 
-   If the stream is attached to an attachment:	FolderID/MessageID/AttachmentID.stream
-   If the stream is attached to a message:	FolderID/MessageID.stream
+	if (mpm == NULL || mpm->dbpath == NULL) return -1;
+	fd = open(mpm->dbpath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd == -1) return -1;
+	if (fstat(fd, &sb) != 0 || sb.st_uid != geteuid() || (sb.st_mode & 0077) != 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
 
-   \param mpm pointer to the cache module general structure
-   \param stream pointer to the mpm_stream entry
-
-   \return Return a FILE pointer otherwise NULL
- */
+/* Open each path component without following links; create only regular private files. */
 NTSTATUS mpm_cache_stream_open(struct mpm_cache *mpm, struct mpm_stream *stream)
 {
-	TALLOC_CTX	*mem_ctx;
-	char		*file;
-	int		ret;
+	TALLOC_CTX *tmp;
+	char *path, *relative, *part, *next, *save;
+	struct stat sb;
+	bool create;
+	size_t root_length;
+	int dirfd = -1, fd = -1, nextfd;
+	FILE *fp;
+	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 
-	mem_ctx = (TALLOC_CTX *) mpm;
-
-	if (stream->filename) {
-		stream->fp = fopen(stream->filename, "r");
-		stream->offset = 0;
-		return NT_STATUS_OK;
+	if (mpm == NULL || mpm->dbpath == NULL || stream == NULL || stream->fp != NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	if (stream->message) {
-		/* Create the folder */
-		file = talloc_asprintf(mem_ctx, "%s/0x%"PRIx64, mpm->dbpath, stream->message->FolderId);
-		ret = mkdir(file, 0777);
-		talloc_free(file);
-		if ((ret == -1) && (errno != EEXIST)) return NT_STATUS_UNSUCCESSFUL;
-
-		/* Open the file */
-		file = talloc_asprintf(mem_ctx, "%s/0x%"PRIx64"/0x%"PRIx64".stream",
-				       mpm->dbpath, stream->message->FolderId,
-				       stream->message->MessageId);
-
-		OC_DEBUG(2, "* Opening Message stream %s", file);
-		stream->filename = talloc_strdup(mem_ctx, file);
-		stream->fp = fopen(file, "w+");
-		stream->offset = 0;
-		talloc_free(file);
-		
-		return NT_STATUS_OK;
+	tmp = talloc_new(stream);
+	if (tmp == NULL) return NT_STATUS_NO_MEMORY;
+	create = stream->filename == NULL;
+	if (!create) {
+		path = talloc_strdup(tmp, stream->filename);
+	} else if (stream->message != NULL) {
+		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64".stream",
+			mpm->dbpath, stream->message->FolderId, stream->message->MessageId);
+	} else if (stream->attachment != NULL && stream->attachment->message != NULL) {
+		path = talloc_asprintf(tmp, "%s/0x%"PRIx64"/0x%"PRIx64"/%"PRIu32".stream",
+			mpm->dbpath, stream->attachment->message->FolderId,
+			stream->attachment->message->MessageId, stream->attachment->AttachmentID);
+	} else {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
 	}
-
-	if (stream->attachment) {
-		/* Create the folders */
-		file = talloc_asprintf(mem_ctx, "%s/0x%"PRIx64, mpm->dbpath, 
-				       stream->attachment->message->FolderId);
-		ret = mkdir(file, 0777);
-		talloc_free(file);
-		if ((ret == -1) && (errno != EEXIST)) return NT_STATUS_UNSUCCESSFUL;
-
-		file = talloc_asprintf(mem_ctx, "%s/0x%"PRIx64"/0x%"PRIx64, mpm->dbpath,
-				       stream->attachment->message->FolderId, 
-				       stream->attachment->message->MessageId);
-		ret = mkdir(file, 0777);
-		talloc_free(file);
-		if ((ret == -1) && (errno != EEXIST)) return NT_STATUS_UNSUCCESSFUL;
-
-		file = talloc_asprintf(mem_ctx, "%s/0x%"PRIx64"/0x%"PRIx64"/%d.stream", 
-				       mpm->dbpath,
-				       stream->attachment->message->FolderId, 
-				       stream->attachment->message->MessageId,
-				       stream->attachment->AttachmentID);
-
-		OC_DEBUG(2, "* Opening Attachment stream %s", file);
-		stream->filename = talloc_strdup(mem_ctx, file);
-		stream->fp = fopen(file, "w+");
-		stream->offset = 0;
-		talloc_free(file);
-
-		return NT_STATUS_OK;
+	if (path == NULL) { status = NT_STATUS_NO_MEMORY; goto done; }
+	root_length = strlen(mpm->dbpath);
+	while (root_length > 1 && mpm->dbpath[root_length - 1] == '/') root_length--;
+	if (strncmp(path, mpm->dbpath, root_length) != 0 || path[root_length] != '/') {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
 	}
+	relative = talloc_strdup(tmp, path + root_length + 1);
+	if (relative == NULL) { status = NT_STATUS_NO_MEMORY; goto done; }
+	dirfd = mpm_cache_open_root(mpm);
+	if (dirfd == -1) goto done;
+	part = strtok_r(relative, "/", &save);
+	if (part == NULL) goto done;
+	while (part != NULL) {
+		if (strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
+			status = NT_STATUS_INVALID_PARAMETER;
+			goto done;
+		}
+		next = strtok_r(NULL, "/", &save);
+		if (next == NULL) {
+			fd = openat(dirfd, part, (create ? O_RDWR | O_CREAT : O_RDONLY) |
+				O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
+			break;
+		}
+		if (create && mkdirat(dirfd, part, 0700) != 0 && errno != EEXIST) goto done;
+		nextfd = openat(dirfd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+		if (nextfd == -1) goto done;
+		if (fstat(nextfd, &sb) != 0 || sb.st_uid != geteuid() || (sb.st_mode & 0077) != 0) {
+			close(nextfd);
+			goto done;
+		}
+		close(dirfd);
+		dirfd = nextfd;
+		part = next;
+	}
+	if (fd == -1 || fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) ||
+	    sb.st_uid != geteuid() || sb.st_nlink != 1) goto done;
+	if (create) {
+		if (fchmod(fd, 0600) != 0 || ftruncate(fd, 0) != 0) goto done;
+	} else if (sb.st_size != stream->StreamSize) {
+		goto done;
+	}
+	fp = fdopen(fd, create ? "r+b" : "rb");
+	if (fp == NULL) goto done;
+	fd = -1;
+	stream->fp = fp;
+	stream->offset = 0;
+	if (create) stream->filename = talloc_steal(stream, path);
+	status = NT_STATUS_OK;
 
-	return NT_STATUS_OK;
+done:
+	if (fd != -1) close(fd);
+	if (dirfd != -1) close(dirfd);
+	talloc_free(tmp);
+	return status;
 }
 
 
@@ -125,14 +150,11 @@ NTSTATUS mpm_cache_stream_open(struct mpm_cache *mpm, struct mpm_stream *stream)
  */
 NTSTATUS mpm_cache_stream_close(struct mpm_stream *stream)
 {
-	if (stream && stream->fp) {
-		fclose(stream->fp);
-		stream->fp = NULL;
-	} else {
-		return NT_STATUS_NOT_FOUND;
-	}
-
-	return NT_STATUS_OK;
+	int ret;
+	if (stream == NULL || stream->fp == NULL) return NT_STATUS_NOT_FOUND;
+	ret = fclose(stream->fp);
+	stream->fp = NULL;
+	return ret == 0 ? NT_STATUS_OK : NT_STATUS_UNSUCCESSFUL;
 }
 
 
@@ -149,12 +171,21 @@ NTSTATUS mpm_cache_stream_close(struct mpm_stream *stream)
  */
 NTSTATUS mpm_cache_stream_read(struct mpm_stream *stream, size_t input_size, size_t *length, uint8_t **data)
 {
-	fseek(stream->fp, stream->offset, SEEK_SET);
-	*length = fread(*data, sizeof (uint8_t), input_size, stream->fp);
+	size_t count;
+	if (length == NULL) return NT_STATUS_INVALID_PARAMETER;
+	*length = 0;
+	if (stream == NULL || stream->fp == NULL || data == NULL ||
+	    (input_size != 0 && *data == NULL) || stream->offset > stream->StreamSize) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	count = stream->StreamSize - stream->offset;
+	if (count > input_size) count = input_size;
+	if (count == 0) return NT_STATUS_OK;
+	if ((off_t)stream->offset < 0 || (uintmax_t)(off_t)stream->offset != stream->offset ||
+	    fseeko(stream->fp, stream->offset, SEEK_SET) != 0) return NT_STATUS_UNSUCCESSFUL;
+	*length = fread(*data, 1, count, stream->fp);
 	stream->offset += *length;
-	OC_DEBUG(5, "* Current offset: 0x%zx", stream->offset);
-
-	return NT_STATUS_OK;
+	return *length == count && !ferror(stream->fp) ? NT_STATUS_OK : NT_STATUS_UNSUCCESSFUL;
 }
 
 
@@ -169,18 +200,18 @@ NTSTATUS mpm_cache_stream_read(struct mpm_stream *stream, size_t input_size, siz
  */
 NTSTATUS mpm_cache_stream_write(struct mpm_stream *stream, uint16_t length, uint8_t *data)
 {
-	uint32_t	WrittenSize;
-
-	fseek(stream->fp, stream->offset, SEEK_SET);
-	WrittenSize = fwrite(data, sizeof (uint8_t), length, stream->fp);
-	if (WrittenSize != length) {
-		OC_DEBUG(0, "* WrittenSize != length");
-		return NT_STATUS_UNSUCCESSFUL;
+	size_t written;
+	if (stream == NULL || stream->fp == NULL || (length != 0 && data == NULL) ||
+	    stream->offset > stream->StreamSize || length > stream->StreamSize - stream->offset) {
+		return NT_STATUS_INVALID_PARAMETER;
 	}
-
-	stream->offset += WrittenSize;
-
-	return NT_STATUS_OK;
+	if (length == 0) return NT_STATUS_OK;
+	if ((off_t)stream->offset < 0 || (uintmax_t)(off_t)stream->offset != stream->offset ||
+	    fseeko(stream->fp, stream->offset, SEEK_SET) != 0) return NT_STATUS_UNSUCCESSFUL;
+	written = fwrite(data, 1, length, stream->fp);
+	stream->offset += written;
+	return written == length && fflush(stream->fp) == 0 && !ferror(stream->fp)
+		? NT_STATUS_OK : NT_STATUS_UNSUCCESSFUL;
 }
 
 
@@ -193,8 +224,9 @@ NTSTATUS mpm_cache_stream_write(struct mpm_stream *stream, uint16_t length, uint
  */
 NTSTATUS mpm_cache_stream_reset(struct mpm_stream *stream)
 {
-	fseek(stream->fp, 0, SEEK_SET);
+	if (stream == NULL || stream->fp == NULL) return NT_STATUS_INVALID_PARAMETER;
+	if (fseeko(stream->fp, 0, SEEK_SET) != 0) return NT_STATUS_UNSUCCESSFUL;
+	clearerr(stream->fp);
 	stream->offset = 0;
-
 	return NT_STATUS_OK;
 }

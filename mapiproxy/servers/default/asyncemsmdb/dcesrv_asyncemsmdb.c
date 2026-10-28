@@ -32,21 +32,89 @@
 
  */
 
-struct exchange_asyncemsmdb_session	*asyncemsmdb_session = NULL;
-void					*openchangedb_ctx = NULL;
-static struct ldb_context		*samdb_ctx = NULL;
+#define ASYNCEMSMDB_STATE_MAGIC 0x6f636173
 
-static struct exchange_asyncemsmdb_session *dcesrv_find_asyncemsmdb_session(struct GUID *uuid)
+struct asyncemsmdb_connection {
+	struct dcesrv_connection_context *context;
+	struct exchange_asyncemsmdb_session *sessions;
+	struct asyncemsmdb_connection *prev, *next;
+};
+
+struct asyncemsmdb_wait {
+	struct asyncemsmdb_private_data *p;
+};
+
+static struct asyncemsmdb_connection *async_connections;
+static void *openchangedb_ctx;
+static struct ldb_context *samdb_ctx;
+static TALLOC_CTX *module_ctx;
+
+/* The call owns the request; freeing either side must stop its fd callback. */
+static int asyncemsmdb_wait_destructor(struct asyncemsmdb_wait *wait)
 {
-	struct exchange_asyncemsmdb_session	*session, *found_session = NULL;
+	if (wait->p != NULL) {
+		TALLOC_FREE(wait->p->fd_event);
+		wait->p->wait = NULL;
+		wait->p->dce_call->subreq = NULL;
+		wait->p->dce_call = NULL;
+		wait->p->r = NULL;
+	}
+	return 0;
+}
 
-	for (session = asyncemsmdb_session; !found_session && session; session = session->next) {
-		if (GUID_equal(uuid, &session->uuid)) {
-			found_session = session;
+static void asyncemsmdb_wait_done(struct tevent_req *req)
+{
+	struct asyncemsmdb_wait *wait = tevent_req_data(req, struct asyncemsmdb_wait);
+	struct asyncemsmdb_private_data *p = wait->p;
+	struct dcesrv_call_state *call = p->dce_call;
+	enum tevent_req_state state;
+	uint64_t error;
+
+	p->r->out.result = NT_STATUS_OK;
+	if (tevent_req_is_error(req, &state, &error)) {
+		p->r->out.result = error == ECANCELED ? NT_STATUS_CANCELLED : NT_STATUS_UNSUCCESSFUL;
+	}
+	*p->r->out.pulFlagsOut = 1;
+	tevent_req_received(req);
+	talloc_free(req);
+	dcesrv_async_reply(call);
+}
+
+static bool asyncemsmdb_wait_cancel(struct tevent_req *req)
+{
+	tevent_req_error(req, ECANCELED);
+	return true;
+}
+
+static int asyncemsmdb_session_destructor(struct exchange_asyncemsmdb_session *session)
+{
+	struct asyncemsmdb_private_data *p = session->data;
+
+	if (session->connection != NULL) {
+		DLIST_REMOVE(session->connection->sessions, session);
+	}
+	if (p != NULL) {
+		TALLOC_FREE(p->fd_event);
+		if (p->wait != NULL) {
+			tevent_req_cancel(p->wait);
+		}
+		if (session->resolver_registered) {
+			mapistore_notification_resolver_delete(p->mstore_ctx, session->cn, session->bind_addr);
+		}
+		if (p->sock != -1) {
+			nn_close(p->sock);
 		}
 	}
+	return 0;
+}
 
-	return found_session;
+static int asyncemsmdb_connection_destructor(struct asyncemsmdb_connection *connection)
+{
+	DLIST_REMOVE(async_connections, connection);
+	while (connection->sessions != NULL) {
+		talloc_free(connection->sessions);
+	}
+	return 0;
 }
 
 /**
@@ -80,7 +148,7 @@ static int _get_random_port(void)
 		return -1;
 	}
 
-	port = addr.sin_port;
+	port = ntohs(addr.sin_port);
 	close(sockfd);
 
 	return port;
@@ -142,7 +210,7 @@ static enum mapistore_error get_mapistore_sogo_PidTagParentFolderId(TALLOC_CTX *
 
 	/* Sanity checks */
 	MAPISTORE_RETVAL_IF(!uri, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
-	MAPISTORE_RETVAL_IF(!parent_fid, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(!fid, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 
 	for (i = strlen(uri); i; i--) {
 		if (uri[i] == '/') {
@@ -816,27 +884,26 @@ static void EcDoAsyncWaitEx_handler(struct tevent_context *ev,
 	DATA_BLOB					blob;
 	char						*str = NULL;
 	int						bytes = 0;
-	NTSTATUS					status;
 	struct mapistore_notification_subscription	r;
 	struct mapistore_notification			n;
 	struct ndr_print				*ndr_print;
 	struct ndr_pull					*ndr_pull;
 	enum ndr_err_code				ndr_err_code;
 
-	if (!p) {
-		OC_DEBUG(0, "[asyncemsmdb]: private_data is NULL");
+	if (!p || !p->wait) {
+		OC_DEBUG(0, "[asyncemsmdb]: no pending wait");
 		return;
 	}
 
 	bytes = nn_recv(p->sock, &str, NN_MSG, NN_DONTWAIT);
-	if (bytes == 0) {
-		OC_DEBUG(0, "[asyncemsmdb]: EcDoAsyncWaitEx_handler: str is NULL!");
+	if (bytes <= 0) {
+		if (bytes == 0) nn_freemsg(str);
 		return;
 	}
 
 	mem_ctx = talloc_new(NULL);
 	if (!mem_ctx) {
-		OC_DEBUG(0, "[asyncemsmdb]: No more memory");
+		nn_freemsg(str);
 		return;
 	}
 
@@ -845,7 +912,7 @@ static void EcDoAsyncWaitEx_handler(struct tevent_context *ev,
 	ndr_pull = ndr_pull_init_blob(&blob, mem_ctx);
 	if (!ndr_pull) {
 		nn_freemsg(str);
-		OC_DEBUG(0, "[asyncemsmdb]: No more memory");
+		talloc_free(mem_ctx);
 		return;
 	}
 	ndr_set_flags(&ndr_pull->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
@@ -859,7 +926,7 @@ static void EcDoAsyncWaitEx_handler(struct tevent_context *ev,
 	}
 
 	/* Sanity checks on notification payload */
-	if (n.vnum >= MAPISTORE_NOTIFICATION_VMAX) {
+	if (n.vnum != MAPISTORE_NOTIFICATION_V1) {
 		OC_DEBUG(0, "[asyncemsmdb]: Invalid version, expected at max %d but got %d",
 			 MAPISTORE_NOTIFICATION_VMAX - 1, n.vnum);
 		talloc_free(mem_ctx);
@@ -909,16 +976,7 @@ static void EcDoAsyncWaitEx_handler(struct tevent_context *ev,
 	talloc_free(ndr_pull);
 	talloc_free(mem_ctx);
 
-	p->r->out.pulFlagsOut = talloc_zero(p->dce_call, uint32_t);
-	*p->r->out.pulFlagsOut = 0x1;
-
-	status = dcesrv_reply(p->dce_call);
-	if (!NT_STATUS_IS_OK(status)) {
-		OC_DEBUG(0, "EcDoAsyncWaitEx_handler: dcesrv_reply() failed - %s", nt_errstr(status));
-	}
-
-	talloc_free(p->fd_event);
-	p->fd_event = NULL;
+	tevent_req_done(p->wait);
 }
 
 
@@ -935,222 +993,172 @@ static NTSTATUS dcesrv_EcDoAsyncWaitEx(struct dcesrv_call_state *dce_call,
 				       TALLOC_CTX *mem_ctx,
 				       struct EcDoAsyncWaitEx *r)
 {
-	enum mapistore_error			retval;
-	struct exchange_asyncemsmdb_session	*session = NULL;
-	struct asyncemsmdb_private_data		*p = NULL;
-	struct mapistore_context		*mstore_ctx = NULL;
-	struct GUID				uuid;
-	char					*cn = NULL;
-	const char				*ip_addr = NULL;
-	int					nn_retval;
-	size_t					sz = 0;
-	char					*bind_addr = NULL;
-	int					port = 0;
+	struct asyncemsmdb_connection *connection;
+	struct exchange_asyncemsmdb_session *session;
+	struct asyncemsmdb_private_data *p;
+	struct asyncemsmdb_wait *wait;
+	struct tevent_req *req;
+	const char *username, *ip_addr;
+	NTSTATUS status;
+	enum mapistore_error retval;
+	size_t sz;
+	int port;
 
-	OC_DEBUG(3, "exchange_asyncemsmdb: EcDoAsyncWaitEx (0x0)");
-
-	/* Step 0. Ensure incoming user is authenticated */
+	if (r->out.pulFlagsOut == NULL) {
+		r->out.pulFlagsOut = talloc_zero(mem_ctx, uint32_t);
+		NT_STATUS_HAVE_NO_MEMORY(r->out.pulFlagsOut);
+	}
+	*r->out.pulFlagsOut = 1;
 	if (!dcesrv_call_authenticated(dce_call)) {
-		OC_DEBUG(1, "No challenge requested by client, cannot authenticate");
-		*r->out.pulFlagsOut = 0x1;
-		return NT_STATUS_OK;
+		return NT_STATUS_ACCESS_DENIED;
+	}
+	if (r->in.async_handle == NULL) {
+		return NT_STATUS_INVALID_HANDLE;
+	}
+	if (!(dce_call->state_flags & DCESRV_CALL_STATE_FLAG_MAY_ASYNC)) {
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+	username = dcesrv_call_account_name(dce_call);
+	if (username == NULL) {
+		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	/* Set the asynchronous dcerpc flag on the connection */
-	dce_call->state_flags |= DCESRV_CALL_STATE_FLAG_ASYNC;
-
-	/* Step 1. Search for an existing session */
-	session = dcesrv_find_asyncemsmdb_session(&r->in.async_handle->uuid);
-	if (session) {
-		p = (struct asyncemsmdb_private_data *) session->data;
-		/* Ensure the session is registered */
-		retval = mapistore_notification_session_exist(p->mstore_ctx, r->in.async_handle->uuid);
-		if (retval != MAPISTORE_SUCCESS) {
-			OC_DEBUG(0, "[asyncemsmdb]: no matching emsmdb session found");
-			*r->out.pulFlagsOut = 0x1;
-			return NT_STATUS_OK;
+	connection = dcesrv_iface_state_find_conn(dce_call, ASYNCEMSMDB_STATE_MAGIC,
+		struct asyncemsmdb_connection);
+	if (connection == NULL) {
+		connection = talloc_zero(dce_call, struct asyncemsmdb_connection);
+		NT_STATUS_HAVE_NO_MEMORY(connection);
+		status = dcesrv_iface_state_store_conn(dce_call, ASYNCEMSMDB_STATE_MAGIC, connection);
+		if (!NT_STATUS_IS_OK(status)) {
+			talloc_free(connection);
+			return status;
 		}
-
-		p->dce_call = dce_call;
-		p->r = r;
+		connection->context = dce_call->context;
+		talloc_steal(dce_call->context, connection);
+		DLIST_ADD(async_connections, connection);
+		talloc_set_destructor(connection, asyncemsmdb_connection_destructor);
+	}
+	for (session = connection->sessions; session; session = session->next) {
+		if (GUID_equal(&session->uuid, &r->in.async_handle->uuid)) break;
+	}
+	if (session != NULL) {
+		p = session->data;
+		if (p->wait != NULL) {
+			return NT_STATUS_DEVICE_BUSY;
+		}
+		retval = mapistore_notification_session_exist(p->mstore_ctx, session->uuid);
+		if (retval != MAPISTORE_SUCCESS) {
+			return NT_STATUS_INVALID_HANDLE;
+		}
 	} else {
-		/* Step 1. Ensure the session is registered */
-		mstore_ctx = mapistore_init(mem_ctx, dce_call->conn->dce_ctx->lp_ctx, NULL);
-		if (!mstore_ctx) {
-			OC_DEBUG(0, "[asyncemsmdb]: MAPIStore initialized failed");
-			*r->out.pulFlagsOut = 0x1;
-			return NT_STATUS_OK;
+		session = talloc_zero(connection, struct exchange_asyncemsmdb_session);
+		NT_STATUS_HAVE_NO_MEMORY(session);
+		p = talloc_zero(session, struct asyncemsmdb_private_data);
+		if (p == NULL) {
+			talloc_free(session);
+			return NT_STATUS_NO_MEMORY;
 		}
-
-		retval = mapistore_set_connection_info(mstore_ctx, samdb_ctx, openchangedb_ctx,
-						       dcesrv_call_account_name(dce_call));
+		p->sock = -1;
+		session->data = p;
+		talloc_set_destructor(session, asyncemsmdb_session_destructor);
+		session->uuid = r->in.async_handle->uuid;
+		p->mstore_ctx = mapistore_init(p, dce_call->conn->dce_ctx->lp_ctx, NULL);
+		if (p->mstore_ctx == NULL) {
+			status = NT_STATUS_UNSUCCESSFUL;
+			goto failure;
+		}
+		talloc_set_destructor((void *)p->mstore_ctx, asyncemsmdb_mapistore_destructor);
+		retval = mapistore_set_connection_info(p->mstore_ctx, samdb_ctx, openchangedb_ctx, username);
 		if (retval != MAPISTORE_SUCCESS) {
-			OC_DEBUG(0, "[asyncemsmdb]: unable to set mapistore connection info");
-			*r->out.pulFlagsOut = 0x1;
-			talloc_free(mstore_ctx);
-			return NT_STATUS_OK;
+			status = NT_STATUS_UNSUCCESSFUL;
+			goto failure;
 		}
-		talloc_set_destructor((void *)mstore_ctx, (int (*)(void *))asyncemsmdb_mapistore_destructor);
-
-		retval = mapistore_notification_session_get(dce_call, mstore_ctx, r->in.async_handle->uuid, &uuid, &cn);
+		retval = mapistore_notification_session_get(session, p->mstore_ctx,
+			session->uuid, &p->emsmdb_uuid, &session->cn);
 		if (retval != MAPISTORE_SUCCESS) {
-			OC_DEBUG(0, "[asyncemsmdb]: unable to fetch emsmdb session data");
-			*r->out.pulFlagsOut = 0x1;
-			talloc_free(mstore_ctx);
-			return NT_STATUS_OK;
+			status = NT_STATUS_INVALID_HANDLE;
+			goto failure;
 		}
-
-		/* we're allowed to reply async */
-		p = talloc_zero(dce_call->event_ctx, struct asyncemsmdb_private_data);
-		if (!p) {
-			OC_DEBUG(0, "[asyncemsmdb]: no more memory");
-			talloc_free(mstore_ctx);
-			return NT_STATUS_OK;
+		/* The EMSMDB producer stores the authenticated account name as cn. */
+		if (session->cn == NULL || strcasecmp(session->cn, username) != 0) {
+			status = NT_STATUS_ACCESS_DENIED;
+			goto failure;
 		}
-
-		p->dce_call = dce_call;
-		p->mstore_ctx = talloc_steal(p, mstore_ctx);
-		p->emsmdb_uuid = uuid;
-		p->username = (char *) dcesrv_call_account_name(dce_call);
-		p->emsmdb_session_str = GUID_string(p, (const struct GUID *)&uuid);
-		if (!p->emsmdb_session_str) {
-			OC_DEBUG(0, "[asyncemsmdb]: no more memory");
-			talloc_free(p);
-			return NT_STATUS_OK;
+		p->username = talloc_strdup(p, username);
+		p->emsmdb_session_str = GUID_string(p, &p->emsmdb_uuid);
+		if (p->username == NULL || p->emsmdb_session_str == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto failure;
 		}
-		p->r = r;
-		p->fd_event = NULL;
-
 		p->sock = nn_socket(AF_SP, NN_PULL);
 		if (p->sock == -1) {
-			OC_DEBUG(0, "[asyncemsmdb]: failed to create socket: %s", nn_strerror(errno));
-			talloc_free(p);
-			return NT_STATUS_OK;
+			status = NT_STATUS_UNSUCCESSFUL;
+			goto failure;
 		}
-
-		/* Get a random port */
 		port = _get_random_port();
 		if (port == -1) {
-			OC_DEBUG(0, "[asyncemsmdb]: no port available!");
-			talloc_free(p);
-			return NT_STATUS_OK;
+			status = NT_STATUS_UNSUCCESSFUL;
+			goto failure;
 		}
-
-		/* Get parametric options */
 		ip_addr = lpcfg_parm_string(dce_call->conn->dce_ctx->lp_ctx, NULL, "asyncemsmdb", "listen");
-		if (ip_addr == NULL) {
-			OC_DEBUG(0, "[asyncemsmdb]: no asyncemsmdb:listen option specified, "
-				 "using %s as a fallback", ASYNCEMSMDB_FALLBACK_ADDR);
-			ip_addr = ASYNCEMSMDB_FALLBACK_ADDR;
+		if (ip_addr == NULL) ip_addr = ASYNCEMSMDB_FALLBACK_ADDR;
+		session->bind_addr = talloc_asprintf(session, "tcp://%s:%d", ip_addr, port);
+		if (session->bind_addr == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto failure;
 		}
-
-		/* TODO: Add transport as a parametric option */
-		bind_addr = talloc_asprintf(mem_ctx, "tcp://%s:%d", ip_addr, port);
-		if (!bind_addr) {
-			OC_DEBUG(0, "[asyncemsmdb][ERR]: no more memory");
-			talloc_free(p);
-			return NT_STATUS_OK;
-		}
-
-		nn_retval = nn_bind(p->sock, bind_addr);
-		if (nn_retval == -1) {
-			OC_DEBUG(0, "[asyncemsmdb] nn_bind failed on %s failed: %s", bind_addr, nn_strerror(errno));
-			talloc_free(p);
-			talloc_free(bind_addr);
-			return NT_STATUS_OK;
-		}
-
-		/* Register the address to the resolver */
-		retval = mapistore_notification_resolver_add(p->mstore_ctx, cn, bind_addr);
-		if (retval != MAPISTORE_SUCCESS) {
-			OC_DEBUG(0, "[asyncemsmdb] unable to add record to the resolver: %s",
-				 mapistore_errstr(retval));
-			talloc_free(p);
-			talloc_free(bind_addr);
-			return NT_STATUS_OK;
-		}
-
 		sz = sizeof(p->fd);
-		nn_retval = nn_getsockopt(p->sock, NN_SOL_SOCKET, NN_RCVFD, &p->fd, &sz);
-		if (nn_retval == -1) {
-			OC_DEBUG(0, "[asyncemsmdb] nn_getsockopt failed: %s", nn_strerror(errno));
-			talloc_free(p);
-			talloc_free(bind_addr);
-			return NT_STATUS_OK;
-		}
-	}
-
-	if (!p->fd_event) {
-		p->fd_event = tevent_add_fd(dce_call->event_ctx,
-					    dce_call->event_ctx,
-					    p->fd,
-					    TEVENT_FD_READ,
-					    EcDoAsyncWaitEx_handler,
-					    p);
-		if (p->fd_event == NULL) {
-			OC_DEBUG(0, "[asyncemsmdb] unable to subscribe for fd event in event loop");
-			return NT_STATUS_OK;
-		}
-	}
-
-	/* Register session  */
-	if (!session) {
-		session = talloc_zero(asyncemsmdb_session, struct exchange_asyncemsmdb_session);
-		if (!session) {
-		failure:
-			OC_DEBUG(0, "[asyncemsmdb][ERR]: No more memory");
-			*r->out.pulFlagsOut = 0x1;
-			return NT_STATUS_OK;
-		}
-		session->uuid = r->in.async_handle->uuid;
-		session->data = talloc_steal(session, p);
-		session->cn = talloc_strdup(session, cn);
-		talloc_free(cn);
-		if (!session->cn) {
-			talloc_free(session);
+		if (nn_bind(p->sock, session->bind_addr) == -1 ||
+		    nn_getsockopt(p->sock, NN_SOL_SOCKET, NN_RCVFD, &p->fd, &sz) == -1) {
+			status = NT_STATUS_UNSUCCESSFUL;
 			goto failure;
 		}
-		session->bind_addr = talloc_strdup(session, bind_addr);
-		talloc_free(bind_addr);
-		if (!session->bind_addr) {
-			talloc_free(session);
+		retval = mapistore_notification_resolver_add(p->mstore_ctx, session->cn, session->bind_addr);
+		if (retval != MAPISTORE_SUCCESS) {
+			status = NT_STATUS_UNSUCCESSFUL;
 			goto failure;
 		}
-		session->mstore_ctx = mstore_ctx;
-
-		/* Add the session to the dcesrv_connection_context */
-		dce_call->context->private_data = session;
-
-		OC_DEBUG(5, "[asyncemsmdb]: New session added: %s", session->data->emsmdb_session_str);
-		DLIST_ADD_END(asyncemsmdb_session, session, struct exchange_asyncemsmdb_session *);
+		session->resolver_registered = true;
+		session->connection = connection;
+		DLIST_ADD(connection->sessions, session);
 	}
 
+	req = tevent_req_create(dce_call, &wait, struct asyncemsmdb_wait);
+	NT_STATUS_HAVE_NO_MEMORY(req);
+	p->fd_event = tevent_add_fd(dce_call->event_ctx, p, p->fd,
+		TEVENT_FD_READ, EcDoAsyncWaitEx_handler, p);
+	if (p->fd_event == NULL) {
+		talloc_free(req);
+		return NT_STATUS_NO_MEMORY;
+	}
+	p->dce_call = dce_call;
+	p->r = r;
+	p->wait = req;
+	wait->p = p;
+	talloc_set_destructor(wait, asyncemsmdb_wait_destructor);
+	tevent_req_set_cancel_fn(req, asyncemsmdb_wait_cancel);
+	tevent_req_set_callback(req, asyncemsmdb_wait_done, NULL);
+	dce_call->subreq = req;
+	dce_call->state_flags |= DCESRV_CALL_STATE_FLAG_ASYNC;
 	return NT_STATUS_OK;
+
+failure:
+	talloc_free(session);
+	return status;
 }
 
-static NTSTATUS dcerpc_server_asyncemsmdb_unbind(struct dcesrv_connection_context *context, const struct dcesrv_interface *iface)
+static void dcerpc_server_asyncemsmdb_unbind(struct dcesrv_connection_context *context,
+					   const struct dcesrv_interface *iface)
 {
-	enum mapistore_error			retval;
-	struct exchange_asyncemsmdb_session	*session = (struct exchange_asyncemsmdb_session *) context->private_data;
+	struct asyncemsmdb_connection *connection = async_connections, *next;
 
-	OC_DEBUG(3, "dcerpc_server_asyncemsmdb_unbind");
-
-	if (!session) {
-		return NT_STATUS_OK;
+	while (connection != NULL) {
+		next = connection->next;
+		if (connection->context == context) {
+			talloc_free(connection);
+		}
+		connection = next;
 	}
-
-	OC_DEBUG(5, "[asyncemsmdb] unbind %s", session->bind_addr);
-	retval = mapistore_notification_resolver_delete(session->mstore_ctx, session->cn, session->bind_addr);
-	if (retval != MAPISTORE_SUCCESS) {
-		OC_DEBUG(0, "[asyncemsmdb] unable to delete resolver entry %s from record %s", session->bind_addr, session->cn);
-	}
-
-	DLIST_REMOVE(asyncemsmdb_session, session);
-
-	/* flush pending call on connection */
-	context->conn->pending_call_list = NULL;
-
-	return NT_STATUS_OK;
 }
 
 
@@ -1169,9 +1177,13 @@ static struct ldb_context *samdb_init(struct loadparm_context *lp_ctx)
 
 	if (samdb_ctx) return samdb_ctx;
 
-	mem_ctx = talloc_autofree_context();
+	mem_ctx = talloc_new(module_ctx);
+	if (mem_ctx == NULL) {
+		return NULL;
+	}
 	ev = tevent_context_init(mem_ctx);
 	if (!ev) {
+		talloc_free(mem_ctx);
 		return NULL;
 	}
 	tevent_loop_allow_nesting(ev);
@@ -1180,48 +1192,51 @@ static struct ldb_context *samdb_init(struct loadparm_context *lp_ctx)
 	samdb_url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
 
 	if (!samdb_url) {
-		_samdb_ctx = samdb_connect(mem_ctx, ev, lp_ctx, system_session(lp_ctx), 0);
+		_samdb_ctx = samdb_connect(mem_ctx, ev, lp_ctx, system_session(lp_ctx), NULL, 0);
 	} else {
-		_samdb_ctx = samdb_connect_url(mem_ctx, ev, lp_ctx, system_session(lp_ctx),
-					       LDB_FLG_RECONNECT, samdb_url);
+		char *error = NULL;
+		int ret = samdb_connect_url(mem_ctx, ev, lp_ctx, system_session(lp_ctx),
+			LDB_FLG_RECONNECT, samdb_url, NULL, &_samdb_ctx, &error);
+		if (ret != LDB_SUCCESS) {
+			_samdb_ctx = NULL;
+		}
+	}
+	if (_samdb_ctx == NULL) {
+		talloc_free(mem_ctx);
 	}
 
 	return _samdb_ctx;
 }
 
 
-static NTSTATUS dcerpc_server_asyncemsmdb_bind(struct dcesrv_call_state *dce_call, const struct dcesrv_interface *iface)
+static NTSTATUS dcerpc_server_asyncemsmdb_bind(struct dcesrv_connection_context *context, const struct dcesrv_interface *iface)
 {
 	if (!openchangedb_ctx) {
-		openchangedb_ctx = mapiproxy_server_openchangedb_init(dce_call->conn->dce_ctx->lp_ctx);
+		openchangedb_ctx = mapiproxy_server_openchangedb_init(context->conn->dce_ctx->lp_ctx);
 		if (!openchangedb_ctx) {
-			OC_PANIC(true, ("Unable to initialize openchangedb"));
+			return NT_STATUS_UNSUCCESSFUL;
 		}
 	}
 
 	if (!samdb_ctx) {
-		samdb_ctx = samdb_init(dce_call->conn->dce_ctx->lp_ctx);
+		samdb_ctx = samdb_init(context->conn->dce_ctx->lp_ctx);
 		if (!samdb_ctx) {
-			OC_PANIC(true, ("Unable to initialize samdb"));
+			return NT_STATUS_UNSUCCESSFUL;
 		}
 	}
 
-	dce_call->state_flags |= DCESRV_CALL_STATE_FLAG_PROCESS_PENDING_CALL;
+	context->conn->state_flags |= DCESRV_CALL_STATE_FLAG_PROCESS_PENDING_CALL;
 	return NT_STATUS_OK;
 }
 
 
-NTSTATUS samba_init_module(void)
+NTSTATUS samba_init_module(TALLOC_CTX *ctx)
 {
 	NTSTATUS status;
 
-	status = dcerpc_server_asyncemsmdb_init();
+	module_ctx = ctx;
+	status = dcerpc_server_asyncemsmdb_init(ctx);
 	NT_STATUS_NOT_OK_RETURN(status);
-
-	/* Initialize exchange_async_emsmdb session */
-	asyncemsmdb_session = talloc_zero(NULL, struct exchange_asyncemsmdb_session);
-	if (!asyncemsmdb_session) return NT_STATUS_NO_MEMORY;
-	asyncemsmdb_session->data = NULL;
 
 	status = ndr_table_register(&ndr_table_asyncemsmdb);
 	NT_STATUS_NOT_OK_RETURN(status);

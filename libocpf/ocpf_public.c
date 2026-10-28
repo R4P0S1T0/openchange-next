@@ -168,13 +168,14 @@ _PUBLIC_ int ocpf_parse(uint32_t context_id)
 	ctx = ocpf_context_search_by_context_id(ocpf->context, context_id);
 	OCPF_RETVAL_IF(!ctx, NULL, OCPF_INVALID_CONTEXT, NULL);
 
-	ret = ocpf_yylex_init(&scanner);
 	ret = ocpf_yylex_init_extra(ctx, &scanner);
+	if (ret != 0) return OCPF_ERROR;
+	error_flag = 0;
 	ocpf_yyset_in(ctx->fp, scanner);
 	ret = ocpf_yyparse(ctx, scanner);
 	ocpf_yylex_destroy(scanner);
 
-	return ret;
+	return ret != 0 || error_flag != 0 ? OCPF_ERROR : OCPF_SUCCESS;
 }
 
 

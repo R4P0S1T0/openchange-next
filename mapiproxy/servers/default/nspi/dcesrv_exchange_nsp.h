@@ -51,13 +51,6 @@ struct emsabp_context {
 	TALLOC_CTX		*mem_ctx;
 };
 
-struct exchange_nsp_session {
-	struct mpm_session		*session;
-	struct GUID			uuid;
-	struct exchange_nsp_session	*prev;
-	struct exchange_nsp_session	*next;
-};
-
 struct emsabp_MId {
 	uint32_t	MId;
 	char		*dn;
@@ -130,7 +123,6 @@ do {					\
 __BEGIN_DECLS
 
 NTSTATUS		samba_init_module(void);
-struct ldb_context	*samdb_connect_url(TALLOC_CTX *, struct tevent_context *, struct loadparm_context *, struct auth_session_info *, unsigned int, const char *);
 const struct GUID	*samdb_ntds_objectGUID(struct ldb_context *);
 
 /* definitions from emsabp.c */

@@ -29,33 +29,22 @@
 #include "mapiproxy/libmapiproxy/fault_util.h"
 #include "dcesrv_exchange_nsp.h"
 
-static struct exchange_nsp_session	*nsp_session = NULL;
-static TDB_CONTEXT			*emsabp_tdb_ctx = NULL;
+static TDB_CONTEXT *emsabp_tdb_ctx;
 
-static struct exchange_nsp_session *dcesrv_find_nsp_session(struct GUID *uuid)
+static struct dcesrv_handle *dcesrv_find_nsp_handle(struct dcesrv_call_state *call,
+						  const struct policy_handle *wire)
 {
-	struct exchange_nsp_session *session, *found_session = NULL;
-
-	for (session = nsp_session; !found_session && session; session = session->next) {
-		if (GUID_equal(uuid, &session->uuid)) {
-			found_session = session;
-		}
-	}
-
-	return found_session;
+	/* Samba creates a handle for an empty wire handle; lookup must not do that. */
+	if (wire == NULL || GUID_all_zero(&wire->uuid) ||
+	    !dcesrv_call_authenticated(call)) return NULL;
+	return dcesrv_handle_lookup(call, wire, EXCHANGE_HANDLE_NSP);
 }
 
-static struct emsabp_context *dcesrv_find_emsabp_context(struct GUID *uuid)
+static struct emsabp_context *dcesrv_find_emsabp_context(struct dcesrv_call_state *call,
+						       const struct policy_handle *wire)
 {
-	struct exchange_nsp_session	*session;
-	struct emsabp_context		*emsabp_ctx = NULL;
-
-	session = dcesrv_find_nsp_session(uuid);
-	if (session) {
-		emsabp_ctx = (struct emsabp_context *)session->session->private_data;;
-	}
-
-	return emsabp_ctx;
+	struct dcesrv_handle *handle = dcesrv_find_nsp_handle(call, wire);
+	return handle == NULL ? NULL : talloc_get_type(handle->data, struct emsabp_context);
 }
 
 
@@ -101,92 +90,49 @@ static void dcesrv_make_ptyp_error_property_row(TALLOC_CTX* mem_ctx,
 static void dcesrv_NspiBind(struct dcesrv_call_state *dce_call,
 			    TALLOC_CTX *mem_ctx, struct NspiBind *r)
 {
-	struct GUID			*guid = (struct GUID *) NULL;
-	struct emsabp_context		*emsabp_ctx;
-	struct dcesrv_handle		*handle;
-	struct policy_handle		wire_handle;
-	struct exchange_nsp_session	*session;
-	enum MAPISTATUS			retval = MAPI_E_SUCCESS;
+	const struct GUID *guid;
+	struct emsabp_context *emsabp_ctx = NULL;
+	struct dcesrv_handle *handle;
+	enum MAPISTATUS retval = MAPI_E_LOGON_FAILED;
 
-	OC_DEBUG(5, "exchange_nsp: NspiBind (0x0)\n");
-
-	/* Step 0. Ensure incoming user is authenticated and code page is correct*/
-	if (!dcesrv_call_authenticated(dce_call) && (r->in.dwFlags & fAnonymousLogin)) {
-		OC_DEBUG(1, "No challenge requested by client, cannot authenticate\n");
-		retval = MAPI_E_FAILONEPROVIDER;
-		goto failure;
+	if (r->out.handle == NULL) {
+		r->out.result = MAPI_E_INVALID_PARAMETER;
+		return;
 	}
-
-	DCESRV_NSP_RETURN_IF(r->in.pStat->CodePage == CP_UNICODE, r, MAPI_E_NO_SUPPORT, NULL);
-
-	/* Step 1. Initialize the emsabp context */
+	ZERO_STRUCTP(r->out.handle);
+	r->out.mapiuid = r->in.mapiuid;
+	if (!dcesrv_call_authenticated(dce_call) || (r->in.dwFlags & fAnonymousLogin)) goto failure;
+	retval = MAPI_E_INVALID_PARAMETER;
+	if (r->in.pStat == NULL) goto failure;
+	retval = MAPI_E_NO_SUPPORT;
+	if (r->in.pStat->CodePage == CP_UNICODE) goto failure;
 	emsabp_ctx = emsabp_init(dce_call->conn->dce_ctx->lp_ctx, emsabp_tdb_ctx);
-	if (!emsabp_ctx) {
-		OC_PANIC(false, ("[exchange_nsp] Unable to initialize emsabp context\n"));
-		retval = MAPI_E_FAILONEPROVIDER;
-		goto failure;
-	}
-
+	retval = MAPI_E_FAILONEPROVIDER;
+	if (emsabp_ctx == NULL) goto failure;
 	if (lpcfg_parm_bool(dce_call->conn->dce_ctx->lp_ctx, NULL, "exchange_nsp", "debug", false)) {
 		emsabp_enable_debug(emsabp_ctx);
 	}
-
-	/* Step 2. Check if incoming user belongs to the Exchange organization */
-	if ((emsabp_verify_user(dce_call, emsabp_ctx) == false) && (r->in.dwFlags & fAnonymousLogin)) {
-		retval = MAPI_E_LOGON_FAILED;
-		goto failure;
-	}
-
-	/* Step 3. Check if valid cpID has been supplied */
-	if (emsabp_verify_codepage(emsabp_ctx, r->in.pStat->CodePage) == false) {
-		retval = MAPI_E_UNKNOWN_CPID;
-		goto failure;
-	}
-
-	/* Step 4. Retrieve OpenChange server GUID */
-	guid = (struct GUID *) samdb_ntds_objectGUID(emsabp_ctx->samdb_ctx);
-	DCESRV_NSP_RETURN_IF(!guid, r, MAPI_E_FAILONEPROVIDER, emsabp_ctx);
-
-	/* Step 5. Fill NspiBind reply */
-	handle = dcesrv_handle_new(dce_call->context, EXCHANGE_HANDLE_NSP);
-	DCESRV_NSP_RETURN_IF(!handle, r, MAPI_E_NOT_ENOUGH_RESOURCES, emsabp_ctx);
-
-	handle->data = (void *) emsabp_ctx;
+	retval = MAPI_E_LOGON_FAILED;
+	if (!emsabp_verify_user(dce_call, emsabp_ctx)) goto failure;
+	retval = MAPI_E_UNKNOWN_CPID;
+	if (!emsabp_verify_codepage(emsabp_ctx, r->in.pStat->CodePage)) goto failure;
+	guid = samdb_ntds_objectGUID(emsabp_ctx->samdb_ctx);
+	retval = MAPI_E_FAILONEPROVIDER;
+	if (guid == NULL) goto failure;
+	r->out.mapiuid = talloc_memdup(mem_ctx, guid, sizeof(*guid));
+	retval = MAPI_E_NOT_ENOUGH_RESOURCES;
+	if (r->out.mapiuid == NULL) goto failure;
+	handle = dcesrv_handle_create(dce_call, EXCHANGE_HANDLE_NSP);
+	if (handle == NULL) goto failure;
+	handle->data = talloc_steal(handle, emsabp_ctx);
 	*r->out.handle = handle->wire_handle;
-	r->out.mapiuid = guid;
-
-	/* Search for an existing session and increment ref_count, otherwise create it */
-	session = dcesrv_find_nsp_session(&handle->wire_handle.uuid);
-	if (session) {
-		mpm_session_increment_ref_count(session->session);
-		OC_DEBUG(5, "  [unexpected]: existing nsp_session: %p; session: %p (ref++)", session, session->session);
-	} else {
-		OC_DEBUG(5, "Creating new session");
-
-		/* Step 6. Associate this emsabp context to the session */
-		session = talloc((TALLOC_CTX *)nsp_session, struct exchange_nsp_session);
-		DCESRV_NSP_RETURN_IF(!session, r, MAPI_E_NOT_ENOUGH_RESOURCES, emsabp_ctx);
-
-		session->session = mpm_session_init((TALLOC_CTX *)nsp_session, dce_call);
-		DCESRV_NSP_RETURN_IF(!session->session, r, MAPI_E_NOT_ENOUGH_RESOURCES, emsabp_ctx);
-
-		session->uuid = handle->wire_handle.uuid;
-
-		mpm_session_set_private_data(session->session, (void *) emsabp_ctx);
-		mpm_session_set_destructor(session->session, emsabp_destructor);
-
-		DLIST_ADD_END(nsp_session, session, struct exchange_nsp_session *);
-	}
-
-	DCESRV_NSP_RETURN(r, MAPI_E_SUCCESS, NULL);
+	r->out.result = MAPI_E_SUCCESS;
+	return;
 
 failure:
-	wire_handle.handle_type = EXCHANGE_HANDLE_NSP;
-	wire_handle.uuid = GUID_zero();
-	*r->out.handle = wire_handle;
-
+	talloc_free(emsabp_ctx);
 	r->out.mapiuid = r->in.mapiuid;
-	DCESRV_NSP_RETURN(r, retval, emsabp_ctx);
+	r->out.result = retval;
 }
 
 
@@ -201,39 +147,22 @@ failure:
 static void dcesrv_NspiUnbind(struct dcesrv_call_state *dce_call,
 			      TALLOC_CTX *mem_ctx, struct NspiUnbind *r)
 {
-	struct dcesrv_handle		*h;
-	struct exchange_nsp_session	*session;
+	struct dcesrv_handle *handle;
+	struct policy_handle wire = {0};
 
-	OC_DEBUG(5, "exchange_nsp: NspiUnbind (0x1)\n");
-
-	/* Step 0. Ensure incoming user is authenticated */
+	if (r->in.handle != NULL) wire = *r->in.handle;
+	if (r->out.handle != NULL) ZERO_STRUCTP(r->out.handle);
 	if (!dcesrv_call_authenticated(dce_call)) {
-		OC_DEBUG(1, "No challenge requested by client, cannot authenticate\n");
-		DCESRV_NSP_RETURN(r, MAPI_E_LOGON_FAILED, NULL);
+		r->out.result = MAPI_E_LOGON_FAILED;
+		return;
 	}
-
-	/* Step 1. Retrieve handle and free if emsabp context and session are available */
-	h = dcesrv_handle_fetch(dce_call->context, r->in.handle, DCESRV_HANDLE_ANY);
-	if (h) {
-		session = dcesrv_find_nsp_session(&r->in.handle->uuid);
-		if (session) {
-			if (mpm_session_release(session->session)) {
-				DLIST_REMOVE(nsp_session, session);
-				OC_DEBUG(5, "Session found and released\n");
-			} else {
-				OC_DEBUG(5, "Session found and ref_count decreased\n");
-			}
-		}
-		else {
-			OC_DEBUG(5, "  nsp_session NOT found\n");
-		}
+	handle = dcesrv_find_nsp_handle(dce_call, &wire);
+	if (handle == NULL) {
+		r->out.result = MAPI_E_INVALID_OBJECT;
+		return;
 	}
-
-	r->out.handle->uuid = GUID_zero();
-	r->out.handle->handle_type = 0;
-	r->out.result = (enum MAPISTATUS) 1;
-
-	DCESRV_NSP_RETURN(r, 1, NULL);
+	talloc_free(handle);
+	r->out.result = 1;
 }
 
 /**
@@ -254,18 +183,17 @@ static void position_in_table(struct STAT *pStat,
 	uint32_t	row;
 	uint32_t	last_row;
 
-	if (mids->cValues > 0) {
-		last_row = mids->cValues - 1;
-	} else {
-		last_row = 0;
+	if (mids == NULL || mids->cValues == 0 || mids->aulPropTag == NULL) {
+		*out_row = *out_last_row = 0;
+		return;
 	}
+	last_row = mids->cValues - 1;
 
 	if (pStat->CurrentRec == MID_CURRENT) {
 		/* Fractional positioning (3.1.4.5.2) */
-		row = pStat->NumPos * (last_row+1) / pStat->TotalRecs;
-		if (row > last_row) {
-			row = last_row;
-		}
+		uint64_t fraction = pStat->TotalRecs == 0 ? 0 :
+			(uint64_t)pStat->NumPos * mids->cValues / pStat->TotalRecs;
+		row = fraction > last_row ? last_row : fraction;
 	} else {
 		/* Absolute positioning (3.1.4.5.1) */
 		if (pStat->CurrentRec == MID_BEGINNING_OF_TABLE) {
@@ -295,6 +223,13 @@ static void position_in_table(struct STAT *pStat,
 	*out_last_row = last_row;
 }
 
+static uint32_t nspi_row_delta(uint32_t row, int32_t delta, uint32_t limit)
+{
+	int64_t next = (int64_t)row + delta;
+	if (next < 0) return 0;
+	return (uint64_t)next > limit ? limit : next;
+}
+
 /**
    \details This method does the main work of NspiUpdateStat. It is separated from dcesrv_NspiUpdateStat to be called from NspiQueryRows to update correctly the pStat struct. Also is called from NspiUpdateStat to avoid repeating code.
 
@@ -309,20 +244,11 @@ static void dcesrv_do_NspiUpdateStat(struct NspiUpdateStat *r,
 
 	position_in_table(r->in.pStat, mids, &row, &last_row);
 
-	if (r->in.pStat->Delta != 0) {
-		/* Adjust row  by Delta */
-		if (r->in.pStat->Delta > 0) {
-			row += r->in.pStat->Delta;
-			if (row > last_row) {
-				row = last_row;
-			}
-		} else {
-			if (abs(r->in.pStat->Delta) >= row) {
-				row = 0;
-			} else {
-				row -= abs(r->in.pStat->Delta);
-			}
-		}
+	row = nspi_row_delta(row, r->in.pStat->Delta, last_row);
+	/* Capture the delta before writing a possibly aliased in/out STAT. */
+	int64_t moved = (int64_t)row - r->in.pStat->NumPos;
+	if (r->in.plDelta != NULL && (moved < INT32_MIN || moved > INT32_MAX)) {
+		DCESRV_NSP_RETURN(r, MAPI_E_INVALID_PARAMETER, NULL);
 	}
 
 	if (row == last_row) {
@@ -339,7 +265,7 @@ static void dcesrv_do_NspiUpdateStat(struct NspiUpdateStat *r,
 	r->out.pStat->TotalRecs = mids->cValues;
 	r->out.plDelta = r->in.plDelta;
 	if (r->in.plDelta != NULL) {
-		*(r->out.plDelta) = r->out.pStat->NumPos - r->in.pStat->NumPos;
+		*(r->out.plDelta) = moved;
 	}
 
 	DCESRV_NSP_RETURN(r, retval, NULL);
@@ -374,7 +300,7 @@ static void dcesrv_NspiUpdateStat(struct dcesrv_call_state *dce_call, TALLOC_CTX
 	/* Step 0. Sanity checks from Server Processing Rules */
 	DCESRV_NSP_RETURN_IF(r->in.pStat->CodePage == CP_UNICODE, r, MAPI_E_NO_SUPPORT, NULL);
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	if (r->in.pStat->ContainerID) {
@@ -467,18 +393,7 @@ static void dcesrv_do_NspiQueryRows(TALLOC_CTX *mem_ctx, struct NspiQueryRows *r
 			DCESRV_NSP_RETURN(r, MAPI_E_SUCCESS, NULL);
 		}
 
-		if (r->in.pStat->Delta >= 0) {
-			start_pos = start_pos + r->in.pStat->Delta;
-			if (start_pos >= ldb_res->count) {
-				start_pos = ldb_res->count;
-			}
-		} else {
-			if (abs(r->in.pStat->Delta) > r->in.pStat->NumPos) {
-				start_pos = 0;
-			} else {
-				start_pos = start_pos - abs(r->in.pStat->Delta);
-			}
-		}
+		start_pos = nspi_row_delta(start_pos, r->in.pStat->Delta, ldb_res->count);
 
 		count = ldb_res->count - start_pos;
 		if (r->in.Count < count) {
@@ -586,7 +501,7 @@ static void dcesrv_NspiQueryRows(struct dcesrv_call_state *dce_call, TALLOC_CTX 
 	/* Step 1. Sanity checks from Server Processing Rules */
 	DCESRV_NSP_RETURN_IF(r->in.pStat->CodePage == CP_UNICODE, r, MAPI_E_NO_SUPPORT, NULL);
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	DCESRV_NSP_RETURN_IF(r->in.lpETable == NULL && r->in.Count == 0,
@@ -634,7 +549,7 @@ static void dcesrv_NspiSeekEntries(struct dcesrv_call_state *dce_call, TALLOC_CT
 
 	OC_DEBUG(3, "exchange_nsp: NspiSeekEntries (0x4)\n");
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	/* Step 1. Sanity Checks (MS-NSPI Server Processing Rules) */
@@ -805,7 +720,7 @@ static void dcesrv_NspiGetMatches(struct dcesrv_call_state *dce_call,
 	/* Step 1. Sanity checks from Server Processing Rules */
 	DCESRV_NSP_RETURN_IF(r->in.pStat->CodePage == CP_UNICODE, r, MAPI_E_NO_SUPPORT, NULL);
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	DCESRV_NSP_RETURN_IF(r->in.Filter
@@ -912,7 +827,7 @@ static void dcesrv_NspiDNToMId(struct dcesrv_call_state *dce_call,
 		DCESRV_NSP_RETURN(r, MAPI_E_LOGON_FAILED, NULL);
 	}
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	r->out.ppMIds = talloc_array(mem_ctx, struct PropertyTagArray_r *, 2);
@@ -987,7 +902,7 @@ static void dcesrv_NspiGetProps(struct dcesrv_call_state *dce_call,
 		DCESRV_NSP_RETURN(r, MAPI_E_LOGON_FAILED, NULL);
 	}
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	MId = r->in.pStat->CurrentRec;
@@ -1121,7 +1036,7 @@ static void dcesrv_NspiGetSpecialTable(struct dcesrv_call_state *dce_call,
 	unsupported_codepage = !nspi_address_creation_templates && !nspi_unicode_strings && r->in.pStat->CodePage == CP_UNICODE;
 	DCESRV_NSP_RETURN_IF(unsupported_codepage, r, MAPI_E_NO_SUPPORT, NULL);
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	DCESRV_NSP_RETURN_IF(!emsabp_ctx, r, MAPI_E_CALL_FAILED, NULL);
 
 	/* Step 1. (FIXME) We arbitrary set lpVersion to 0x1 */
@@ -1312,7 +1227,7 @@ static void dcesrv_do_NspiResolveNamesW(struct dcesrv_call_state *dce_call,
 	/* MS-OXNPI 3.1.4.1.17 server processing rules 2 says that we should return
 	   error if r->in.Reserved != 0, however Outlook 2010 always send non-zero so we skip it. */
 
-	emsabp_ctx = dcesrv_find_emsabp_context(&r->in.handle->uuid);
+	emsabp_ctx = dcesrv_find_emsabp_context(dce_call, r->in.handle);
 	if (!emsabp_ctx) {
 		retval = MAPI_E_CALL_FAILED;
 		goto failure;
@@ -1381,7 +1296,7 @@ static void dcesrv_do_NspiResolveNamesW(struct dcesrv_call_state *dce_call,
 			goto failure;
 		}
 		/* Build search filter */
-		for (j = 0; j < ARRAY_SIZE(search_attr); j++) {
+		for (j = 0; j < (sizeof(search_attr) / sizeof(search_attr[0])); j++) {
 			char *attr_filter = talloc_asprintf(mem_ctx, "(%s=%s*)", search_attr[j],
 							    ldb_binary_encode_string(mem_ctx, paWStr->Strings[i]));
 			if (!attr_filter) {
@@ -1523,6 +1438,10 @@ static NTSTATUS dcesrv_exchange_nsp_dispatch(struct dcesrv_call_state *dce_call,
 	opnum = dce_call->pkt.u.request.opnum;
 
 	/* Sanity checks */
+	if (!dcesrv_call_authenticated(dce_call)) {
+		dce_call->fault_code = DCERPC_FAULT_ACCESS_DENIED;
+		return NT_STATUS_NET_WRITE_FAULT;
+	}
 	if (!table) return NT_STATUS_UNSUCCESSFUL;
 	if (table->name && strcmp(table->name, NDR_EXCHANGE_NSP_NAME)) return NT_STATUS_UNSUCCESSFUL;
 
@@ -1606,11 +1525,6 @@ static NTSTATUS dcesrv_exchange_nsp_dispatch(struct dcesrv_call_state *dce_call,
 static NTSTATUS dcesrv_exchange_nsp_init(struct dcesrv_context *dce_ctx)
 {
 	OC_DEBUG(0, "dcesrv_exchange_nsp_init");
-	/* Initialize exchange_nsp session */
-	nsp_session = talloc_zero(dce_ctx, struct exchange_nsp_session);
-	if (!nsp_session) return NT_STATUS_NO_MEMORY;
-	nsp_session->session = NULL;
-
 	/* Open a read-write pointer on the EMSABP TDB database */
 	emsabp_tdb_ctx = emsabp_tdb_init((TALLOC_CTX *)dce_ctx, dce_ctx->lp_ctx);
 	if (!emsabp_tdb_ctx) {
@@ -1634,7 +1548,7 @@ static NTSTATUS dcesrv_exchange_nsp_init(struct dcesrv_context *dce_ctx)
  */
 static NTSTATUS dcesrv_exchange_nsp_unbind(struct server_id server_id, uint32_t context_id)
 {
-	OC_DEBUG(0, "dcesrv_exchange_nsp_unbind: server_id=%d, context_id=0x%x", server_id, context_id);
+	OC_DEBUG(5, "dcesrv_exchange_nsp_unbind: pid=%"PRIu64", context_id=0x%x", server_id.pid, context_id);
 	return NT_STATUS_OK;
 }
 
@@ -1646,7 +1560,7 @@ static NTSTATUS dcesrv_exchange_nsp_unbind(struct server_id server_id, uint32_t 
  */
 NTSTATUS samba_init_module(void)
 {
-	struct mapiproxy_module	server;
+	struct mapiproxy_module	server = {0};
 	NTSTATUS		ret;
 
 	/* Fill in our name */
