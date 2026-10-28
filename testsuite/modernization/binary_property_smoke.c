@@ -25,6 +25,30 @@
     CHECK(talloc_total_blocks(owner) == before); \
 } while (0)
 
+static int persistent_limits(TALLOC_CTX *ctx)
+{
+    TALLOC_CTX *owner = talloc_new(ctx);
+    uint8_t *bytes = talloc_zero_array(ctx, uint8_t, 400004);
+    DATA_BLOB blob = { .data = bytes, .length = 400004 };
+    struct ndr_pull *pull;
+    struct PersistDataArray data = {0};
+    struct PersistElementArray elements = {0};
+    CHECK(owner && bytes);
+    for (size_t i = 0; i < blob.length; i += 4) { bytes[i] = 1; bytes[i + 1] = 0x80; }
+    pull = ndr_pull_init_blob(&blob, ctx); CHECK(pull); pull->current_mem_ctx = owner;
+    CHECK(ndr_pull_PersistDataArray(pull, NDR_SCALARS | NDR_BUFFERS, &data) == NDR_ERR_RANGE);
+    CHECK(data.cValues == 0 && data.lpPersistData == NULL && pull->current_mem_ctx == owner && pull->flags == 0);
+    CHECK(talloc_total_blocks(owner) == 1); talloc_free(pull);
+    blob.length = 40000 + 4;
+    for (size_t i = 0; i < blob.length; i += 4) bytes[i + 1] = 0;
+    pull = ndr_pull_init_blob(&blob, ctx); CHECK(pull); pull->current_mem_ctx = owner;
+    CHECK(ndr_pull_PersistElementArray(pull, NDR_SCALARS | NDR_BUFFERS, &elements) == NDR_ERR_RANGE);
+    CHECK(elements.cValues == 0 && elements.lpPersistElement == NULL && pull->current_mem_ctx == owner);
+    CHECK(talloc_total_blocks(owner) == 1); talloc_free(pull);
+    talloc_free(bytes); talloc_free(owner);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL), *owner = talloc_new(ctx);
@@ -51,7 +75,7 @@ int main(void)
     struct Binary_r bin;
     uint32_t count = 99;
     size_t blocks;
-    CHECK(ctx && owner);
+    CHECK(ctx && owner && persistent_limits(ctx) == 0);
     ROUNDTRIP(GlobalObjectId, global, decoded->Size == 3 && decoded->Data[2] == 9);
     ROUNDTRIP(AddressBookEntryId, address, !strcmp(decoded->X500DN, "/o=Test/cn=alice"));
     ROUNDTRIP(OneOffEntryId, off, !strcmp(decoded->DisplayName.lpszA, "Alice") && !strcmp(decoded->EmailAddress.lpszA, "alice@example.test"));
@@ -68,7 +92,41 @@ int main(void)
     CHECK(ndr_push_PersistDataArray(push, NDR_SCALARS | NDR_BUFFERS, &array) == NDR_ERR_SUCCESS);
     bin.cb = push->offset; bin.lpb = push->data; blocks = talloc_total_blocks(owner);
     decoded_array = get_PersistDataArray(owner, &bin);
-    CHECK(decoded_array && decoded_array->cValues == 2); talloc_free(push);
+    CHECK(decoded_array && decoded_array->cValues == 2);
+    for (uint32_t length = 1; length < bin.cb; length++) {
+        struct Binary_r truncated = bin;
+        struct PersistDataArray *result;
+        truncated.cb = length;
+        result = get_PersistDataArray(owner, &truncated);
+        if (length == 15) CHECK(result && result->cValues == 1); /* Legacy arrays may omit the sentinel. */
+        else CHECK(result == NULL);
+        talloc_free(result);
+    }
+    for (size_t limit = 128; limit <= 2048; limit += 16) {
+        TALLOC_CTX *limited = talloc_new(ctx);
+        struct PersistDataArray *result;
+        CHECK(limited && talloc_set_memlimit(limited, limit) == 0);
+        result = get_PersistDataArray(limited, &bin);
+        if (result) CHECK(result->cValues == 2);
+        talloc_free(result);
+        CHECK(talloc_total_blocks(limited) == 1);
+        talloc_free(limited);
+    }
+    {
+        DATA_BLOB prefixed = { .length = bin.cb + 3 };
+        struct ndr_pull *pull;
+        struct PersistDataArray result = {0};
+        prefixed.data = talloc_zero_array(ctx, uint8_t, prefixed.length); CHECK(prefixed.data);
+        memcpy(prefixed.data + 3, bin.lpb, bin.cb);
+        pull = ndr_pull_init_blob(&prefixed, ctx); CHECK(pull); pull->offset = 3;
+        pull->current_mem_ctx = owner;
+        CHECK(ndr_pull_PersistDataArray(pull, NDR_SCALARS | NDR_BUFFERS, &result) == NDR_ERR_SUCCESS);
+        CHECK(pull->offset == prefixed.length && result.cValues == 2 && pull->current_mem_ctx == owner);
+        talloc_free(pull); talloc_free(prefixed.data);
+        CHECK(result.lpPersistData[0].DataElements.lpPersistElement[0].ElementData.rsf_elid_entryid.data[2] == 9);
+        talloc_free(result.lpPersistData);
+    }
+    talloc_free(push);
     CHECK(decoded_array->lpPersistData[0].DataElements.lpPersistElement[0].ElementData.rsf_elid_entryid.data[2] == 9);
     CHECK(decoded_array->lpPersistData[1].PersistID == PERSIST_SENTINEL);
     talloc_free(decoded_array); CHECK(talloc_total_blocks(owner) == blocks);

@@ -543,6 +543,22 @@ allocation limits, unchanged data after failure, replacement without allocation,
 invalid array state and count overflow. Native/source-copy and ASan/UBSan checks
 pass. Other property-list helpers and callers still need review.
 
+## Persistent property array bounds
+
+The hand-written persistent-data and persistent-element array readers now use
+the actual NDR cursor instead of summing untrusted declared sizes. Both enforce
+their IDL item-count limits, grow arrays geometrically and publish results only
+after complete decoding. Allocation/parse failures release temporary arrays and
+restore the caller's memory context and flags. Nested values stay under the
+result even when its array moves. Existing sentinel-free arrays remain accepted
+at a complete record boundary for compatibility with the historical fixtures.
+
+The binary-property check adds truncated header/payload prefixes, nonzero input
+offsets, allocation-limit sweeps and over-limit arrays (100,001 persistent data
+records and 10,001 elements). Native/source-copy and ASan/UBSan checks pass,
+including the existing 8 Check tests; the complete default build also passes.
+This does not validate every binary property's declared-size semantics.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary
