@@ -50,29 +50,89 @@ static char *cache_server_id_string(TALLOC_CTX *ctx, const struct server_id *id)
 #endif
 }
 
-/**
-   \details Find the position of the given MAPI call in a serialized
-   MAPI request.
-
-   If the request includes a Release call, then request and replies
-   indexes for other calls will mismatch.
-
-   \param opnum The MAPI opnum to seek
-   \param mapi_req Pointer to the MAPI request calls array
-
-   \return On success, returns the call position, otherwise -1.
- */
-static uint32_t cache_find_call_request_index(uint8_t opnum, struct EcDoRpc_MAPI_REQ *mapi_req)
+static bool cache_handle_table_valid(uint32_t total, uint16_t length,
+	const uint32_t *handles, size_t *count)
 {
-	uint32_t	i;
+	if (length < 2 || total < length || (total - length) % sizeof(uint32_t)) return false;
+	*count = (total - length) / sizeof(uint32_t);
+	return *count <= 256 && (*count == 0 || (handles != NULL &&
+		talloc_array_length(handles) >= *count));
+}
 
-	for (i = 0; mapi_req[i].opnum; i++) {
-		if (mapi_req[i].opnum == opnum) {
-			return i;
+static bool cache_request_valid(const struct mapi_request *request)
+{
+	size_t count, i, capacity;
+	uint32_t secondary;
+	if (request == NULL || !cache_handle_table_valid(request->mapi_len,
+		request->length, request->handles, &count)) return false;
+	if (request->mapi_req == NULL) return request->length == 2;
+	capacity = talloc_array_length(request->mapi_req);
+	for (i = 0; i < capacity; i++) {
+		if (request->mapi_req[i].opnum == 0) return true;
+		if (request->mapi_req[i].handle_idx >= count) return false;
+		switch (request->mapi_req[i].opnum) {
+		case op_MAPI_OpenMessage: secondary = request->mapi_req[i].u.mapi_OpenMessage.handle_idx; break;
+		case op_MAPI_OpenAttach: secondary = request->mapi_req[i].u.mapi_OpenAttach.handle_idx; break;
+		case op_MAPI_OpenStream: secondary = request->mapi_req[i].u.mapi_OpenStream.handle_idx; break;
+		default: continue;
 		}
+		if (secondary >= count) return false;
 	}
+	return false;
+}
 
-	return UINT32_MAX;
+static bool cache_response_valid(const struct mapi_response *response)
+{
+	size_t count, i, capacity;
+	if (response == NULL || !cache_handle_table_valid(response->mapi_len,
+		response->length, response->handles, &count)) return false;
+	if (response->mapi_repl == NULL) return response->length == 2;
+	capacity = talloc_array_length(response->mapi_repl);
+	for (i = 0; i < capacity; i++) {
+		if (response->mapi_repl[i].opnum == 0) return true;
+		switch (response->mapi_repl[i].opnum) {
+		case op_MAPI_Notify:
+		case op_MAPI_Pending:
+		case op_MAPI_BufferTooSmall: continue;
+		}
+		if (response->mapi_repl[i].handle_idx >= count) return false;
+	}
+	return false;
+}
+
+/* Release has no response; preserve order to distinguish repeated opnums. */
+static uint32_t cache_find_call_request_index(uint8_t opnum,
+	struct EcDoRpc_MAPI_REQ *requests, uint32_t *cursor)
+{
+	while (requests[*cursor].opnum == op_MAPI_Release) (*cursor)++;
+	if (requests[*cursor].opnum == 0 || requests[*cursor].opnum != opnum) return UINT32_MAX;
+	return (*cursor)++;
+}
+
+static bool cache_replies_match(struct mapi_request *request, struct mapi_response *response)
+{
+	uint32_t cursor = 0, i, index, expected;
+	size_t handles = (response->mapi_len - response->length) / sizeof(uint32_t);
+	if (response->mapi_repl == NULL) return true;
+	for (i = 0; response->mapi_repl[i].opnum; i++) {
+		switch (response->mapi_repl[i].opnum) {
+		case op_MAPI_Notify:
+		case op_MAPI_Pending: continue;
+		case op_MAPI_BufferTooSmall: return true;
+		}
+		if (request->mapi_req == NULL) return false;
+		index = cache_find_call_request_index(response->mapi_repl[i].opnum, request->mapi_req, &cursor);
+		if (index == UINT32_MAX) return false;
+		switch (request->mapi_req[index].opnum) {
+		case op_MAPI_OpenMessage: expected = request->mapi_req[index].u.mapi_OpenMessage.handle_idx; break;
+		case op_MAPI_OpenAttach: expected = request->mapi_req[index].u.mapi_OpenAttach.handle_idx; break;
+		case op_MAPI_OpenStream: expected = request->mapi_req[index].u.mapi_OpenStream.handle_idx; break;
+		case op_MAPI_ReadStream: expected = request->mapi_req[index].handle_idx; break;
+		default: continue;
+		}
+		if (expected >= handles || response->mapi_repl[i].handle_idx != expected) return false;
+	}
+	return true;
 }
 
 /**
@@ -800,6 +860,9 @@ static NTSTATUS cache_push_ReadStream(struct dcesrv_call_state *dce_call,
 
 	if (mapi_repl.error_code != MAPI_E_SUCCESS) return NT_STATUS_OK;
 	mapi_response = EcDoRpc->out.mapi_response;
+	if (mapi_req.handle_idx != mapi_repl.handle_idx ||
+	    EcDoRpc->in.mapi_request->handles[mapi_req.handle_idx] != mapi_response->handles[mapi_repl.handle_idx])
+		return NT_STATUS_OK;
 	response = mapi_repl.u.mapi_ReadStream;
 	/* request = mapi_req.u.mapi_ReadStream; */
 
@@ -863,6 +926,7 @@ static NTSTATUS cache_pull(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_c
 	EcDoRpc = (struct EcDoRpc *) r;
 	if (!EcDoRpc) return NT_STATUS_OK;
 	if (!EcDoRpc->in.mapi_request) return NT_STATUS_OK;
+	if (!cache_request_valid(EcDoRpc->in.mapi_request)) return NT_STATUS_INVALID_PARAMETER;
 	if (!EcDoRpc->in.mapi_request->mapi_req) return NT_STATUS_OK;
 
 	/* If this is an idle request, do not go further */
@@ -911,7 +975,7 @@ static NTSTATUS cache_push(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_c
 	struct EcDoRpc_MAPI_REPL	*mapi_repl;
 	struct EcDoRpc_MAPI_REQ		*mapi_req;
 	uint32_t			i;
-	uint32_t			index;
+	uint32_t			index, cursor = 0;
 
 	if (dce_call->pkt.u.request.opnum != 0x2) {
 		return NT_STATUS_OK;
@@ -920,6 +984,9 @@ static NTSTATUS cache_push(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_c
 	EcDoRpc = (struct EcDoRpc *) r;
 	if (!EcDoRpc) return NT_STATUS_OK;
 	if (!EcDoRpc->out.mapi_response) return NT_STATUS_OK;
+	if (!cache_request_valid(EcDoRpc->in.mapi_request) ||
+	    !cache_response_valid(EcDoRpc->out.mapi_response) ||
+	    !cache_replies_match(EcDoRpc->in.mapi_request, EcDoRpc->out.mapi_response)) return NT_STATUS_INVALID_PARAMETER;
 	if (!EcDoRpc->out.mapi_response->mapi_repl) return NT_STATUS_OK;
 
 	/* If this is an idle request, do not got further */
@@ -931,25 +998,20 @@ static NTSTATUS cache_push(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_c
 	mapi_req = EcDoRpc->in.mapi_request->mapi_req;
 
 	for (i = 0; mapi_repl[i].opnum; i++) {
+		if (mapi_repl[i].opnum == op_MAPI_Notify || mapi_repl[i].opnum == op_MAPI_Pending) continue;
+		if (mapi_repl[i].opnum == op_MAPI_BufferTooSmall) break;
+		index = cache_find_call_request_index(mapi_repl[i].opnum, mapi_req, &cursor);
 		switch (mapi_repl[i].opnum) {
 		case op_MAPI_OpenMessage:
-			index = cache_find_call_request_index(op_MAPI_OpenMessage, mapi_req);
-			if (index == UINT32_MAX) break;
 			NT_STATUS_NOT_OK_RETURN(cache_push_OpenMessage(dce_call, mapi_req[index], mapi_repl[i], EcDoRpc));
 			break;
 		case op_MAPI_OpenAttach:
-			index = cache_find_call_request_index(op_MAPI_OpenAttach, mapi_req);
-			if (index == UINT32_MAX) break;
 			NT_STATUS_NOT_OK_RETURN(cache_push_OpenAttach(dce_call, mapi_req[index], mapi_repl[i], EcDoRpc));
 			break;
 		case op_MAPI_OpenStream:
-			index = cache_find_call_request_index(op_MAPI_OpenStream, mapi_req);
-			if (index == UINT32_MAX) break;
 			NT_STATUS_NOT_OK_RETURN(cache_push_OpenStream(dce_call, mapi_req[index], mapi_repl[i], EcDoRpc));
 			break;
 		case op_MAPI_ReadStream:
-			index = cache_find_call_request_index(op_MAPI_ReadStream, mapi_req);
-			if (index == UINT32_MAX) break;
 			NT_STATUS_NOT_OK_RETURN(cache_push_ReadStream(dce_call, mapi_req[index], mapi_repl[i], EcDoRpc));
 			break;
 		default:
@@ -995,6 +1057,8 @@ static NTSTATUS cache_dispatch(struct dcesrv_call_state *dce_call, TALLOC_CTX *m
 	}
 
 	EcDoRpc = (struct EcDoRpc *) r;
+	if (EcDoRpc != NULL && EcDoRpc->in.mapi_request != NULL &&
+	    !cache_request_valid(EcDoRpc->in.mapi_request)) return NT_STATUS_INVALID_PARAMETER;
 	if (EcDoRpc == NULL || EcDoRpc->in.mapi_request == NULL ||
 	    EcDoRpc->in.mapi_request->mapi_req == NULL) return NT_STATUS_OK;
 
@@ -1067,6 +1131,18 @@ static NTSTATUS cache_dispatch(struct dcesrv_call_state *dce_call, TALLOC_CTX *m
 						break;
 					} else if ((stream->cached == false) && (stream->ahead == true)) {
 						if (mapiproxy->ahead == true)  {
+							if (!cache_response_valid(mapi_response) || mapi_response->mapi_repl == NULL ||
+							    mapi_response->mapi_repl[0].opnum != op_MAPI_ReadStream ||
+							    talloc_array_length(mapi_response->mapi_repl) < 2 ||
+							    mapi_response->mapi_repl[1].opnum != 0 ||
+							    mapi_response->mapi_repl[0].handle_idx != mapi_req[0].handle_idx ||
+							    mapi_response->handles[mapi_response->mapi_repl[0].handle_idx] != stream->handle)
+								return NT_STATUS_INVALID_PARAMETER;
+							if (mapi_response->mapi_repl[0].error_code != MAPI_E_SUCCESS) {
+								mapiproxy->ahead = false;
+								stream->ahead = false;
+								return NT_STATUS_OK;
+							}
 							if (mapi_response->mapi_repl[i].u.mapi_ReadStream.data.length > UINT16_MAX) return NT_STATUS_INVALID_PARAMETER;
 							NT_STATUS_NOT_OK_RETURN(mpm_cache_stream_write(stream,
 									       mapi_response->mapi_repl[i].u.mapi_ReadStream.data.length,

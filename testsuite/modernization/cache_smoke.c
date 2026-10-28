@@ -43,6 +43,92 @@ static int file_contents(const char *path, const char *expected)
     return got == strlen(expected) && memcmp(buffer, expected, got) == 0;
 }
 
+static int rpc_bounds(TALLOC_CTX *ctx)
+{
+    struct mapi_request request = { .length = 30, .mapi_len = 38 };
+    struct mapi_response response = { .length = 8, .mapi_len = 12 };
+    struct EcDoRpc rpc = { .in.mapi_request = &request, .out.mapi_response = &response };
+    struct dcesrv_call_state call = {0};
+    struct mapiproxy proxy = {0};
+    request.mapi_req = talloc_zero_array(ctx, struct EcDoRpc_MAPI_REQ, 2);
+    request.handles = talloc_zero_array(ctx, uint32_t, 2);
+    response.mapi_repl = talloc_zero_array(ctx, struct EcDoRpc_MAPI_REPL, 2);
+    response.handles = talloc_zero_array(ctx, uint32_t, 1);
+    CHECK(request.mapi_req && request.handles && response.mapi_repl && response.handles);
+    call.pkt.u.request.opnum = NDR_ECDORPC;
+    request.mapi_req[0].opnum = op_MAPI_OpenMessage;
+    request.mapi_req[0].u.mapi_OpenMessage.handle_idx = 1;
+    response.mapi_repl[0].opnum = op_MAPI_OpenMessage;
+    CHECK(cache_request_valid(&request) && cache_response_valid(&response));
+    CHECK(NT_STATUS_EQUAL(cache_push(&call, ctx, &rpc), NT_STATUS_INVALID_PARAMETER)); /* Output slot missing. */
+    request.mapi_req[0].handle_idx = 2;
+    CHECK(!cache_request_valid(&request));
+    CHECK(NT_STATUS_EQUAL(cache_pull(&call, ctx, &rpc), NT_STATUS_INVALID_PARAMETER));
+    CHECK(NT_STATUS_EQUAL(cache_dispatch(&call, ctx, &rpc, &proxy), NT_STATUS_INVALID_PARAMETER));
+    request.mapi_req[0].handle_idx = 0; request.mapi_req[0].u.mapi_OpenMessage.handle_idx = 2;
+    CHECK(!cache_request_valid(&request)); request.mapi_req[0].u.mapi_OpenMessage.handle_idx = 1;
+    request.mapi_req[1] = request.mapi_req[0]; CHECK(!cache_request_valid(&request));
+    memset(&request.mapi_req[1], 0, sizeof(request.mapi_req[1]));
+    request.mapi_len = 29; CHECK(!cache_request_valid(&request));
+    request.mapi_len = 37; CHECK(!cache_request_valid(&request));
+    request.mapi_len = 42; CHECK(!cache_request_valid(&request)); /* Allocation smaller than advertised. */
+    request.mapi_len = 30 + 257 * 4; CHECK(!cache_request_valid(&request)); request.mapi_len = 38;
+    response.mapi_repl[0].handle_idx = 1; CHECK(!cache_response_valid(&response));
+    CHECK(NT_STATUS_EQUAL(cache_push(&call, ctx, &rpc), NT_STATUS_INVALID_PARAMETER));
+    response.mapi_repl[0].opnum = op_MAPI_Notify; response.mapi_repl[0].handle_idx = 255;
+    CHECK(cache_response_valid(&response));
+    response.mapi_repl[1] = response.mapi_repl[0]; CHECK(!cache_response_valid(&response));
+    return 0;
+}
+
+static int rpc_correlations(TALLOC_CTX *ctx, const char *root)
+{
+    struct mapi_request request = { .length = 30, .mapi_len = 38 };
+    struct mapi_response response = { .length = 14, .mapi_len = 22 };
+    struct EcDoRpc rpc = { .in.mapi_request = &request, .out.mapi_response = &response };
+    struct dcesrv_connection connection = {0};
+    struct dcesrv_connection_context context = { .context_id = 5 };
+    struct dcesrv_call_state call = { .conn = &connection, .context = &context };
+    struct mpm_message *message, *next;
+    char *database = talloc_asprintf(ctx, "tdb://%s/correlations.ldb", root);
+    CHECK(database && NT_STATUS_IS_OK(mpm_cache_ldb_createdb(mpm, database, &mpm->ldb_ctx)));
+    request.mapi_req = talloc_zero_array(ctx, struct EcDoRpc_MAPI_REQ, 4);
+    request.handles = talloc_zero_array(ctx, uint32_t, 2);
+    response.mapi_repl = talloc_zero_array(ctx, struct EcDoRpc_MAPI_REPL, 4);
+    response.handles = talloc_zero_array(ctx, uint32_t, 2);
+    CHECK(request.mapi_req && request.handles && response.mapi_repl && response.handles);
+    call.pkt.u.request.opnum = NDR_ECDORPC;
+    for (int i = 0; i < 2; i++) {
+        request.mapi_req[i].opnum = op_MAPI_OpenMessage;
+        request.mapi_req[i].u.mapi_OpenMessage.handle_idx = i;
+        request.mapi_req[i].u.mapi_OpenMessage.FolderId = 100;
+        request.mapi_req[i].u.mapi_OpenMessage.MessageId = i + 1;
+        response.mapi_repl[i].opnum = op_MAPI_OpenMessage;
+        response.mapi_repl[i].handle_idx = i;
+        response.handles[i] = 1000 + i;
+    }
+    CHECK(NT_STATUS_IS_OK(cache_pull(&call, ctx, &rpc)));
+    CHECK(mpm->messages && mpm->messages->next && mpm->messages->next->next == NULL);
+    response.mapi_repl[1].handle_idx = 0;
+    CHECK(NT_STATUS_EQUAL(cache_push(&call, ctx, &rpc), NT_STATUS_INVALID_PARAMETER));
+    for (message = mpm->messages; message; message = message->next) CHECK(message->handle == UINT32_MAX);
+    response.mapi_repl[1].handle_idx = 1;
+    CHECK(NT_STATUS_IS_OK(cache_push(&call, ctx, &rpc)));
+    for (message = mpm->messages; message; message = message->next) CHECK(message->handle == 999 + message->MessageId);
+    /* Releases have no reply; notifications do not consume a request. */
+    request.mapi_req[2] = request.mapi_req[1]; request.mapi_req[1].opnum = op_MAPI_Release;
+    response.mapi_repl[2] = response.mapi_repl[1]; response.mapi_repl[1].opnum = op_MAPI_Notify;
+    CHECK(cache_request_valid(&request) && cache_response_valid(&response) && cache_replies_match(&request, &response));
+    response.mapi_repl[2].opnum = op_MAPI_OpenAttach;
+    CHECK(!cache_replies_match(&request, &response));
+    message = mpm->messages;
+    while (message) {
+        next = message->next; DLIST_REMOVE(mpm->messages, message);
+        talloc_free(message->session); talloc_free(message); message = next;
+    }
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
@@ -66,10 +152,12 @@ int main(void)
     char *copy_command[4];
 
     CHECK(ctx != NULL && mkdtemp(root) != NULL && mkdtemp(outside) != NULL);
+    CHECK(rpc_bounds(ctx) == 0);
     mpm = talloc_zero(ctx, struct mpm_cache);
     CHECK(mpm != NULL);
     talloc_set_destructor(mpm, cache_destructor);
     mpm->dbpath = root;
+    CHECK(rpc_correlations(ctx, root) == 0);
     stream = talloc_zero(mpm, struct mpm_stream);
     message = talloc_zero(stream, struct mpm_message);
     CHECK(stream != NULL && message != NULL);
@@ -218,6 +306,17 @@ int main(void)
         rpc.in.max_data = 4;
         CHECK(NT_STATUS_IS_OK(cache_dispatch(&call, ctx, &rpc, &proxy)) && !proxy.norelay);
         rpc.in.max_data = UINT16_MAX;
+        {
+            struct EcDoRpc_MAPI_REPL *replies = rpc.out.mapi_response->mapi_repl;
+            stream->cached = false; stream->ahead = true; proxy.ahead = true;
+            rpc.out.mapi_response->mapi_repl = NULL;
+            CHECK(NT_STATUS_EQUAL(cache_dispatch(&call, ctx, &rpc, &proxy), NT_STATUS_INVALID_PARAMETER));
+            rpc.out.mapi_response->mapi_repl = replies;
+            replies[0].error_code = MAPI_E_CALL_FAILED;
+            CHECK(NT_STATUS_IS_OK(cache_dispatch(&call, ctx, &rpc, &proxy)) && !proxy.ahead && !stream->ahead);
+            CHECK(stream->offset == 0);
+            replies[0].error_code = MAPI_E_SUCCESS; stream->cached = true;
+        }
         CHECK(NT_STATUS_IS_OK(mpm_cache_stream_close(stream)));
         CHECK(!NT_STATUS_IS_OK(cache_dispatch(&call, ctx, &rpc, &proxy)) && !proxy.norelay);
         CHECK(NT_STATUS_IS_OK(mpm_cache_stream_open(mpm, stream)));

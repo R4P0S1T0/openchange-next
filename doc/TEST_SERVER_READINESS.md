@@ -66,7 +66,8 @@ upgrade/restore validation beyond this first test milestone.
 - Cache file access is confined to a private service-owned root with link,
   regular-file, owner and size checks. Sync commands use argv, exit failed
   children and verify their status. File and process failure paths, permissions
-  and bounded synthetic replies have regression tests. Protocol/identity
+  and bounded synthetic replies have regression tests. Handle-table bounds and
+  ordered request/reply correlation also have real LDB regression checks. Protocol/identity
   scoping and cache-integrity review remain incomplete; the optional cache is
   not yet qualified for an enabled integration configuration.
 

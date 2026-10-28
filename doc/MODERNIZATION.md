@@ -592,6 +592,25 @@ checks pass. Numeric restrictions, additional restriction forms and full
 comparison/operator semantics remain protocol work; these tests do not prove
 AD's ANR behavior or live Outlook search compatibility.
 
+## Cache RPC table validation
+
+Cache callbacks validate declared handle counts against their allocated tables,
+reject missing operation-array terminators and check primary/creation-output
+indices before indexing. Replies are matched to requests in order, skipping
+Release requests and unsolicited notifications, so repeated opnums no longer
+reuse the first request's metadata. The complete correlation is checked before
+cache state changes. A changed ReadStream handle bypasses cache writes; read-ahead
+rejects malformed reply shapes and stops cleanly on a failed ROP without reading
+its absent property union.
+
+`make check-mpm-cache` adds invalid lengths/allocations, missing output slots,
+invalid primary/secondary indices, malformed reply arrays and read-ahead failure
+cases. A real LDB fixture tracks two OpenMessage operations, checks distinct
+returned handles, verifies unchanged state after an invalid second reply and
+covers Release/Notify ordering. Native/source-copy and ASan/UBSan checks pass.
+Identity/store namespaces, atomic cache publication and sync-command timeouts
+remain unqualified; the cache is still not approved for an enabled test setup.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary
