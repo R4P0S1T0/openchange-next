@@ -169,16 +169,20 @@ _PUBLIC_ enum MAPISTATUS OpenMessage(mapi_object_t *obj_store,
 
 		lpProp.ulPropTag = PR_RECIPIENT_TYPE;
 		lpProp.value.l = reply->RecipientRows[i].RecipientType;
-		SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		retval = SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 
 		lpProp.ulPropTag = PR_INTERNET_CPID;
 		lpProp.value.l = reply->RecipientRows[i].CodePageId;
-		SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		retval = SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 	}
 
 	/* add SPropTagArray elements we automatically append to SRow */
-	SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_RECIPIENT_TYPE);
-	SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_INTERNET_CPID);
+	retval = SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_RECIPIENT_TYPE);
+	OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
+	retval = SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_INTERNET_CPID);
+	OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 
 	obj_message->private_data = (void *) message;
 
@@ -291,16 +295,20 @@ _PUBLIC_ enum MAPISTATUS ReloadCachedInformation(mapi_object_t *obj_message)
 
 		lpProp.ulPropTag = PR_RECIPIENT_TYPE;
 		lpProp.value.l = reply->RecipientRows[i].RecipientType;
-		SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		retval = SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 
 		lpProp.ulPropTag = PR_INTERNET_CPID;
 		lpProp.value.l = reply->RecipientRows[i].CodePageId;
-		SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		retval = SRow_addprop(&(message->SRowSet.aRow[i]), lpProp);
+		OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 	}
 
 	/* add SPropTagArray elements we automatically append to SRow */
-	SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_RECIPIENT_TYPE);
-	SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_INTERNET_CPID);
+	retval = SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_RECIPIENT_TYPE);
+	OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
+	retval = SPropTagArray_add((TALLOC_CTX *)message, &message->SPropTagArray, PR_INTERNET_CPID);
+	OPENCHANGE_RETVAL_CALL_IF(retval != MAPI_E_SUCCESS, retval, message, mem_ctx);
 
 	talloc_free(obj_message->private_data);
 	obj_message->private_data = (void *) message;

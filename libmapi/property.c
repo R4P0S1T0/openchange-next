@@ -86,16 +86,22 @@ _PUBLIC_ enum MAPISTATUS SPropTagArray_add(TALLOC_CTX *mem_ctx,
 					   struct SPropTagArray *SPropTagArray, 
 					   enum MAPITAGS aulPropTag)
 {
+	enum MAPITAGS *grown;
+	uint32_t count;
+
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!mem_ctx, MAPI_E_NOT_INITIALIZED, NULL);
 	OPENCHANGE_RETVAL_IF(!SPropTagArray, MAPI_E_INVALID_PARAMETER, NULL);
 	OPENCHANGE_RETVAL_IF(!SPropTagArray->aulPropTag, MAPI_E_INVALID_PARAMETER, NULL);
 
-	SPropTagArray->cValues += 1;
-	SPropTagArray->aulPropTag = (enum MAPITAGS *) talloc_realloc(mem_ctx, SPropTagArray->aulPropTag,
-								     uint32_t, SPropTagArray->cValues + 1);
-	SPropTagArray->aulPropTag[SPropTagArray->cValues - 1] = aulPropTag;
-	SPropTagArray->aulPropTag[SPropTagArray->cValues] = (enum MAPITAGS) 0;
+	OPENCHANGE_RETVAL_IF(SPropTagArray->cValues >= UINT32_MAX - 1, MAPI_E_INVALID_PARAMETER, NULL);
+	count = SPropTagArray->cValues + 1;
+	grown = talloc_realloc(mem_ctx, SPropTagArray->aulPropTag, enum MAPITAGS, count + 1);
+	OPENCHANGE_RETVAL_IF(grown == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	grown[count - 1] = aulPropTag;
+	grown[count] = (enum MAPITAGS)0;
+	SPropTagArray->aulPropTag = grown;
+	SPropTagArray->cValues = count;
 
 	return MAPI_E_SUCCESS;
 }
@@ -1117,11 +1123,14 @@ _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue sprop
 {
 	TALLOC_CTX		*mem_ctx;
 	uint32_t		cValues;
-	struct SPropValue	lpProp;
+	struct SPropValue	lpProp = {0};
+	struct SPropValue	*grown;
 	uint32_t		i;
 	
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!aRow, MAPI_E_INVALID_PARAMETER, NULL);
+	OPENCHANGE_RETVAL_IF((aRow->cValues && aRow->lpProps == NULL) ||
+			     aRow->cValues == UINT32_MAX, MAPI_E_INVALID_PARAMETER, NULL);
 
 	mem_ctx = (TALLOC_CTX *) aRow;
 
@@ -1134,8 +1143,9 @@ _PUBLIC_ enum MAPISTATUS SRow_addprop(struct SRow *aRow, struct SPropValue sprop
 	}
 
 	cValues = aRow->cValues + 1;
-	aRow->lpProps = talloc_realloc(mem_ctx, aRow->lpProps, struct SPropValue, cValues);
-	lpProp = aRow->lpProps[cValues-1];
+	grown = talloc_realloc(mem_ctx, aRow->lpProps, struct SPropValue, cValues);
+	OPENCHANGE_RETVAL_IF(grown == NULL, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	aRow->lpProps = grown;
 	lpProp.ulPropTag = spropvalue.ulPropTag;
 	lpProp.dwAlignPad = 0;
 	set_SPropValue(&(lpProp), get_SPropValue_data(&spropvalue));

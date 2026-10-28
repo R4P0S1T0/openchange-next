@@ -128,10 +128,42 @@ static int rows(TALLOC_CTX *ctx)
     return 0;
 }
 
+static int growth(TALLOC_CTX *ctx)
+{
+    TALLOC_CTX *owner = talloc_new(ctx);
+    struct SRow *row = talloc_zero(owner, struct SRow);
+    struct SPropTagArray tags = {0};
+    struct SPropValue value = { .ulPropTag = PROP_TAG(PT_LONG, 0x3001), .value.l = 7 };
+    enum MAPITAGS *old_tags;
+    struct SPropValue *old_values;
+    CHECK(owner && row);
+    tags.aulPropTag = talloc_zero(owner, enum MAPITAGS); CHECK(tags.aulPropTag);
+    CHECK(SPropTagArray_add(owner, &tags, value.ulPropTag) == MAPI_E_SUCCESS);
+    CHECK(tags.cValues == 1 && tags.aulPropTag[0] == value.ulPropTag && tags.aulPropTag[1] == 0);
+    CHECK(SRow_addprop(row, value) == MAPI_E_SUCCESS && row->cValues == 1 && row->lpProps[0].value.l == 7);
+    old_tags = tags.aulPropTag; old_values = row->lpProps;
+    CHECK(talloc_set_memlimit(owner, 1) == 0);
+    CHECK(SPropTagArray_add(owner, &tags, PROP_TAG(PT_LONG, 0x3002)) == MAPI_E_NOT_ENOUGH_MEMORY);
+    CHECK(tags.aulPropTag == old_tags && tags.cValues == 1 && old_tags[0] == value.ulPropTag && old_tags[1] == 0);
+    value.ulPropTag = PROP_TAG(PT_LONG, 0x3002);
+    CHECK(SRow_addprop(row, value) == MAPI_E_NOT_ENOUGH_MEMORY);
+    CHECK(row->lpProps == old_values && row->cValues == 1 && old_values[0].value.l == 7);
+    value.ulPropTag = PROP_TAG(PT_LONG, 0x3001); value.value.l = 9;
+    CHECK(SRow_addprop(row, value) == MAPI_E_SUCCESS && row->cValues == 1 && row->lpProps[0].value.l == 9);
+    tags.cValues = UINT32_MAX;
+    CHECK(SPropTagArray_add(owner, &tags, value.ulPropTag) == MAPI_E_INVALID_PARAMETER);
+    row->cValues = UINT32_MAX;
+    CHECK(SRow_addprop(row, value) == MAPI_E_INVALID_PARAMETER);
+    row->cValues = 1; row->lpProps = NULL;
+    CHECK(SRow_addprop(row, value) == MAPI_E_INVALID_PARAMETER);
+    talloc_free(owner);
+    return 0;
+}
+
 int main(void)
 {
     TALLOC_CTX *ctx = talloc_new(NULL);
-    CHECK(ctx && values(ctx) == 0 && rows(ctx) == 0);
+    CHECK(ctx && values(ctx) == 0 && rows(ctx) == 0 && growth(ctx) == 0);
     {
         TALLOC_CTX *limited = talloc_new(ctx);
         uint8_t bytes[] = {1, 2, 3, 4};

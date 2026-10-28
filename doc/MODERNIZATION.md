@@ -532,6 +532,17 @@ and duplicate directory entries. Native/source-copy and ASan/UBSan checks pass,
 alongside EMSMDB regression checks. Broader recipient-resolution behavior and
 actual directory interoperability remain integration work.
 
+## Property list allocation failures
+
+SPropTagArray_add and SRow_addprop now retain their original pointer and count
+when growth fails, reject overflowing counts and return an allocation error.
+Row appends no longer copy an uninitialized slot. Message recipient callers
+check both appended values and appended column tags and release their unpublished
+message if either operation fails. The property-blob harness checks real talloc
+allocation limits, unchanged data after failure, replacement without allocation,
+invalid array state and count overflow. Native/source-copy and ASan/UBSan checks
+pass. Other property-list helpers and callers still need review.
+
 ## Remaining blockers
 
 The default `make all`, offline client checks and focused server boundary
