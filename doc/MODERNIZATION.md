@@ -2,7 +2,7 @@
 
 ## Status on 2026-10-28
 
-The client library and selected Python components now build/run with modern
+The complete default native build and selected Python components now build/run with modern
 Debian dependencies. The complete server and Outlook interoperability are
 **not yet validated**. This is a recovery milestone, not a production release.
 
@@ -12,6 +12,17 @@ Validated locally with Debian 13, GCC 14.2.0, Autoconf 2.72, Automake/aclocal
 - Autoconf bootstrap and configure complete. Python 3.11+ replaces Python 2 in
   configure, using sysconfig through `AM_PATH_PYTHON`, and the Python embedding
   header/link probe passes.
+- `make -j2 all` succeeds in a fresh source-only copy. The standalone tools use
+  checked Samba utility declarations, C++ objects wait for generated headers,
+  and OCPF/C++ SONAME links are built before their consumers. Ten CLI help
+  commands also pass without missing symbols or libraries.
+- With reference fixtures installed into a private prefix and a temporary
+  profile database, `mapitest --no-server` reports **30 passes, no unexpected
+  failures and one known expected LZXpress recompression failure**. Exact
+  Outlook compression-byte parity remains unresolved.
+- `make check-propsdump` covers capture ownership after parser destruction,
+  failed ROP replies, invalid indices and truncated files with generated NDR.
+  It passes natively and with ASan/UBSan (local leak detection disabled).
 - `libmapi.so.2.3` compiles, links and loads without unresolved symbols.
 - `make check-libmapi-modernization` passes: request/reply NDR round trips,
   malformed array rejection, restriction union switches, and the **8 existing
@@ -115,6 +126,8 @@ With those prerequisites on PATH:
 ```sh
 ./autogen.sh
 ./configure --with-samba=/usr
+make -j2 all
+make check-propsdump
 make check-libmapi-modernization
 make check-ocpf-lexer
 make check-mapiadmin
@@ -443,11 +456,22 @@ with ASan/UBSan in the source-only copy (local leak detection remains disabled).
 No real directory account has been created or deleted during these checks;
 end-to-end administration and LDAP extension still require integration testing.
 
+## Asynchronous notification identity
+
+A new asynchronous wait validates the handle type and nonzero UUID before
+using cached state. The cached short account name is then resolved in the local
+directory: exactly one enabled Exchange account with an objectSid matching the
+authenticated primary SID is required. This prevents a same-named account from
+a trusted domain from inheriting the local account's cached session. The real
+LDB-backed lifecycle harness covers wrong SID, missing/disabled accounts,
+missing account-control attributes, invalid handle type and zero UUID, alongside
+completion/cancellation cleanup. Native and ASan/UBSan checks pass; no real
+cross-domain authentication has been attempted.
+
 ## Remaining blockers
 
-The focused `mapiproxy` build and server boundary checks pass. The complete
-repository build still encounters missing Samba utility declarations in
-standalone clients and test tools; that compatibility pass is ongoing. The full C/server suite and an installation against a disposable
+The default `make all`, offline client checks and focused server boundary
+checks pass. The full C/server suite and an installation against a disposable
 AD controller remain to be validated. The RPC modules need real bind/unbind,
 authentication, relay and notification tests against disposable servers.
 Remaining ROP implementation, directory/schema, cache identity/integrity and
@@ -487,7 +511,7 @@ of working Exchange features or a delivery-date prediction.
 
 | Stage | Evidence-based status |
 | --- | --- |
-| Reference build | Libraries, RPC modules, plugins and default servers recovered; full repository build pending |
+| Reference build | Default native build recovered from a source-only checkout; full test suite pending |
 | Python 3 and bindings | Provisioning/migration subset recovered; extensions and services pending |
 | Samba/C adaptation | Focused RPC, pack/cache, NSPI and EMSMDB checks pass; full protocol/integration work pending |
 | End-to-end server validation | AD provisioning, authentication, mail/calendar and Outlook pending |

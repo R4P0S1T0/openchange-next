@@ -19,6 +19,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "mapiproxy/samba_compat.h"
 #include "utils/mapitest/mapitest.h"
 #include "utils/mapitest/proto.h"
 #include "gen_ndr/ndr_exchange.h"
@@ -44,7 +45,7 @@ _PUBLIC_ bool mapitest_lzxpress_validate_test_001(struct mapitest *mt)
 	struct ndr_push		*ndr_rgbIn;
 	struct RPC_HEADER_EXT	RPC_HEADER_EXT;
 	struct EcDoRpcExt2	r;
-	struct mapi2k7_request	request;
+	struct mapi2k7_request	request = {0};
 	NTSTATUS		status;
 	enum ndr_err_code	ndr_err;
 
@@ -63,12 +64,15 @@ _PUBLIC_ bool mapitest_lzxpress_validate_test_001(struct mapitest *mt)
 	mapitest_print_retval_step(mt, "1", "Loading 001_Outlook_2007_in_ModifyRecipients_comp.dat", MAPI_E_SUCCESS);
 
 	ndr_print = talloc_zero(mt->mem_ctx, struct ndr_print);
+	if (ndr_print == NULL) return false;
 	ndr_print->print = ndr_print_debug_helper;
 	ndr_print->depth = 1;
 
 	/* Step 2. Pull 001_Outlook_2007_in_ModifyRecipients_comp.dat data */
 	ndr_pull = ndr_pull_init_blob(&blob, mt->mem_ctx);
+	if (ndr_pull == NULL) return false;
 	ndr_pull->flags |= LIBNDR_FLAG_REF_ALLOC;
+	ndr_pull->current_mem_ctx = mt->mem_ctx;
 
 	ndr_err = ndr_pull_EcDoRpcExt2(ndr_pull, NDR_IN, &r);
 	talloc_free(ndr_pull);
@@ -86,24 +90,26 @@ _PUBLIC_ bool mapitest_lzxpress_validate_test_001(struct mapitest *mt)
 	blob.data = talloc_memdup(mt->mem_ctx, r.in.rgbIn, r.in.cbIn);
 	blob.length = r.in.cbIn;
 	ndr_pull = ndr_pull_init_blob(&blob, mt->mem_ctx);
+	if (ndr_pull == NULL) return false;
 	ndr_set_flags(&ndr_pull->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
+	ndr_pull->current_mem_ctx = mt->mem_ctx;
 	ndr_err = ndr_pull_mapi2k7_request(ndr_pull, NDR_SCALARS|NDR_BUFFERS, &request);
 	talloc_free(blob.data);
 	talloc_free(ndr_pull);
 	status = ndr_map_error2ntstatus(ndr_err);
-	if (NT_STATUS_IS_OK(status)) {
-		OC_DEBUG(0, "Success");
-	}
+	if (!NT_STATUS_IS_OK(status)) return false;
 
 	/* Step 5. Recompress data */
 	ndr_push = ndr_push_init_ctx(mt->mem_ctx);
+	if (ndr_push == NULL) return false;
 	ndr_set_flags(&ndr_push->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
-	ndr_push_mapi_request(ndr_push, NDR_SCALARS|NDR_BUFFERS, request.mapi_request);
+	if (ndr_push_mapi_request(ndr_push, NDR_SCALARS|NDR_BUFFERS, request.mapi_request) != NDR_ERR_SUCCESS) return false;
 	ndr_comp = ndr_push_init_ctx(mt->mem_ctx);
-	ndr_push_lzxpress_compress(ndr_comp, ndr_push);
+	if (ndr_comp == NULL || ndr_push_lzxpress_compress(ndr_comp, ndr_push) != NDR_ERR_SUCCESS) return false;
 	
 	/* Recreate complete blob */
 	ndr_rgbIn = ndr_push_init_ctx(mt->mem_ctx);
+	if (ndr_rgbIn == NULL) return false;
 	ndr_set_flags(&ndr_rgbIn->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
 
 	RPC_HEADER_EXT.Version = 0x0000;

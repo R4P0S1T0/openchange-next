@@ -131,11 +131,11 @@ gen_ndr/%.h: %.idl | gen_ndr
 	@echo "Compiling $< with -fPIC"
 	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fPIC -c $< -o $@
 
-.cpp.o:
+%.o: %.cpp | idl libmapi/version.h
 	@echo "Compiling $< with -fPIC"
 	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) $(QT4_CXXFLAGS) -fPIC -c $< -o $@
 
-.cpp.po:
+%.po: %.cpp | idl libmapi/version.h
 	@echo "Compiling $< with -fPIC"
 	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -fPIC -c $< -o $@
 
@@ -363,7 +363,7 @@ libmapi/codepage_lcid.c: libmapi/conf/mparse.pl libmapi/conf/codepage-lcid
 LIBMAPIPP_SO_VERSION = 0
 
 libmapixx: libmapi \
-	libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
+	libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION) \
 	libmapixx-tests \
 	libmapixx-examples
 
@@ -378,6 +378,11 @@ libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION): 	\
 	libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
 	@echo "Linking $@"
 	@$(CXX) $(DSOOPT) $(CXX11FLAGS) $(CXXFLAGS) $(LDFLAGS) -Wl,-soname,libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION) -o $@ $^ $(LIBS)
+
+libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION): libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION)
+	ln -fs $< $@
+
+bin/libmapixx-test bin/libmapixx-attach bin/libmapixx-exception bin/libmapixx-profiletest libmapi++/examples/foldertree libmapi++/examples/messages: | libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION)
 
 libmapixx-installpc:
 	@echo "[*] install: libmapi++ pc files"
@@ -616,7 +621,7 @@ libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION):	\
 
 LIBOCPF_SO_VERSION = 0
 
-libocpf:		libocpf.$(SHLIBEXT).$(PACKAGE_VERSION)
+libocpf:		libocpf.$(SHLIBEXT).$(PACKAGE_VERSION) libocpf.$(SHLIBEXT).$(LIBOCPF_SO_VERSION)
 
 libocpf-install:	libocpf-installpc	\
 			libocpf-installlib	\
@@ -1215,7 +1220,7 @@ clean:: openchangeclient-clean
 bin/openchangeclient: 	utils/openchangeclient.o			\
 			utils/openchange-tools.o			\
 			libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)		\
-			libocpf.$(SHLIBEXT).$(PACKAGE_VERSION)
+			libocpf.$(SHLIBEXT).$(LIBOCPF_SO_VERSION)
 	@echo "Linking $@"
 	@$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS) -lpopt
 
@@ -1764,6 +1769,14 @@ check-asyncemsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHL
 bin/asyncemsmdb: testsuite/modernization/asyncemsmdb_smoke.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=getsockname -Wl,--wrap=close mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(NANOMSG_LIBS)
+
+.PHONY: check-propsdump
+check-propsdump: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/propsdump-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/propsdump-check
+
+bin/propsdump-check: testsuite/modernization/propsdump_smoke.c utils/mapipropsdump.c mapiproxy/samba_compat.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) -lpopt -ldl
 
 .PHONY: check-mapiadmin
 check-mapiadmin: libmapi libmapiadmin libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/mapiadmin-check bin/mapiadmin-crypto

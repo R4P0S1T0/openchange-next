@@ -21,6 +21,7 @@ static unsigned stores, releases, sockets, closes, registrations, deletions, rep
 static const char *owner = "test";
 static int pipe_fds[2];
 static bool malformed_message;
+static char directory_path[] = "/tmp/openchange-async-XXXXXX";
 
 /* The separate main RPC smoke test exercises the private NDR table registry. */
 NTSTATUS ndr_table_register(const struct ndr_interface_table *table) { return NT_STATUS_OK; }
@@ -53,8 +54,24 @@ struct ldb_context *samdb_connect(TALLOC_CTX *ctx, struct tevent_context *ev,
     struct loadparm_context *lp, struct auth_session_info *session,
     const struct tsocket_address *remote, unsigned flags)
 {
+    struct ldb_context *db;
+    struct ldb_dn *base;
+    struct ldb_message *account;
+    uint8_t sid[] = {1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 0xe8, 3, 0, 0};
+    struct ldb_val value = { .data = sid, .length = sizeof(sid) };
     if (failure == FAIL_DIRECTORY) return NULL;
-    return ldb_init(ctx, ev);
+    db = ldb_init(ctx, ev);
+    if (db == NULL || ldb_connect(db, directory_path, 0, NULL) != LDB_SUCCESS) return NULL;
+    base = ldb_dn_new(db, db, "DC=test");
+    account = ldb_msg_new(db);
+    if (!base || !account || ldb_set_opaque(db, "defaultNamingContext", base) != LDB_SUCCESS) return NULL;
+    account->dn = ldb_dn_new(account, db, "CN=test,DC=test");
+    if (!account->dn || ldb_msg_add_string(account, "sAMAccountName", "test") != 0 ||
+        ldb_msg_add_string(account, "msExchUserAccountControl", "0") != 0 ||
+        ldb_msg_add_value(account, "objectSid", &value, NULL) != 0 ||
+        ldb_add(db, account) != LDB_SUCCESS) return NULL;
+    talloc_free(account);
+    return db;
 }
 int samdb_connect_url(TALLOC_CTX *ctx, struct tevent_context *ev,
     struct loadparm_context *lp, struct auth_session_info *session, unsigned flags,
@@ -151,6 +168,7 @@ static struct dcesrv_call_state *new_call(TALLOC_CTX *ctx,
     r->in.async_handle = talloc_zero(r, struct policy_handle);
     if (r->in.async_handle == NULL) return NULL;
     r->in.async_handle->uuid.time_low = handle_id;
+    r->in.async_handle->handle_type = EXCHANGE_HANDLE_ASYNCEMSMDB;
     call->conn = context->conn;
     call->context = context;
     call->auth_state = auth;
@@ -158,6 +176,22 @@ static struct dcesrv_call_state *new_call(TALLOC_CTX *ctx,
     call->state_flags = DCESRV_CALL_STATE_FLAG_MAY_ASYNC;
     call->r = r;
     return call;
+}
+
+static int set_exchange_control(const char *value)
+{
+    struct ldb_message *message = ldb_msg_new(samdb_ctx);
+    int ret;
+    if (message == NULL) return -1;
+    message->dn = ldb_dn_new(message, samdb_ctx, "CN=test,DC=test");
+    if (value == NULL) ret = ldb_msg_add_empty(message, "msExchUserAccountControl", LDB_FLAG_MOD_DELETE, NULL);
+    else {
+        ret = ldb_msg_add_string(message, "msExchUserAccountControl", value);
+        if (ret == LDB_SUCCESS) message->elements[0].flags = LDB_FLAG_MOD_REPLACE;
+    }
+    if (ret == LDB_SUCCESS) ret = ldb_modify(samdb_ctx, message);
+    talloc_free(message);
+    return ret;
 }
 
 static NTSTATUS dispatch(struct dcesrv_call_state *call)
@@ -191,7 +225,9 @@ int main(void)
     int stage;
     size_t blocks;
 
-    CHECK(ctx != NULL && pipe(pipe_fds) == 0);
+    int directory_fd = mkstemp(directory_path);
+    CHECK(ctx != NULL && directory_fd >= 0 && pipe(pipe_fds) == 0);
+    close(directory_fd); unlink(directory_path);
     CHECK(_get_random_port() == 25252);
     CHECK(get_mapistore_sogo_PidTagParentFolderId(ctx, NULL, "sogo://mail/", NULL)
         == MAPISTORE_ERR_INVALID_PARAMETER);
@@ -251,6 +287,27 @@ int main(void)
     CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_ACCESS_DENIED));
     CHECK(stores == releases && sockets == closes);
     owner = "test";
+    sids[0].sub_auths[1]++;
+    CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_ACCESS_DENIED));
+    CHECK(stores == releases && sockets == closes);
+    sids[0].sub_auths[1]--;
+    owner = user.account_name = "missing";
+    CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_ACCESS_DENIED));
+    owner = user.account_name = "test";
+    CHECK(set_exchange_control("2") == LDB_SUCCESS);
+    CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_ACCESS_DENIED));
+    CHECK(set_exchange_control(NULL) == LDB_SUCCESS);
+    CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_ACCESS_DENIED));
+    CHECK(set_exchange_control("0") == LDB_SUCCESS);
+    {
+        struct policy_handle *handle = ((struct EcDoAsyncWaitEx *)call->r)->in.async_handle;
+        handle->handle_type = EXCHANGE_HANDLE_NSP;
+        CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_INVALID_HANDLE));
+        handle->handle_type = EXCHANGE_HANDLE_ASYNCEMSMDB;
+        handle->uuid.time_low = 0;
+        CHECK(NT_STATUS_EQUAL(dispatch(call), NT_STATUS_INVALID_HANDLE));
+        handle->uuid.time_low = 1;
+    }
     for (stage = FAIL_INFO; stage <= FAIL_RESOLVER; stage++) {
         failure = stage;
         CHECK(!NT_STATUS_IS_OK(dispatch(call)));
@@ -310,7 +367,7 @@ int main(void)
     talloc_free(conn);
     dcesrv_assoc_group_common_destructor(assoc);
     talloc_free(ctx);
-    close(pipe_fds[0]); close(pipe_fds[1]);
+    close(pipe_fds[0]); close(pipe_fds[1]); unlink(directory_path);
     puts("Async RPC authentication, ownership, failure cleanup, completion and cancellation checks passed");
     return 0;
 }

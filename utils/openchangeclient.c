@@ -28,6 +28,7 @@
 
 #include "openchangeclient.h"
 #include "openchange-tools.h"
+#include "mapiproxy/samba_compat.h"
 
 #include <sys/stat.h>
 #include <sys/mman.h>

@@ -19,6 +19,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "mapiproxy/samba_compat.h"
 #include "libmapi/libmapi.h"
 #include "libmapi/libmapi_private.h"
 #include "gen_ndr/ndr_exchange.h"
@@ -76,7 +77,7 @@
  */
 
 
-static const const struct ndr_interface_table *load_exchange_emsmdb_dso(const char *plugin)
+static const struct ndr_interface_table *load_exchange_emsmdb_dso(const char *plugin)
 {
 	const struct ndr_interface_table	*p;
 	void					*handle;
@@ -115,7 +116,8 @@ static struct SPropTagArray *process_request(TALLOC_CTX *mem_ctx,
 	struct mapi_request	*mapi_request;
 	struct SPropTagArray	*SPropTagArray = NULL;
 	DATA_BLOB		rgbIn;
-	uint32_t		i, j;
+	uint32_t		i, count;
+	const enum MAPITAGS	*properties;
 
 	st = talloc_zero_size(mem_ctx, f->struct_size);
 	if (!st) {
@@ -138,6 +140,7 @@ static struct SPropTagArray *process_request(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 	ndr_pull->flags |= LIBNDR_FLAG_REF_ALLOC;
+	ndr_pull->current_mem_ctx = mem_ctx;
 	ndr_err = f->ndr_pull(ndr_pull, NDR_IN, st);
 	if (ndr_err) {
 		OC_DEBUG(0, "Unable to pull request, ndr_err = 0x%x", ndr_err);
@@ -156,6 +159,7 @@ static struct SPropTagArray *process_request(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 	ndr_set_flags(&sndr_pull->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
+	sndr_pull->current_mem_ctx = mem_ctx;
 	ndr_err = ndr_pull_mapi2k7_request(sndr_pull, NDR_SCALARS|NDR_BUFFERS, &mapi2k7_request);
 	talloc_free(ndr_pull);
 	if (ndr_err) {
@@ -165,33 +169,32 @@ static struct SPropTagArray *process_request(TALLOC_CTX *mem_ctx,
 	}
 
 	mapi_request = mapi2k7_request.mapi_request;
-	for (i = 0; mapi_request->mapi_req[i].opnum; i++) {
+	for (i = 0; mapi_request->mapi_req != NULL && mapi_request->mapi_req[i].opnum; i++) {
 		switch (mapi_request->mapi_req[i].opnum) {
 		case op_MAPI_GetProps:
-			*opnum = op_MAPI_GetProps;
-			*index = i;
-			SPropTagArray = talloc(mem_ctx, struct SPropTagArray);
-			SPropTagArray->aulPropTag = talloc_zero(SPropTagArray, enum MAPITAGS);
-			SPropTagArray->cValues = 0;
-			for (j = 0; j < mapi_request->mapi_req[i].u.mapi_GetProps.prop_count; j++) {
-				SPropTagArray_add(SPropTagArray, SPropTagArray,
-						  mapi_request->mapi_req[i].u.mapi_GetProps.properties[j]);
-			}
-			break;
-		case op_MAPI_ModifyRecipients:
+			count = mapi_request->mapi_req[i].u.mapi_GetProps.prop_count;
+			properties = mapi_request->mapi_req[i].u.mapi_GetProps.properties;
 			break;
 		case op_MAPI_SetColumns:
-			*opnum = op_MAPI_SetColumns;
-			*index = i;
-			SPropTagArray = talloc(mem_ctx, struct SPropTagArray);
-			SPropTagArray->aulPropTag = talloc_zero(SPropTagArray, enum MAPITAGS);
-			SPropTagArray->cValues = 0;
-			for (j = 0; j < mapi_request->mapi_req[i].u.mapi_SetColumns.prop_count; j++) {
-				SPropTagArray_add(SPropTagArray, SPropTagArray,
-						  mapi_request->mapi_req[i].u.mapi_SetColumns.properties[j]);
-			}
+			count = mapi_request->mapi_req[i].u.mapi_SetColumns.prop_count;
+			properties = mapi_request->mapi_req[i].u.mapi_SetColumns.properties;
 			break;
+		default:
+			continue;
 		}
+		*opnum = mapi_request->mapi_req[i].opnum;
+		*index = i;
+		talloc_free(SPropTagArray);
+		SPropTagArray = talloc_zero(mem_ctx, struct SPropTagArray);
+		if (SPropTagArray == NULL) { talloc_free(sndr_pull); return NULL; }
+		SPropTagArray->aulPropTag = talloc_array(SPropTagArray, enum MAPITAGS, count);
+		if (SPropTagArray->aulPropTag == NULL) {
+			talloc_free(SPropTagArray);
+			talloc_free(sndr_pull);
+			return NULL;
+		}
+		if (count != 0) memcpy(SPropTagArray->aulPropTag, properties, count * sizeof(*properties));
+		SPropTagArray->cValues = count;
 	}
 	talloc_free(sndr_pull);
 	return SPropTagArray;
@@ -239,6 +242,7 @@ static int process_response(TALLOC_CTX *mem_ctx,
 		return -1;
 	}
 	ndr_pull->flags |= LIBNDR_FLAG_REF_ALLOC;
+	ndr_pull->current_mem_ctx = mem_ctx;
 	ndr_err = f->ndr_pull(ndr_pull, NDR_OUT, st);
 	if (ndr_err) {
 		OC_DEBUG(0, "Unable to pull response, ndr_err = 0x%x", ndr_err);
@@ -255,6 +259,7 @@ static int process_response(TALLOC_CTX *mem_ctx,
 		return -1;
 	}
 	ndr_set_flags(&sndr_pull->flags, LIBNDR_FLAG_NOALIGN|LIBNDR_FLAG_REF_ALLOC);
+	sndr_pull->current_mem_ctx = mem_ctx;
 	ndr_err = ndr_pull_mapi2k7_response(sndr_pull, NDR_SCALARS|NDR_BUFFERS, &mapi2k7_response);
 	talloc_free(ndr_pull);
 	if (ndr_err) {
@@ -264,11 +269,15 @@ static int process_response(TALLOC_CTX *mem_ctx,
 	}
 
 	mapi_response = mapi2k7_response.mapi_response;
+	if (mapi_response->mapi_repl == NULL) { talloc_free(sndr_pull); return -1; }
+
 
 	switch (opnum) {
 	case op_MAPI_GetProps:
 	case op_MAPI_ModifyRecipients:
-		if (mapi_response->mapi_repl[index].opnum != opnum) {
+		if (index < 0 || (size_t)index >= talloc_array_length(mapi_response->mapi_repl) ||
+		    mapi_response->mapi_repl[index].opnum != opnum ||
+		    mapi_response->mapi_repl[index].error_code != MAPI_E_SUCCESS) {
 			OC_DEBUG(0, "Mismatching request vs reply");
 			talloc_free(sndr_pull);
 			return -1;
@@ -276,9 +285,10 @@ static int process_response(TALLOC_CTX *mem_ctx,
 		break;
 	case op_MAPI_SetColumns:
 		for (i = 0; mapi_response->mapi_repl[i].opnum; i++) {
-			if ((mapi_response->mapi_repl[i].opnum == op_MAPI_QueryRows) ||
+			if (mapi_response->mapi_repl[i].error_code == MAPI_E_SUCCESS &&
+			    ((mapi_response->mapi_repl[i].opnum == op_MAPI_QueryRows) ||
 			    (mapi_response->mapi_repl[i].opnum == op_MAPI_FindRow) ||
-			    (mapi_response->mapi_repl[i].opnum == op_MAPI_ExpandRow)) {
+			    (mapi_response->mapi_repl[i].opnum == op_MAPI_ExpandRow))) {
 				opnum = mapi_response->mapi_repl[i].opnum;
 				index_out = i;
 				break;

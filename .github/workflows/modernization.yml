@@ -24,7 +24,17 @@ jobs:
           tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
           echo /tmp/samba-4.22.10/pidl >> "$GITHUB_PATH"
           echo PERL5LIB=/tmp/samba-4.22.10/pidl/lib >> "$GITHUB_ENV"
-      - run: ./autogen.sh && ./configure --with-samba=/usr
+      - run: ./autogen.sh && ./configure --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
+      - name: Build every default target from source
+        run: make -j2 all
+      - name: Run client tests without a server
+        run: |
+          make mapitest-install
+          LD_LIBRARY_PATH=.:mapiproxy ./bin/mapiprofile --newdb --database "$RUNNER_TEMP/profiles.ldb" --ldif setup/profiles
+          LD_LIBRARY_PATH=.:mapiproxy ./bin/mapitest --no-server --database "$RUNNER_TEMP/profiles.ldb"
+      - run: make check-propsdump
+      - name: Check capture reader with sanitizers
+        run: make -W testsuite/modernization/propsdump_smoke.c check-propsdump CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - run: make check-libmapi-modernization
       - name: Check the custom NDR parser with sanitizers
         run: make -W ndr_mapi.c -W testsuite/modernization/ndr_smoke.c check-ndr-modernization CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
@@ -56,8 +66,8 @@ jobs:
         run: make -W testsuite/modernization/pack_smoke.c check-mpm-pack CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - name: Load the asynchronous RPC module
         run: LD_LIBRARY_PATH=.:mapiproxy python3 -c 'import ctypes; ctypes.CDLL("./mapiproxy/dcesrv_asyncemsmdb.so")'
-      - name: Check asynchronous RPC lifecycle with UndefinedBehaviorSanitizer
-        run: make -W testsuite/modernization/asyncemsmdb_smoke.c check-asyncemsmdb CC='gcc -fsanitize=undefined -fno-omit-frame-pointer'
+      - name: Check asynchronous RPC lifecycle with sanitizers
+        run: make -W testsuite/modernization/asyncemsmdb_smoke.c check-asyncemsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - name: Check RPC module with UndefinedBehaviorSanitizer
         run: make -W mapiproxy/dcesrv_mapiproxy.c -W mapiproxy/dcesrv_mapiproxy_nspi.c -W testsuite/modernization/rpc_smoke.c check-mapiproxy-rpc CC='gcc -fsanitize=undefined -fno-omit-frame-pointer'
       - name: Check registry memory handling with sanitizers

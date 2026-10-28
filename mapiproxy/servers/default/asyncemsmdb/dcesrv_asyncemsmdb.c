@@ -1012,7 +1012,9 @@ static NTSTATUS dcesrv_EcDoAsyncWaitEx(struct dcesrv_call_state *dce_call,
 	if (!dcesrv_call_authenticated(dce_call)) {
 		return NT_STATUS_ACCESS_DENIED;
 	}
-	if (r->in.async_handle == NULL) {
+	if (r->in.async_handle == NULL ||
+	    r->in.async_handle->handle_type != EXCHANGE_HANDLE_ASYNCEMSMDB ||
+	    GUID_all_zero(&r->in.async_handle->uuid)) {
 		return NT_STATUS_INVALID_HANDLE;
 	}
 	if (!(dce_call->state_flags & DCESRV_CALL_STATE_FLAG_MAY_ASYNC)) {
@@ -1083,6 +1085,27 @@ static NTSTATUS dcesrv_EcDoAsyncWaitEx(struct dcesrv_call_state *dce_call,
 		if (session->cn == NULL || strcasecmp(session->cn, username) != 0) {
 			status = NT_STATUS_ACCESS_DENIED;
 			goto failure;
+		}
+		{
+			const char * const attrs[] = { "objectSid", "msExchUserAccountControl", NULL };
+			struct ldb_result *account = NULL;
+			char *encoded = ldb_binary_encode_string(session, session->cn);
+			int ret;
+			if (encoded == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto failure;
+			}
+			/* Cached names alone cannot distinguish trusted-domain namesakes. */
+			ret = ldb_search(samdb_ctx, session, &account, ldb_get_default_basedn(samdb_ctx),
+				LDB_SCOPE_SUBTREE, attrs, "(sAMAccountName=%s)", encoded);
+			talloc_free(encoded);
+			if (ret != LDB_SUCCESS || account->count != 1 ||
+			    ldb_msg_find_attr_as_int(account->msgs[0], "msExchUserAccountControl", -1) != 0 ||
+			    !mapiproxy_call_owns_account(dce_call, account->msgs[0])) {
+				status = NT_STATUS_ACCESS_DENIED;
+				goto failure;
+			}
+			talloc_free(account);
 		}
 		p->username = talloc_strdup(p, username);
 		p->emsmdb_session_str = GUID_string(p, &p->emsmdb_uuid);

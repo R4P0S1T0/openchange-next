@@ -19,6 +19,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "mapiproxy/samba_compat.h"
 #include "utils/mapitest/mapitest.h"
 #include "utils/mapitest/proto.h"
 

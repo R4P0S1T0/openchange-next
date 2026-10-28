@@ -12,6 +12,12 @@ char **str_list_make(TALLOC_CTX *mem_ctx, const char *string, const char *separa
 const char **str_list_add(const char **list, const char *value);
 char *str_list_join(TALLOC_CTX *mem_ctx, const char **list, char separator);
 
+/* Public samba-util export; Samba 4.22.10 lib/util/util_file.h. */
+char *file_load(const char *, size_t *, size_t, TALLOC_CTX *);
+/* Public samba-util exports, Samba 4.22.10 lib/util/samba_util.h. */
+size_t strhex_to_str(char *, size_t, const char *, size_t);
+char *hex_encode_talloc(TALLOC_CTX *, const unsigned char *, size_t);
+
 /* Exported SAM database ABI absent from installed headers. Checked against
  * Samba 4.22.10 source4/dsdb/samdb/samdb.c.
  */
