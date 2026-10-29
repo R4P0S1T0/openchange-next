@@ -54,7 +54,7 @@ static enum mapistore_error get_mapped_id(struct namedprops_context *self,
 	if (nameid.ulKind == MNID_ID) {
 		sql = talloc_asprintf(mem_ctx,
 			"SELECT mappedId FROM "NAMEDPROPS_MYSQL_TABLE" "
-			"WHERE `type`=%u AND `oleguid`='%s' AND `propId`=%u",
+			"WHERE `type`=%u AND `oleguid`='%s' AND `propId`=%u FOR UPDATE",
 			nameid.ulKind, guid, nameid.kind.lid);
 	} else {
 		MAPISTORE_RETVAL_IF(!nameid.kind.lpwstr.Name, MAPISTORE_ERR_INVALID_PARAMETER, mem_ctx);
@@ -62,10 +62,11 @@ static enum mapistore_error get_mapped_id(struct namedprops_context *self,
 		MAPISTORE_RETVAL_IF(!name, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		sql = talloc_asprintf(mem_ctx,
 			"SELECT mappedId FROM "NAMEDPROPS_MYSQL_TABLE" "
-			"WHERE `type`=%u AND `oleguid`='%s' AND `propName`='%s'",
+			"WHERE `type`=%u AND `oleguid`='%s' AND `propName`='%s' FOR UPDATE",
 			nameid.ulKind, guid, name);
 	}
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	/* A locking read sees a concurrent insert even after an older transaction snapshot. */
 	result = select_first_uint(self->data, sql, &id);
 	MAPISTORE_RETVAL_IF(result == MYSQL_NOT_FOUND, MAPISTORE_ERR_NOT_FOUND, mem_ctx);
 	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS || id > UINT16_MAX,
@@ -86,50 +87,18 @@ static enum mapistore_error get_mapped_id(struct namedprops_context *self,
 static enum mapistore_error next_unused_id(struct namedprops_context *nprops,
 					   uint16_t *highest_id)
 {
-	TALLOC_CTX	*mem_ctx;
-	MYSQL		*conn;
-	MYSQL_RES	*res;
-	MYSQL_ROW	row;
-	char		*sql_query;
-	int		ret;
-
-	/* Sanity checks */
-	MAPISTORE_RETVAL_IF(!nprops, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
-	MAPISTORE_RETVAL_IF(!highest_id, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
-
-	conn = (MYSQL *) nprops->data;
-	MAPISTORE_RETVAL_IF(!conn, MAPISTORE_ERR_DATABASE_OPS, NULL);
-
-	mem_ctx = talloc_named(NULL, 0, "next_unused_id");
-	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
-
-	sql_query = talloc_asprintf(mem_ctx, "SELECT max(mappedId) FROM %s", NAMEDPROPS_MYSQL_TABLE);
-	MAPISTORE_RETVAL_IF(!sql_query, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
-
-	ret = mysql_query(conn, sql_query);
-	talloc_free(sql_query);
-	MAPISTORE_RETVAL_IF(ret, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
-
-	res = mysql_store_result(conn);
-	MAPISTORE_RETVAL_IF(!res, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
-
-	row = mysql_fetch_row(res);
-	if (!row || !row[0]) {
-		mysql_free_result(res);
-		mapistore_set_errno(MAPISTORE_ERR_DATABASE_OPS);
-		talloc_free(mem_ctx);
-		return MAPISTORE_ERR_DATABASE_OPS;
-	}
-
-	*highest_id = strtol(row[0], NULL, 10);
-
-	mysql_free_result(res);
-	talloc_free(mem_ctx);
-
-	*highest_id = *highest_id + 1;
+	uint64_t id;
+	enum MYSQLRESULT ret;
+	MAPISTORE_RETVAL_IF(!nprops || !nprops->data || !highest_id,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	ret = select_first_uint(nprops->data,
+		"SELECT COALESCE(MAX(mappedId),32768) FROM "NAMEDPROPS_MYSQL_TABLE, &id);
+	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, NULL);
+	MAPISTORE_RETVAL_IF(id >= 0xfffe, MAPISTORE_ERR_NOT_AVAILABLE, NULL);
+	if (id < 0x8000) id = 0x8000;
+	*highest_id = id + 1;
 	return MAPISTORE_SUCCESS;
 }
-
 
 static enum mapistore_error create_id(struct namedprops_context *self,
 				      struct MAPINAMEID nameid,
@@ -163,6 +132,8 @@ static enum mapistore_error create_id(struct namedprops_context *self,
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	result = execute_query(self->data, sql);
 	talloc_free(mem_ctx);
+	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS && mysql_errno(self->data) == ER_DUP_ENTRY,
+		MAPISTORE_ERR_EXIST, NULL);
 	MAPISTORE_RETVAL_IF(result != MYSQL_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, NULL);
 	return MAPISTORE_SUCCESS;
 }
@@ -249,21 +220,73 @@ static enum mapistore_error get_nameid_type(struct namedprops_context *self,
 	return MAPISTORE_SUCCESS;
 }
 
+/* Advisory locks are connection-scoped and must outlive COMMIT/ROLLBACK. */
+#define NAMEDPROPS_LOCK "CONCAT('openchange:namedprops:',MD5(DATABASE()))"
+
+static enum mapistore_error transaction_unlock(struct namedprops_context *self)
+{
+	uint64_t released;
+	my_bool reconnect = true;
+	enum MYSQLRESULT ret;
+	int option_error;
+
+	ret = select_first_uint(self->data, "SELECT RELEASE_LOCK("NAMEDPROPS_LOCK")", &released);
+	option_error = mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect);
+	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS || released != 1 || option_error,
+		MAPISTORE_ERR_DATABASE_OPS, NULL);
+	return MAPISTORE_SUCCESS;
+}
+
 static enum mapistore_error transaction_start(struct namedprops_context *self)
 {
-	MYSQL *conn = self->data;
-	int res = mysql_query(conn, "START TRANSACTION");
-	MAPISTORE_RETVAL_IF(res, MAPISTORE_ERR_DATABASE_OPS, NULL);
+	uint64_t locked;
+	my_bool reconnect = false;
+	enum MYSQLRESULT ret;
+
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	/* A pooled connection must not enter a second transaction recursively. */
+	ret = select_first_uint(self->data,
+		"SELECT COALESCE(IS_USED_LOCK("NAMEDPROPS_LOCK")=CONNECTION_ID(),0)", &locked);
+	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS || locked, MAPISTORE_ERR_DATABASE_OPS, NULL);
+	MAPISTORE_RETVAL_IF(mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect),
+		MAPISTORE_ERR_DATABASE_OPS, NULL);
+	ret = select_first_uint(self->data, "SELECT GET_LOCK("NAMEDPROPS_LOCK",5)", &locked);
+	if (ret != MYSQL_SUCCESS || locked != 1) {
+		/* A result-read failure may occur after the server acquired the lock. */
+		if (ret != MYSQL_SUCCESS) transaction_unlock(self);
+		reconnect = true;
+		mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect);
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
+	}
+	if (mysql_query(self->data, "START TRANSACTION") != 0) {
+		transaction_unlock(self);
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
+	}
 	return MAPISTORE_SUCCESS;
 }
 
 static enum mapistore_error transaction_commit(struct namedprops_context *self)
 {
-	MYSQL *conn = self->data;
-	int res = mysql_query(conn, "COMMIT");
-	MAPISTORE_RETVAL_IF(res, MAPISTORE_ERR_DATABASE_OPS, NULL);
-	return MAPISTORE_SUCCESS;
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(mysql_query(self->data, "COMMIT"), MAPISTORE_ERR_DATABASE_OPS, NULL);
+	return transaction_unlock(self);
 }
+
+static enum mapistore_error transaction_cancel(struct namedprops_context *self)
+{
+	my_bool reconnect = true;
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	if (mysql_query(self->data, "ROLLBACK") != 0) {
+		OC_DEBUG(0, "Named-property rollback failed (error %u, SQLSTATE %.5s); "
+			"a surviving SQL session retains its lock; connection recovery is required",
+			mysql_errno(self->data), mysql_sqlstate(self->data));
+		/* Keep a surviving session's lock; a lost session can reconnect on retry. */
+		mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect);
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
+	}
+	return transaction_unlock(self);
+}
+
 
 static int mapistore_namedprops_mysql_destructor(struct namedprops_context *self)
 {
@@ -401,6 +424,7 @@ enum mapistore_error mapistore_namedprops_mysql_init(TALLOC_CTX *mem_ctx,
 	nprops->get_nameid_type = get_nameid_type;
 	nprops->next_unused_id = next_unused_id;
 	nprops->transaction_commit = transaction_commit;
+	nprops->transaction_cancel = transaction_cancel;
 	nprops->transaction_start = transaction_start;
 
 	nprops->data = conn;

@@ -23,7 +23,7 @@ jobs:
       - run: >-
           apt-get update && apt-get install -y
           git ca-certificates curl build-essential autoconf automake pkg-config
-          flex bison python3-dev samba-dev libmariadb-dev-compat
+          flex bison python3-dev python3-samba python3-mysqldb samba-dev libmariadb-dev-compat
           libmemcached-dev libnanomsg-dev libpopt-dev libparse-yapp-perl
           check libsubunit-dev
       - uses: actions/checkout@v4
@@ -37,15 +37,30 @@ jobs:
       - run: ./autogen.sh && ./configure --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
       - name: Build every default target from source
         run: make -j2 all
+      - name: Check staged installation and removal
+        run: |
+          stage="$RUNNER_TEMP/install-root"
+          make install DESTDIR="$stage" > "$RUNNER_TEMP/install.log" 2>&1
+          python3 script/check_install.py "$stage" > "$RUNNER_TEMP/install.json"
+          make uninstall DESTDIR="$stage" > "$RUNNER_TEMP/uninstall.log" 2>&1
+          test -z "$(find "$stage" \( -type f -o -type l \) -print -quit)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: staged-install-evidence
+          path: |
+            ${{ runner.temp }}/install.json
+            ${{ runner.temp }}/install.log
+            ${{ runner.temp }}/uninstall.log
       - name: Run client tests without a server
         run: |
           make mapitest-install
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapiprofile --newdb --database "$RUNNER_TEMP/profiles.ldb" --ldif setup/profiles
           LD_LIBRARY_PATH=.:mapiproxy ./bin/mapitest --no-server --database "$RUNNER_TEMP/profiles.ldb"
-      - run: make check-mysql-utils
-      - name: Check MySQL failure and pool paths with sanitizers
-        run: make -W testsuite/modernization/mysql_smoke.c -W testsuite/modernization/mysql_backend_smoke.c check-mysql-utils CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
-      - name: Check real MySQL database creation and cleanup
+      - run: make check-namedprops check-mysql-utils
+      - name: Check named properties and MySQL failures with sanitizers
+        run: make -W testsuite/modernization/namedprops_smoke.c -W testsuite/modernization/mysql_smoke.c -W testsuite/modernization/mysql_backend_smoke.c check-namedprops check-mysql-utils CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Check real MySQL creation, concurrent allocation and cleanup
         run: make check-mysql-live
         env:
           OPENCHANGE_TEST_MYSQL_HOST: mariadb

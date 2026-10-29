@@ -1,20 +1,25 @@
 # First test-server milestone
 
-The test server will be used after the local recovery and security preparation
-below, in line with the requested **40% planning milestone**. That percentage is
+Service deployment to the test server follows the local recovery and security
+preparation below, in line with the requested **40% planning milestone**. That percentage is
 an approximate work estimate; it does not certify security or Exchange feature
-coverage. The milestone is **not ready** as of 2026-10-28.
+coverage. The milestone is **not ready** as of 2026-10-29.
+
+Inventory and an isolated source build/staged install can already run on a lab
+host without starting services or provisioning AD. The next steps and storage
+blocker are recorded in [the server lab plan](TEST_LAB_PLAN.md).
 
 ## Acceptance before the first deployment
 
 | Acceptance criterion | Current evidence / remaining work |
 | --- | --- |
 | Build the required server, plugins and storage components from source on a selected, patched OS | Default `make -j2 all` passes from a source-only copy, including libraries, RPC modules, plugins, default servers and clients; patched deployment baseline and storage installation remain pending |
-| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); 30 Python tooling/socket and 25 runtime checks pass with disposable SQL. Complete C/server integration suites remain pending |
+| Select and validate a mailbox content backend | The repository includes the backend loader and named-property/indexing adapters, but no production mailbox backend implementation; external backend selection, build and operation/ownership tests are pending |
+| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); 40 Python tooling checks (one environment-dependent skip) and 28 runtime checks have local passing evidence, with disposable SQL for the runtime validation. Complete C/server integration suites remain pending |
 | Review and test exposed input and authentication boundaries | RPC state isolation, cancellation and pack validation covered; remaining NDR allocation/length handling, default servers, directory/database inputs and cache paths still need review |
 | Resolve or explicitly assess security findings affecting the test configuration | Focused fixes have regression tests; repository-wide review and dependency CVE assessment are incomplete |
-| Prepare reproducible installation, configuration, startup/health checks and teardown for a disposable instance | Pending; no deployment to the user's server has been attempted |
-| Produce a reviewable test build with exact dependency versions, checks run and known limitations | Current recovery report exists; complete test-server artifact pending |
+| Prepare reproducible installation, configuration, startup/health checks and teardown for a disposable instance | Local DESTDIR installation, module/CLI/template checks and removal are covered; disposable AD/storage configuration, startup and live health checks remain pending; no deployment to the user's server has been attempted |
+| Produce a reviewable test build with exact dependency versions, checks run and known limitations | Staged install hashes and runtime/removal reports are available; exact patched deployment baseline and complete test-server artifact remain pending |
 
 After these criteria are met, the first server test should establish real AD
 provisioning, RPC authentication, mailbox operations and notification behavior.
@@ -78,8 +83,13 @@ upgrade/restore validation beyond this first test milestone.
   transactions roll back. Focused native/sanitizer tests and a private real
   MariaDB check pass. Named property creation/lookup escape client names and
   validate returned IDs; shared result readers handle allocation/fetch failures
-  and single-value result shapes. Full SQL and storage integration review
-  remains pending.
+  and single-value result shapes. Named-property transactions now serialize
+  cooperating writers per SQL database, repeat lookups after waiting and reject
+  silent reconnect during writes. Isolated tests and a private MariaDB check
+  cover concurrent allocation, rollback and connection loss. Full SQL and
+  storage integration review remains pending. Schema version 3 adds Unicode
+  property-name identity and database UNIQUE constraints; ambiguous legacy IDs
+  stop the upgrade. See [the upgrade procedure](NAMED_PROPERTIES_UPGRADE.md).
 
 These changes are not a complete security audit. The remaining native parser
 and server paths are part of the acceptance work above.
@@ -91,14 +101,38 @@ The local investigation uses Samba libraries from Debian package
 successful ABI check or an upstream version string does not prove that a
 distribution package has all applicable security fixes.
 
-On 2026-10-28 the [Debian Samba security tracker](https://security-tracker.debian.org/tracker/source-package/samba)
-lists `2:4.22.11+dfsg-0+deb13u1` in trixie and
-`2:4.22.10+dfsg-0+deb13u2` in trixie-security, and still lists an open
-`pam_winbind` issue, CVE-2026-15779. Its relevance depends on the deployment
-configuration and must be assessed before installation. Check the exact package
-versions and current applicable advisories again for the test server's chosen
-OS; this report does not approve the full dependency stack as secure.
+Checked again on 2026-10-29, the
+[Debian Samba tracker](https://security-tracker.debian.org/tracker/source-package/samba)
+lists `2:4.22.11+dfsg-0+deb13u1` in Trixie and
+`2:4.22.10+dfsg-0+deb13u2` in Trixie security.
+[DSA-6401-1](https://security-tracker.debian.org/tracker/DSA-6401-1) records the
+latter as the Trixie fixed version for that advisory.
+[CVE-2026-15779](https://security-tracker.debian.org/tracker/CVE-2026-15779)
+remains open for `pam_winbind` home-directory creation; applicability must be
+assessed on the actual host. The initial lab design does not enable that feature.
+The newer [CVE-2026-109411](https://security-tracker.debian.org/tracker/CVE-2026-109411)
+is recorded as not affecting Trixie. These observations do not approve the full
+dependency stack. Verify actual installed/candidate package revisions and current
+applicable advisories for the selected OS before starting services.
 
 See [the modernization report](MODERNIZATION.md) for build commands and the
 current blockers. Server OS, resources, network layout and client versions will
 be collected when preparing that deployment, rather than assumed now.
+
+## Installation preparation (2026-10-29)
+
+The native installer now creates SONAME links without requiring a host loader
+cache update, keeps OpenChange AD templates in its own data directory and removes
+its administrative commands, async module, generated headers and Nagios script
+on uninstall. `script/check_install.py` checks trusted staged output, loads the
+installed libraries/modules and runs CLI help and template discovery from an
+empty directory. It records file hashes and rejects incomplete or escaping
+layouts before loading code. A fresh source-only local build passes compilation,
+focused named-property/MySQL/EMSMDB checks, all 11 installed runtime checks and
+removal with zero files/symlinks left. The Python tooling suite passes 39 tests
+with one environment-dependent skip. See [the staged-install procedure](TEST_INSTALL.md).
+
+This is installation-layout evidence. No Samba service was started, no AD
+schema was provisioned and no host configuration was changed. The live server,
+patched dependency review and full security/integration criteria above remain
+open; this work does not establish the 40% milestone.

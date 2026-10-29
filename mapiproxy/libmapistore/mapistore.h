@@ -414,6 +414,7 @@ enum mapistore_error mapistore_namedprops_get_nameid(struct namedprops_context *
 enum mapistore_error mapistore_namedprops_get_nameid_type(struct namedprops_context *, uint16_t, uint16_t *);
 enum mapistore_error mapistore_namedprops_transaction_start(struct namedprops_context *);
 enum mapistore_error mapistore_namedprops_transaction_commit(struct namedprops_context *);
+enum mapistore_error mapistore_namedprops_transaction_cancel(struct namedprops_context *);
 
 
 /* definitions from mapistore_notification.c */

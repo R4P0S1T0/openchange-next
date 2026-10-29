@@ -229,9 +229,7 @@ libmapi-installlib:
 	$(INSTALL) -d $(DESTDIR)$(libdir)
 	$(INSTALL) -m 0755 libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapi.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
-endif
 
 libmapi-installheader:
 	@echo "[*] install: libmapi headers"
@@ -281,6 +279,7 @@ libmapi-uninstallheader:
 	rm -rf $(DESTDIR)$(includedir)/libmapi
 	rm -f $(DESTDIR)$(includedir)/gen_ndr/exchange.h
 	rm -f $(DESTDIR)$(includedir)/gen_ndr/asyncemsmdb.h
+	rm -f $(DESTDIR)$(includedir)/gen_ndr/ndr_exchange.h $(DESTDIR)$(includedir)/gen_ndr/ndr_property.h $(DESTDIR)$(includedir)/gen_ndr/ndr_asyncemsmdb.h
 	rm -f $(DESTDIR)$(includedir)/gen_ndr/property.h
 
 libmapi-uninstallscript:
@@ -444,9 +443,7 @@ libmapixx-installlib:
 	$(INSTALL) -d $(DESTDIR)$(libdir)
 	$(INSTALL) -m 0755 libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapipp.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION)
-endif
 
 libmapixx-uninstallheader:
 	rm -rf $(DESTDIR)$(includedir)/libmapi++
@@ -596,9 +593,7 @@ libmapiadmin-installlib:
 	$(INSTALL) -d $(DESTDIR)$(libdir)
 	$(INSTALL) -m 0755 libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiadmin.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapiadmin.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiadmin.$(SHLIBEXT).$(LIBMAPIADMIN_SO_VERSION)
-endif
 
 libmapiadmin-installheader:
 	@echo "[*] install: libmapiadmin headers"
@@ -671,9 +666,7 @@ libocpf-installlib:
 	$(INSTALL) -d $(DESTDIR)$(libdir)
 	$(INSTALL) -m 0755 libocpf.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libocpf.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libocpf.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libocpf.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libocpf.$(SHLIBEXT).$(LIBOCPF_SO_VERSION)
-endif
 
 libocpf-installheader:
 	@echo "[*] install: libocpf headers"
@@ -752,6 +745,7 @@ mapiproxy-uninstall: 	mapiproxy-modules-uninstall		\
 			libmapiserver-uninstall			\
 			libmapistore-uninstall
 	rm -f $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)/dcesrv_mapiproxy.*
+	rm -f $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)/dcesrv_asyncemsmdb.$(SHLIBEXT)
 	rm -f $(DESTDIR)$(libdir)/libmapiproxy.*
 	rm -f $(DESTDIR)$(includedir)/libmapiproxy.h
 
@@ -806,11 +800,10 @@ libmapiproxy: 	mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)	\
 		libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION)
 
 libmapiproxy-install:
+	$(INSTALL) -d $(DESTDIR)$(libdir) $(DESTDIR)$(libdir)/pkgconfig $(DESTDIR)$(includedir)
 	$(INSTALL) -m 0755 mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiproxy.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION)
-endif
 	$(INSTALL) -m 0644 mapiproxy/libmapiproxy/libmapiproxy.h $(DESTDIR)$(includedir)/
 	$(INSTALL) -m 0644 mapiproxy/libmapiproxy.pc $(DESTDIR)$(libdir)/pkgconfig
 
@@ -870,11 +863,10 @@ libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION): mapiproxy/libmapiproxy.$(SH
 libmapiserver: mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION)
 
 libmapiserver-install:
+	$(INSTALL) -d $(DESTDIR)$(libdir) $(DESTDIR)$(libdir)/pkgconfig $(DESTDIR)$(includedir)
 	$(INSTALL) -m 0755 mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiserver.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION)
-endif
 	$(INSTALL) -m 0644 mapiproxy/libmapiserver/libmapiserver.h $(DESTDIR)$(includedir)/
 	$(INSTALL) -m 0644 mapiproxy/libmapiserver.pc $(DESTDIR)$(libdir)/pkgconfig
 	@$(SED) $(DESTDIR)$(includedir)/*.h
@@ -954,11 +946,10 @@ libmapistore-installpc:
 	$(INSTALL) -m 0644 mapiproxy/libmapistore.pc $(DESTDIR)$(libdir)/pkgconfig
 
 libmapistore-install:	$(OC_MAPISTORE_INSTALL)
+	$(INSTALL) -d $(DESTDIR)$(libdir) $(DESTDIR)$(libdir)/pkgconfig
 	$(INSTALL) -m 0755 mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
 	ln -sf libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapistore.$(SHLIBEXT)
-ifeq ($(MANUALLY_CREATE_SYMLINKS), yes)
 	ln -sf libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapistore.$(SHLIBEXT).$(LIBMAPISTORE_SO_VERSION)
-endif
 	$(INSTALL) -d $(DESTDIR)$(includedir)/mapistore
 	$(INSTALL) -m 0644 mapiproxy/libmapistore/mapistore.h $(DESTDIR)$(includedir)/mapistore/
 	$(INSTALL) -m 0644 mapiproxy/libmapistore/mapistore_errors.h $(DESTDIR)$(includedir)/mapistore/
@@ -1107,7 +1098,6 @@ mapiproxy/modules/mpm_dummy.$(SHLIBEXT): mapiproxy/modules/mpm_dummy.po
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 
-samba_setupdir = $(shell $(PYTHON) -c 'import samba; print samba.param.setup_dir();')
 
 ####################
 # mapiproxy servers
@@ -1119,26 +1109,18 @@ provision-install: python-install
 	$(INSTALL) -m 0755 setup/openchange_newuser $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_neworganization $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_group $(DESTDIR)$(sbindir)/
-	$(INSTALL) -d $(DESTDIR)$(samba_setupdir)/AD
-	$(INSTALL) -m 0644 setup/AD/oc_provision* $(DESTDIR)$(samba_setupdir)/AD/
-	$(INSTALL) -m 0644 setup/AD/prefixMap.txt $(DESTDIR)$(samba_setupdir)/AD/
-	$(INSTALL) -m 0644 setup/AD/provision_schema_basedn_modify.ldif $(DESTDIR)$(samba_setupdir)/AD/
-	$(INSTALL) -m 0644 setup/AD/update_now.ldif $(DESTDIR)$(samba_setupdir)/AD/
+	$(INSTALL) -d $(DESTDIR)$(datadir)/setup/AD
+	$(INSTALL) -m 0644 setup/AD/oc_provision* $(DESTDIR)$(datadir)/setup/AD/
+	$(INSTALL) -m 0644 setup/AD/prefixMap.txt $(DESTDIR)$(datadir)/setup/AD/
+	$(INSTALL) -m 0644 setup/AD/provision_schema_basedn_modify.ldif $(DESTDIR)$(datadir)/setup/AD/
+	$(INSTALL) -m 0644 setup/AD/update_now.ldif $(DESTDIR)$(datadir)/setup/AD/
 	$(INSTALL) -d $(DESTDIR)$(datadir)/setup
 	$(INSTALL) -d $(DESTDIR)$(datadir)/setup/openchangedb
 	$(INSTALL) -m 0644 setup/openchangedb/oc_provision* $(DESTDIR)$(datadir)/setup/openchangedb/
 
 provision-uninstall: python-uninstall
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_configuration.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_configuration_finalize.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_configuration_new_server.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_configuration_as_main.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_configuration_as_main-disabled.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_schema.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_schema_modify.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/oc_provision_schema_ADSC.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/update_now.ldif
-	rm -f $(DESTDIR)$(samba_setupdir)/AD/prefixMap.txt
+	rm -f $(DESTDIR)$(sbindir)/openchange_provision $(DESTDIR)$(sbindir)/openchange_migrate
+	rm -f $(DESTDIR)$(sbindir)/openchange_newuser $(DESTDIR)$(sbindir)/openchange_neworganization $(DESTDIR)$(sbindir)/openchange_group
 	rm -rf $(DESTDIR)$(datadir)/setup/AD
 	rm -rf $(DESTDIR)$(datadir)/setup/openchangedb
 
@@ -1925,6 +1907,11 @@ installnagios:
 
 install:: installnagios
 
+uninstallnagios:
+	rm -f $(DESTDIR)$(nagiosdir)/check_exchange
+
+uninstall:: uninstallnagios
+
 ###################
 # libmapi examples
 ###################
@@ -2127,3 +2114,11 @@ bin/mysql-live-check: testsuite/modernization/mysql_live_smoke.c mapiproxy/util/
 bin/mysql-backend-check: testsuite/modernization/mysql_backend_smoke.c mapiproxy/util/mysql.c mapiproxy/libmapiproxy/backends/openchangedb_mysql.c mapiproxy/libmapistore/backends/indexing_mysql.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -ffunction-sections -fdata-sections -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=_talloc_zero libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MYSQL_LIBS)
+
+.PHONY: check-namedprops
+check-namedprops: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/namedprops-check
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/namedprops-check
+
+bin/namedprops-check: testsuite/modernization/namedprops_smoke.c mapiproxy/servers/default/emsmdb/oxcprpt.c mapiproxy/libmapistore/backends/namedprops_ldb.c mapiproxy/libmapistore/mapistore_namedprops.c mapiproxy/libmapistore/backends/namedprops_backend.h mapiproxy/libmapiserver/libmapiserver_oxcprpt.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)

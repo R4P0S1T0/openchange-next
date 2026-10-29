@@ -46,7 +46,7 @@ class InitialIndexingMigration(Migration):
                          `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
                          `type` TINYINT(1) NOT NULL,
                          `propType` INT(10) unsigned NOT NULL,
-                         `oleguid` VARCHAR(255) NOT NULL,
+                         `oleguid` VARCHAR(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
                          `mappedId` INT(10) unsigned NOT NULL,
                          `propId` INT(10) unsigned DEFAULT NULL,
                          `propName` VARCHAR(255) DEFAULT NULL,
@@ -56,7 +56,7 @@ class InitialIndexingMigration(Migration):
                          KEY `named_properties_nappedId` (`mappedId`),
                          KEY `named_properties_type_oleguid_propId` (`type`,`oleguid`,`propId`),
                          KEY `named_properties_type_oleguid_propName` (`type`,`oleguid`,`propName`)
-                      ) ENGINE=InnoDB CHARSET=utf8""")
+                      ) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_bin""")
 
     @classmethod
     def unapply(cls, cur):
@@ -91,37 +91,73 @@ class InitialDataMigration(Migration):
 
     @classmethod
     def _insert_named_property(cls, cur, p):
-        fields = []
-
-        # Mandatory fields
         mandatory_keys = ('type', 'propType', 'oleguid', 'mappedId')
-        for mandatory_key in mandatory_keys:
-            if mandatory_key not in p:
-                return
-            # All of them are integers but oleguid
-            if mandatory_key == 'oleguid':
-                fields.append("%s='%s'" % (mandatory_key, p[mandatory_key]))
-            else:
-                fields.append("%s=%d" % (mandatory_key, p[mandatory_key]))
-
-        if cls._already_inserted(cur, p):
-            # Property already on the database. This will happen in upgrades
+        if any(key not in p for key in mandatory_keys):
             return
-
-        # Optional fields
-        optional_keys = ('propId', 'propName', 'oom', 'canonical')
-        for optional_key in optional_keys:
-            if optional_key not in p:
-                continue
-            # All of them are strings but propId
-            if optional_key == 'propId':
-                fields.append("%s=%d" % (optional_key, p[optional_key]))
-            else:
-                fields.append("%s='%s'" % (optional_key, p[optional_key]))
-
-        sql = "INSERT named_properties SET %s" % ",".join(fields)
-        cur.execute(sql)
+        if cls._already_inserted(cur, p):
+            return
+        fields = list(mandatory_keys)
+        fields += [key for key in ('propId', 'propName', 'oom', 'canonical')
+                   if key in p and not (key == 'propId' and p['type'] == 1)]
+        cur.execute("INSERT INTO named_properties ({}) VALUES ({})".format(
+            ','.join(fields), ','.join(['%s'] * len(fields))),
+            tuple(p[key] for key in fields))
 
     @classmethod
     def unapply(cls, cur):
         cur.execute("DELETE FROM named_properties")
+
+
+@migration('named_properties', 3)
+class ExactNamesAndUniqueIdsMigration(Migration):
+
+    description = 'UTF-8 names and unique named-property mappings'
+
+    @classmethod
+    def apply(cls, cur, **kwargs):
+        cur.execute("SELECT GET_LOCK(CONCAT('openchange:namedprops:',MD5(DATABASE())),5)")
+        if cur.fetchone()[0] != 1:
+            raise RuntimeError('Cannot lock named properties for schema migration')
+        try:
+            # Never repair ambiguous mappings by renumbering stored property IDs.
+            for columns, condition in (
+                    ('mappedId', '1=1'),
+                    ('type,LOWER(oleguid),propId', 'type=0'),
+                    ('type,LOWER(oleguid),BINARY propName', 'type=1')):
+                cur.execute("SELECT 1 FROM named_properties WHERE {} GROUP BY {} "
+                            "HAVING COUNT(*)>1 LIMIT 1".format(condition, columns))
+                if cur.fetchone():
+                    raise ValueError('Duplicate named-property mappings; repair requires a mailbox-aware migration')
+            cur.execute("SELECT 1 FROM named_properties WHERE type NOT IN (0,1) "
+                        "OR mappedId<32768 OR mappedId>65534 "
+                        "OR (type=0 AND (propId IS NULL OR propName IS NOT NULL)) "
+                        "OR (type=1 AND (propName IS NULL OR COALESCE(propId,0)<>0)) LIMIT 1")
+            if cur.fetchone():
+                raise ValueError('Invalid named-property mappings; schema migration stopped')
+            # Older seed generators used zero for the inactive numeric arm.
+            cur.execute("UPDATE named_properties SET propId=NULL WHERE type=1 AND propId=0")
+            cur.execute("""ALTER TABLE named_properties
+                DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin,
+                MODIFY oleguid VARCHAR(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+                MODIFY propName VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                MODIFY oom VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                MODIFY canonical VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                ADD UNIQUE KEY named_properties_unique_mappedId (mappedId),
+                ADD UNIQUE KEY named_properties_unique_lid (type,oleguid,propId),
+                ADD UNIQUE KEY named_properties_unique_name (type,oleguid,propName),
+                ADD CONSTRAINT named_properties_valid_kind CHECK (
+                    mappedId BETWEEN 32768 AND 65534 AND (
+                    (type=0 AND propId IS NOT NULL AND propName IS NULL) OR
+                    (type=1 AND propId IS NULL AND propName IS NOT NULL)))""")
+        finally:
+            cur.execute("SELECT RELEASE_LOCK(CONCAT('openchange:namedprops:',MD5(DATABASE())))")
+            cur.fetchone()
+
+    @classmethod
+    def unapply(cls, cur):
+        # Keep UTF-8 capability on rollback: utf8mb3 cannot preserve four-byte names.
+        cur.execute("""ALTER TABLE named_properties
+            DROP CONSTRAINT named_properties_valid_kind,
+            DROP INDEX named_properties_unique_mappedId,
+            DROP INDEX named_properties_unique_lid,
+            DROP INDEX named_properties_unique_name""")

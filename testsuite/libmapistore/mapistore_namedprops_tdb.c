@@ -141,7 +141,7 @@ START_TEST (test_get_mapped_id_not_found) {
 	struct MAPINAMEID nameid = {0};
 	uint16_t prop;
 
-	ck_assert_int_eq(get_mapped_id(g_nprops, nameid, &prop), MAPISTORE_ERROR);
+	ck_assert_int_eq(get_mapped_id(g_nprops, nameid, &prop), MAPISTORE_ERR_NOT_FOUND);
 } END_TEST
 
 START_TEST (test_get_nameid_type) {
@@ -154,14 +154,9 @@ START_TEST (test_get_nameid_type) {
 	get_nameid_type(g_nprops, 37975, &prop_type);
 	ck_assert_int_eq(prop_type, PT_UNICODE);
 
-	/* mappedId should be unique? It's not
-	$ grep mappedId mapistore_namedprops.ldif | sort | uniq -c | grep "2 "
-		2 mappedId: 37097
-		2 mappedId: 37287
-		2 mappedId: 37452
-	ret = get_nameid_type(nprops, 37097, &prop_type);
-	ck_assert_int_eq(ret, MAPISTORE_SUCCESS);
-	ck_assert_int_eq(prop_type, PT_LONG);*/
+	retval = get_nameid_type(g_nprops, 37097, &prop_type);
+	ck_assert_int_eq(retval, MAPISTORE_SUCCESS);
+	ck_assert_int_eq(prop_type, PT_LONG);
 
 	retval = get_nameid_type(g_nprops, 37090, &prop_type);
 	ck_assert_int_eq(retval, MAPISTORE_SUCCESS);

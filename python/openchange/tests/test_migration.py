@@ -44,6 +44,7 @@ class MigrationDBTests(unittest.TestCase):
         self.addCleanup(setattr, MigrationManager, 'migrations', original_migrations)
         options = {
             'user': os.environ.get('OPENCHANGE_TEST_MYSQL_USER', 'root'),
+            'charset': 'utf8mb4',
             'passwd': os.environ.get('OPENCHANGE_TEST_MYSQL_PASSWORD', ''),
         }
         if os.environ.get('OPENCHANGE_TEST_MYSQL_SOCKET'):
@@ -126,6 +127,94 @@ class MigrationDBTests(unittest.TestCase):
                     cursor.close()
                 self.assertTrue(manager.migrate(app, 0))
                 self.assertIsNone(manager.version(app))
+
+    def named_properties_manager(self, version):
+        MigrationManager.migrations = self.builtin_migrations
+        manager = MigrationManager(self.db, self.db_name, 'test_migrations')
+        manager.migrate('named_properties', version)
+        return manager
+
+    def test_named_properties_unicode_identity_and_uniqueness(self):
+        manager = self.named_properties_manager(1)
+        cur = self.db.cursor()
+        # Reproduce the charset/collation of an existing version-2 installation.
+        cur.execute("ALTER TABLE named_properties CONVERT TO CHARACTER SET utf8 COLLATE utf8_general_ci")
+        guid = '00112233-4455-6677-8899-aabbccddeeff'
+        cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId,propName) "
+                    "VALUES (1,1,%s,40000,0,'existing')", (guid,))
+        self.db.commit()
+        # Mark the seed import complete without inserting its fixtures in this test.
+        manager.apply_version('named_properties', 2)
+        manager.migrate('named_properties')
+        cur.execute("SHOW FULL COLUMNS FROM named_properties WHERE Field='propName'")
+        self.assertEqual(cur.fetchone()[2], 'utf8mb4_bin')
+        cur.execute("SHOW FULL COLUMNS FROM named_properties WHERE Field='oleguid'")
+        self.assertEqual(cur.fetchone()[2], 'ascii_general_ci')
+        cur.execute("SELECT propId FROM named_properties WHERE mappedId=40000")
+        self.assertIsNone(cur.fetchone()[0])
+        names = ('X-Foo', 'x-foo', 'cafe', 'café', 'emoji 😀')
+        for offset, name in enumerate(names):
+            cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propName) "
+                        "VALUES (1,1,%s,%s,%s)", (guid, 40001 + offset, name))
+        for offset, name in enumerate(names):
+            cur.execute("SELECT mappedId FROM named_properties WHERE type=1 AND oleguid=%s AND propName=%s",
+                        (guid, name))
+            self.assertEqual(cur.fetchall(), ((40001 + offset,),))
+        cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId) "
+                    "VALUES (0,1,%s,40010,42)", (guid,))
+        for kind, mapped, lid, name in ((1,41000,None,'X-Foo'), (1,40001,None,'other'),
+                                         (0,41000,42,None)):
+            with self.subTest(kind=kind, mapped=mapped), self.assertRaises(MySQLdb.IntegrityError) as error:
+                cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId,propName) "
+                            "VALUES (%s,1,%s,%s,%s,%s)", (kind,guid,mapped,lid,name))
+            self.assertEqual(error.exception.args[0], 1062)
+        with self.assertRaises(MySQLdb.IntegrityError):
+            cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propName) "
+                        "VALUES (1,1,%s,41002,'X-Foo')", (guid.upper(),))
+        with self.assertRaises(MySQLdb.Error):
+            cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId,propName) "
+                        "VALUES (1,1,%s,41001,42,'invalid arm')", (guid,))
+        self.db.commit()
+        manager.migrate('named_properties', 2)
+        cur.execute("SELECT propName FROM named_properties WHERE mappedId=40005")
+        self.assertEqual(cur.fetchone()[0], 'emoji 😀')
+        manager.migrate('named_properties', 3)
+        self.assertEqual(manager.version('named_properties'), 3)
+
+    def test_named_properties_migration_refuses_ambiguous_ids(self):
+        manager = self.named_properties_manager(1)
+        cur = self.db.cursor()
+        guid = '00112233-4455-6677-8899-aabbccddeeff'
+        for lid in (1,2):
+            cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId) "
+                        "VALUES (0,1,%s,40000,%s)", (guid,lid))
+        self.db.commit()
+        manager.apply_version('named_properties', 2)
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            manager.migrate('named_properties')
+        self.assertEqual(manager.version('named_properties'), 2)
+        cur.execute("SELECT mappedId,propId FROM named_properties ORDER BY propId")
+        self.assertEqual(cur.fetchall(), ((40000,1),(40000,2)))
+        cur.execute("SELECT IS_USED_LOCK(CONCAT('openchange:namedprops:',MD5(DATABASE())))")
+        self.assertIsNone(cur.fetchone()[0])
+
+    def test_named_properties_migration_refuses_duplicate_identities(self):
+        manager = self.named_properties_manager(1)
+        cur = self.db.cursor()
+        manager.apply_version('named_properties', 2)
+        for kind, lid, name in ((0,42,None), (1,0,'same')):
+            with self.subTest(kind=kind):
+                cur.execute('DELETE FROM named_properties')
+                for mapped in (40000,40001):
+                    cur.execute("INSERT INTO named_properties (type,propType,oleguid,mappedId,propId,propName) "
+                                "VALUES (%s,1,'00112233-4455-6677-8899-aabbccddeeff',%s,%s,%s)",
+                                (kind,mapped,lid,name))
+                self.db.commit()
+                with self.assertRaisesRegex(ValueError, 'Duplicate'):
+                    manager.migrate('named_properties')
+                self.assertEqual(manager.version('named_properties'), 2)
+                cur.execute('SELECT mappedId,propId FROM named_properties ORDER BY mappedId')
+                self.assertEqual(cur.fetchall(), ((40000,lid),(40001,lid)))
 
     def test_version(self):
         manager = MigrationManager(self.db, self.db_name, 'test_migrations')

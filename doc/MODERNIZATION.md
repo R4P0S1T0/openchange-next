@@ -811,6 +811,12 @@ Remaining ROP implementation, directory/schema, cache identity/integrity and
 storage-backend paths still require review; these focused changes do not certify
 the server as secure.
 
+The [server lab plan](TEST_LAB_PLAN.md) permits inventory and staged source-build
+checks on the target host now, while service deployment remains gated. This
+checkout has no production mailbox content backend: its named-property/indexing
+adapters are metadata services, and the external backend must be selected and
+qualified before functional mailbox tests.
+
 Other unfinished work:
 
 - Python C extension bindings in `pyopenchange/` still use Python 2 APIs;
@@ -830,6 +836,100 @@ MariaDB was started there with `--skip-networking`, solely for SQL tests. This
 instance was shut down after validation. Download caches were moved under
 `.build/tool-cache` to recover space in `/tmp`. The temporary dependency prefix
 is an investigation aid, not a distributable server environment.
+
+## Named-property transaction recovery (2026-10-29)
+
+`GetPropertyIdsFromNames` now rejects invalid flags and malformed names, checks
+creation failures, and cancels active transactions when lookup, allocation or
+commit fails. It returns a protocol error on ID exhaustion instead of aborting
+or wrapping the ID. Error replies publish no partial ID array. Both LDB and SQL
+backends expose cancellation and bound allocation to 0x8001–0xfffe.
+
+LDB lookup escapes filter literals and distinguishes a missing mapping from
+backend errors and duplicate rows. LDB creation constructs messages with escaped
+DN components and literal attribute values, replacing interpolated LDIF input.
+
+`make check-namedprops` exercises the actual ROP, interface and LDB backend using
+a disposable local database and injected transaction failures. The SQL driver
+harness in `make check-mysql-utils` also checks allocation boundaries and
+start/commit/rollback commands. The named-property and SQL utility harnesses
+pass locally with AddressSanitizer, UndefinedBehaviorSanitizer and default leak
+detection; `make check-emsmdb` also passes natively.
+
+SQL named-property transactions now acquire a database-scoped advisory lock
+with a five-second acquisition timeout, hold it through commit/rollback and
+release it explicitly. Recursive use of the same pooled connection is rejected.
+Automatic reconnect is disabled while the transaction holds its lock; a lost
+connection cannot silently continue outside that transaction. Failed rollback
+keeps a surviving session's lock, while reconnect is restored for a later retry.
+The ROP repeats its lookup after acquiring the transaction, so a writer that
+waited uses an existing mapping instead of inserting a duplicate.
+
+The live SQL harness passes against a private MariaDB 11.8.6 instance with TCP
+disabled. Two independent connections exercise allocation from an empty table,
+visibility of the first writer's mapping and distinct subsequent IDs. Killing
+a connection during a write verifies rollback, commit failure and later retry.
+The live check also passes with address/undefined sanitizers and default leak
+detection. The temporary server was shut down after validation.
+The test supports `OPENCHANGE_TEST_MYSQL_SOCKET` as well as an explicit host.
+
+These locks coordinate writers using this backend on one SQL server. External
+writers must follow the same locking protocol; multi-primary/failover behavior,
+threaded sharing of pooled connections, real server/Outlook and complete storage
+integration remain unvalidated. Lock ownership and release follow the
+[MariaDB advisory-lock contract](https://mariadb.com/docs/server/reference/sql-functions/secondary-functions/miscellaneous-functions/get_lock).
+
+## Staged installation preparation (2026-10-29)
+
+The default installer now creates all seven SONAME links on Linux as well as
+other supported platforms, without relying on `ldconfig`. AD templates are
+installed beside the other OpenChange setup data rather than in Samba's own
+tree. This removes a Python 2-only discovery command from the Makefile and
+matches the installed `find_setup_dir()` search. Standalone support-library
+install rules create their output directories. Uninstall removes all installed
+administrative commands, both RPC modules, generated headers and the Nagios
+script.
+
+`script/check_install.py` inventories a trusted DESTDIR tree with SHA-256 hashes
+and link targets, validates installed AD/mailbox templates against the source,
+loads seven libraries and nine modules and runs four native and five Python
+administrative help commands. It verifies installed Python and template lookup
+from an empty working directory. Nine tooling tests cover inventory, missing or
+duplicate libraries, bad links, special files, altered templates and runtime
+failure. Native CI now performs installation, these runtime checks and removal,
+and uploads the JSON/report logs. CI needs Python Samba and MySQLdb bindings for
+these checks. See [the staged-install guide](TEST_INSTALL.md).
+
+Local validation passes from a fresh source-only copy: bootstrap/configure,
+`make -j2 all`, named-property/MySQL/EMSMDB checks, full staged install, all 11
+installed runtime checks and uninstall with zero remaining files or symlinks.
+The Python tooling suite reports 39 tests, with one environment-dependent skip.
+No generated files or compiled libraries were copied into that build.
+
+This does not validate server startup, actual provisioning, network RPC,
+Outlook, the Nagios plugin or an operating/deployment configuration. Dependency
+security review and storage integration remain required before server testing.
+
+## Named-property review follow-up (2026-10-29)
+
+SQL migration version 3 gives property names `utf8mb4_bin` identity, preserves
+GUID case equivalence, normalizes the inactive string-property numeric arm to
+NULL, adds three UNIQUE keys and checks property kinds/ID bounds. It rejects
+existing ambiguous mappings before changing data. Three conflicting IDs in the
+shared default seed are corrected for new databases; existing stores are never
+renumbered automatically. Upgrade and recovery details are in
+[Named-property schema version 3](NAMED_PROPERTIES_UPGRADE.md).
+
+Duplicate SQL inserts report an existing mapping, and the ROP re-fetches the
+winner with a current locking read. A collision involving a different name
+fails safely. Failed rollback now logs the retained-lock state and driver status;
+closing a borrowed pooled MYSQL pointer without coordinating its users remains
+unsafe, so automatic pool-wide invalidation is not claimed.
+
+The new regression checks exercise actual SQL migration, Unicode/case/accent
+identity, constraints, ambiguous legacy data, duplicate inserts and seed
+uniqueness. These changes do not implement mailbox storage or modern Outlook
+transports.
 
 ## Planning estimate
 

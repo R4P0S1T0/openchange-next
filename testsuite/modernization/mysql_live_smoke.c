@@ -1,4 +1,18 @@
 /* Explicit, disposable SQL endpoint only; unique databases are removed after use. */
+#include "mapiproxy/util/mysql.h"
+#include <sys/wait.h>
+#include <signal.h>
+#include <poll.h>
+
+/* Route all test connections, including pooled ones, to the explicit socket. */
+static MYSQL *test_connect(MYSQL *connection, const char *host, const char *user,
+    const char *password, const char *database, unsigned port, const char *socket, unsigned long flags)
+{
+    const char *test_socket = getenv("OPENCHANGE_TEST_MYSQL_SOCKET");
+    return mysql_real_connect(connection, host, user, password, database, port,
+        test_socket && *test_socket ? test_socket : socket, flags);
+}
+#define mysql_real_connect test_connect
 #include "mapiproxy/util/mysql.c"
 #include <unistd.h>
 #include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
@@ -53,14 +67,15 @@ static bool named_properties_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
 {
     struct namedprops_context backend = { .data = connection };
     struct MAPINAMEID name = { .ulKind = MNID_STRING };
-    const char *values[] = {"name'", "backslash\\' OR 1=1 --", "caf\xc3\xa9", "emoji \xf0\x9f\x98\x80"};
-    const unsigned sizes[] = {12, 44, 10, 18};
+    const char *values[] = {"name'", "backslash\\' OR 1=1 --", "caf\xc3\xa9", "emoji \xf0\x9f\x98\x80", "X-Foo", "x-foo", "cafe"};
+    const unsigned sizes[] = {12, 44, 10, 18, 12, 12, 10};
     uint16_t mapped, type;
     struct MAPINAMEID *decoded;
     name.lpguid = GUID_random();
     if (mysql_query(connection, "CREATE TABLE named_properties (`type` INT, propType INT, "
-        "oleguid VARCHAR(36), mappedId INT UNSIGNED, propId BIGINT UNSIGNED, propName TEXT) "
-        "CHARACTER SET utf8mb4") != 0) return false;
+        "oleguid VARCHAR(36) NOT NULL, mappedId INT UNSIGNED NOT NULL, propId BIGINT UNSIGNED, propName VARCHAR(255), "
+        "UNIQUE(mappedId), UNIQUE(type,oleguid,propId), UNIQUE(type,oleguid,propName)) "
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin") != 0) return false;
     for (size_t j = 0; j < sizeof(values) / sizeof(values[0]); j++) {
         name.kind.lpwstr.Name = values[j];
         if (create_id(&backend, name, 32768 + j) != MAPISTORE_SUCCESS ||
@@ -73,6 +88,12 @@ static bool named_properties_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
         talloc_free(decoded);
         if (get_nameid_type(&backend, mapped, &type) != MAPISTORE_SUCCESS || type != PT_NULL) return false;
     }
+    name.kind.lpwstr.Name = "X-Foo";
+    if (create_id(&backend, name, 42000) != MAPISTORE_ERR_EXIST ||
+        get_mapped_id(&backend, name, &mapped) != MAPISTORE_SUCCESS || mapped != 32772) return false;
+    name.kind.lpwstr.Name = "another name";
+    if (create_id(&backend, name, 32772) != MAPISTORE_ERR_EXIST ||
+        get_mapped_id(&backend, name, &mapped) != MAPISTORE_ERR_NOT_FOUND) return false;
     name.kind.lpwstr.Name = "missing' OR 1=1 --";
     if (get_mapped_id(&backend, name, &mapped) != MAPISTORE_ERR_NOT_FOUND) return false;
     name.ulKind = MNID_ID; name.kind.lid = UINT32_MAX;
@@ -83,6 +104,84 @@ static bool named_properties_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
         GUID_equal(&name.lpguid, &decoded->lpguid);
     talloc_free(decoded);
     return valid;
+}
+
+static bool named_properties_concurrency(MYSQL *connection, const char *database,
+    const char *host, const char *user, const char *password, unsigned port)
+{
+    struct namedprops_context backend = { .data = connection };
+    struct MAPINAMEID shared = { .ulKind = MNID_ID, .kind.lid = 42 };
+    uint16_t id;
+    int ready[2], status;
+    pid_t child;
+    bool success = false, active = false;
+    char byte;
+    if (mysql_query(connection, "DELETE FROM named_properties") || pipe(ready)) return false;
+    if (transaction_start(&backend) != MAPISTORE_SUCCESS) goto pipes;
+    active = true;
+    child = fork();
+    if (child < 0) goto pipes;
+    if (child == 0) {
+        MYSQL *second = mysql_init(NULL);
+        struct namedprops_context writer = { .data = second };
+        struct MAPINAMEID other = shared;
+        bool ok = false;
+        close(ready[0]); alarm(15);
+        other.kind.lid++;
+        if (!second || !mysql_real_connect(second, host, user, password, database, port, NULL, 0)) goto child_end;
+        if (get_mapped_id(&writer, shared, &id) != MAPISTORE_ERR_NOT_FOUND) goto child_end;
+        if (write(ready[1], "R", 1) != 1) goto child_end;
+        if (transaction_start(&writer) != MAPISTORE_SUCCESS) goto child_end;
+        if (get_mapped_id(&writer, shared, &id) != MAPISTORE_SUCCESS || id != 0x8001 ||
+            next_unused_id(&writer, &id) != MAPISTORE_SUCCESS || id != 0x8002 ||
+            create_id(&writer, other, id) != MAPISTORE_SUCCESS) {
+            transaction_cancel(&writer); goto child_end;
+        }
+        ok = transaction_commit(&writer) == MAPISTORE_SUCCESS;
+child_end:
+        if (second) mysql_close(second);
+        close(ready[1]); _exit(ok ? 0 : 1);
+    }
+    {
+        struct pollfd waiting = { .fd = ready[0], .events = POLLIN };
+        if (poll(&waiting, 1, 10000) <= 0 || read(ready[0], &byte, 1) != 1) goto child_failed;
+    }
+    if (next_unused_id(&backend, &id) != MAPISTORE_SUCCESS || id != 0x8001 ||
+        create_id(&backend, shared, id) != MAPISTORE_SUCCESS ||
+        transaction_commit(&backend) != MAPISTORE_SUCCESS) goto child_failed;
+    active = false;
+    if (waitpid(child, &status, 0) != child) goto pipes;
+    success = WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        scalar_equals(connection, "SELECT COUNT(*) FROM named_properties", "2") &&
+        scalar_equals(connection, "SELECT COUNT(DISTINCT mappedId) FROM named_properties", "2");
+    goto pipes;
+child_failed:
+    kill(child, SIGKILL); waitpid(child, &status, 0);
+pipes:
+    if (active) transaction_cancel(&backend);
+    close(ready[0]); close(ready[1]);
+    return success;
+}
+
+static bool named_properties_lost_transaction(MYSQL *connection, const char *host,
+    const char *user, const char *password, unsigned port)
+{
+    struct namedprops_context backend = { .data = connection };
+    struct MAPINAMEID name = { .ulKind = MNID_ID, .kind.lid = 777 };
+    uint16_t id;
+    if (transaction_start(&backend) != MAPISTORE_SUCCESS) return false;
+    if (transaction_start(&backend) != MAPISTORE_ERR_DATABASE_OPS ||
+        next_unused_id(&backend, &id) != MAPISTORE_SUCCESS ||
+        create_id(&backend, name, id) != MAPISTORE_SUCCESS) {
+        transaction_cancel(&backend); return false;
+    }
+    /* The killed transaction must not reconnect and report a successful commit. */
+    if (force_reconnect(connection, host, user, password, port) ||
+        transaction_commit(&backend) != MAPISTORE_ERR_DATABASE_OPS ||
+        transaction_cancel(&backend) != MAPISTORE_ERR_DATABASE_OPS) return false;
+    if (mysql_ping(connection) || get_mapped_id(&backend, name, &id) != MAPISTORE_ERR_NOT_FOUND ||
+        transaction_start(&backend) != MAPISTORE_SUCCESS) return false;
+    return transaction_cancel(&backend) == MAPISTORE_SUCCESS;
 }
 
 static bool result_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
@@ -109,8 +208,9 @@ int main(void)
     const char *port = getenv("OPENCHANGE_TEST_MYSQL_PORT");
     uint64_t nonce;
     int result = 1, i;
+    if ((!host || !*host) && getenv("OPENCHANGE_TEST_MYSQL_SOCKET")) host = "localhost";
     if (!ctx || !host || !*host || getentropy(&nonce, sizeof(nonce)) != 0) {
-        fprintf(stderr, "Live SQL check needs OPENCHANGE_TEST_MYSQL_HOST and a disposable endpoint\n");
+        fprintf(stderr, "Live SQL check needs OPENCHANGE_TEST_MYSQL_HOST or OPENCHANGE_TEST_MYSQL_SOCKET and a disposable endpoint\n");
         talloc_free(ctx); return 1;
     }
     if (!user) user = "root";
@@ -143,14 +243,16 @@ int main(void)
             !scalar_equals(connection, "SELECT @@character_set_connection", "utf8mb4") ||
             !scalar_equals(connection, "SELECT DATABASE()", name) ||
             !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(ctx, connection) ||
-            !result_roundtrip(ctx, connection)) FAIL();
+            !result_roundtrip(ctx, connection) ||
+            !named_properties_concurrency(connection, name, host, user, password, strtoul(port, NULL, 10)) ||
+            !named_properties_lost_transaction(connection, host, user, password, strtoul(port, NULL, 10))) FAIL();
         quoted = mysql_quote_dbname(ctx, name);
         drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE %s", quoted) : NULL;
         if (!drop || mysql_query(connection, drop) != 0) FAIL();
         close_all_connections();
     }
     result = 0;
-    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results and cleanup: OK");
+    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results, concurrent allocation, connection-loss rollback and cleanup: OK");
 end:
     close_all_connections(); talloc_free(ctx);
     return result;

@@ -8,6 +8,9 @@
 
 static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_CHARSET, FAIL_INIT_COMMAND, FAIL_POOL } failure;
 static bool need_database, charset_set, mode_set;
+static bool lock_held, reconnect_enabled = true;
+static bool lock_timeout, fail_reconnect_option, duplicate_entry;
+static const char *fail_statement;
 static unsigned clock_mode, clock_calls;
 static int fixture_clock_gettime(clockid_t id, struct timespec *value)
 {
@@ -50,6 +53,10 @@ static MYSQL *fixture_mysql_init(MYSQL *existing)
 static int fixture_mysql_options(MYSQL *mysql, enum mysql_option option, const void *value)
 {
     assert(mysql);
+    if (option == MYSQL_OPT_RECONNECT) {
+        if (fail_reconnect_option) return 1;
+        reconnect_enabled = *(const my_bool *)value;
+    }
     if (option == MYSQL_SET_CHARSET_NAME) {
         if (failure == FAIL_CHARSET) return 1;
         assert(!strcmp(value, "utf8mb4")); charset_set = true;
@@ -70,12 +77,25 @@ static MYSQL *fixture_mysql_connect(MYSQL *mysql, const char *host, const char *
     return mysql;
 }
 static void fixture_mysql_close(MYSQL *mysql) { assert(mysql); closed++; free(mysql); }
-static unsigned fixture_mysql_errno(MYSQL *mysql) { return 1234; }
+static unsigned fixture_mysql_errno(MYSQL *mysql) { return duplicate_entry ? 1062 : 1234; }
 static const char *fixture_mysql_sqlstate(MYSQL *mysql) { return "42000"; }
 static int fixture_mysql_query(MYSQL *mysql, const char *sql)
 {
     assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
-    return failure == FAIL_QUERY;
+    if (duplicate_entry && !strncmp(sql, "INSERT", 6)) return 1;
+    if (failure == FAIL_QUERY || (fail_statement && strstr(sql, fail_statement))) return 1;
+    if (strstr(sql, "IS_USED_LOCK")) result_values[0][0] = lock_held ? "1" : "0";
+    if (strstr(sql, "GET_LOCK")) {
+        assert(!reconnect_enabled && !lock_held);
+        lock_held = !lock_timeout;
+        result_values[0][0] = lock_held ? "1" : "0";
+    }
+    if (strstr(sql, "RELEASE_LOCK")) {
+        result_values[0][0] = lock_held ? "1" : NULL;
+        lock_held = false;
+    }
+    if (!strcmp(sql, "START TRANSACTION")) assert(lock_held && !reconnect_enabled);
+    return 0;
 }
 static int fixture_mysql_select(MYSQL *mysql, const char *database)
 { return failure == FAIL_SELECT || (selections++ == 0 && (need_database || failure == FAIL_QUERY)); }
@@ -189,6 +209,9 @@ static int named_property_checks(void)
     CHECK(strstr(query, "name\\\\\\' OR 1=1 --"));
     CHECK(create_id(&context, name, mapped) == MAPISTORE_SUCCESS);
     CHECK(strstr(query, "propName='name\\\\\\' OR 1=1 --'"));
+    duplicate_entry = true;
+    CHECK(create_id(&context, name, mapped) == MAPISTORE_ERR_EXIST);
+    duplicate_entry = false;
     fail_escape = true; query[0] = 0;
     CHECK(create_id(&context, name, mapped) == MAPISTORE_ERR_NO_MEMORY && query[0] == 0);
     CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_NO_MEMORY && query[0] == 0);
@@ -209,6 +232,59 @@ static int named_property_checks(void)
     name.ulKind = 99;
     CHECK(create_id(&context, name, 1) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
     CHECK(get_mapped_id(&context, name, &mapped) == MAPISTORE_ERR_INVALID_PARAMETER && query[0] == 0);
+    CHECK(acquired == released);
+    return 0;
+}
+
+static int named_property_transaction_checks(void)
+{
+    struct namedprops_context backend = { .data = (MYSQL *)1 };
+    uint16_t id = 17;
+    const char *invalid[] = {"65534", "65535", "65536", "18446744073709551615", "-1", "junk"};
+    CHECK(next_unused_id(NULL, &id) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(next_unused_id(&backend, NULL) == MAPISTORE_ERR_INVALID_PARAMETER);
+    result_values[0][0] = "0";
+    CHECK(next_unused_id(&backend, &id) == MAPISTORE_SUCCESS && id == 0x8001);
+    result_values[0][0] = "32768";
+    CHECK(next_unused_id(&backend, &id) == MAPISTORE_SUCCESS && id == 0x8001);
+    result_values[0][0] = "65533";
+    CHECK(next_unused_id(&backend, &id) == MAPISTORE_SUCCESS && id == 0xfffe);
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        result_values[0][0] = (char *)invalid[i]; id = 17;
+        CHECK(next_unused_id(&backend, &id) != MAPISTORE_SUCCESS && id == 17);
+    }
+    fail_fetch = true;
+    CHECK(next_unused_id(&backend, &id) == MAPISTORE_ERR_DATABASE_OPS && id == 17);
+    fail_fetch = false;
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS && !strcmp(query, "START TRANSACTION"));
+    CHECK(lock_held && !reconnect_enabled);
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && !reconnect_enabled);
+    CHECK(transaction_commit(&backend) == MAPISTORE_SUCCESS && !lock_held && reconnect_enabled);
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS && !lock_held && reconnect_enabled);
+    lock_timeout = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held && reconnect_enabled);
+    lock_timeout = false; fail_reconnect_option = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held);
+    fail_reconnect_option = false; fail_statement = "START TRANSACTION";
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held && reconnect_enabled);
+    fail_statement = NULL;
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
+    fail_statement = "COMMIT";
+    CHECK(transaction_commit(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && !reconnect_enabled);
+    fail_statement = "ROLLBACK";
+    CHECK(transaction_cancel(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && reconnect_enabled);
+    CHECK(strstr(logs, "rollback failed") && strstr(logs, "retains its lock"));
+    fail_statement = NULL;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS && !lock_held && reconnect_enabled);
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
+    fail_statement = "RELEASE_LOCK";
+    CHECK(transaction_commit(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && reconnect_enabled);
+    fail_statement = NULL;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS && !lock_held && reconnect_enabled);
+    failure = FAIL_QUERY;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held);
+    failure = FAIL_NONE;
     CHECK(acquired == released);
     return 0;
 }
@@ -355,6 +431,7 @@ int main(void)
     CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
     CHECK(result_checks(ctx) == 0);
     CHECK(named_property_checks() == 0);
+    CHECK(named_property_transaction_checks() == 0);
     CHECK(named_property_read_checks(ctx) == 0);
     CHECK(diagnostic_checks() == 0);
     talloc_free(ctx);

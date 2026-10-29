@@ -95,10 +95,38 @@ SQL connection utilities can be checked without a server:
     make check-mysql-utils
 
 The driver is substituted for failure tests; real talloc and pool code are used.
-The optional `make check-mysql-live` requires OPENCHANGE_TEST_MYSQL_HOST (and
+The optional `make check-mysql-live` requires OPENCHANGE_TEST_MYSQL_HOST or OPENCHANGE_TEST_MYSQL_SOCKET (and
 optionally PORT, USER and PASSWORD with the same prefix) pointing to a disposable
 SQL server. It creates random openchange_test_* databases and drops them after
 the checks. It does not read production configuration as a fallback.
+
+Named-property creation and rollback have a separate isolated check:
+
+    make check-namedprops
+
+It calls the actual GetPropertyIdsFromNames ROP with a temporary LDB database.
+It checks literal names, repeated names, invalid requests, allocation failures,
+lookup/start/create/commit/cancel failures, transaction rollback and ID exhaustion.
+SQL allocation bounds and transaction commands are covered by `check-mysql-utils`
+with a substituted driver, including lock timeouts, recursive transaction
+rejection and lock/reconnect cleanup. `make check-mysql-live` additionally covers
+two SQL connections allocating IDs and connection-loss rollback on an explicitly
+selected disposable endpoint. Use `OPENCHANGE_TEST_MYSQL_SOCKET` for a local
+socket, or the host/port variables above. Live RPC is not covered. The Python runtime SQL suite also exercises the actual
+version-3 schema migration, Unicode property identity, UNIQUE constraints and
+refusal to remap ambiguous legacy IDs. See
+[the upgrade procedure](../doc/NAMED_PROPERTIES_UPGRADE.md).
+
+Staged installation checks
+--------------------------
+
+After building, use `make install DESTDIR=/absolute/temporary/root` and
+`/usr/bin/python3 script/check_install.py /absolute/temporary/root` to check
+installed library/module loading, CLI help and Python/template discovery. The
+checker emits a JSON manifest and runs outside the source tree. Python Samba and
+MySQLdb bindings are required. It starts no server and provisions no directory.
+See [the staged-install procedure](../doc/TEST_INSTALL.md) for removal checks and
+limits. The Python tooling suite includes checker regression tests.
 
 Usage
 -----

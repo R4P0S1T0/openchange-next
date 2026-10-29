@@ -19,6 +19,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "libmapi/libmapi.h"
 #include "namedprops_ldb.h"
 #include "../mapistore.h"
 #include "../mapistore_private.h"
@@ -134,44 +135,45 @@ static enum mapistore_error get_mapped_id(struct namedprops_context *self,
 					  struct MAPINAMEID nameid,
 					  uint16_t *propID)
 {
-	TALLOC_CTX		*mem_ctx;
-	struct ldb_result	*res = NULL;
-	const char * const	attrs[] = { "*", NULL };
-	int			ret;
-	char			*filter = NULL;
-	char			*guid;
+	TALLOC_CTX *mem_ctx;
+	struct ldb_result *res = NULL;
+	const char * const attrs[] = { "mappedId", NULL };
+	char *filter = NULL, *guid, *name;
+	unsigned id;
+	int ret;
 
-	*propID = 0;
-	mem_ctx = talloc_named(NULL, 0, "mapistore_namedprops_get_mapped_propID");
-	guid = GUID_string(mem_ctx, (const struct GUID *)&nameid.lpguid);
-
+	MAPISTORE_RETVAL_IF(!self || !self->data || !propID, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	guid = GUID_string(mem_ctx, &nameid.lpguid);
+	MAPISTORE_RETVAL_IF(!guid, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	switch (nameid.ulKind) {
 	case MNID_ID:
 		filter = talloc_asprintf(mem_ctx,
-				"(&(objectClass=MNID_ID)(oleguid=%s)(cn=0x%.4x))",
-				guid, nameid.kind.lid);
+			"(&(objectClass=MNID_ID)(oleguid=%s)(cn=0x%.4x))", guid, nameid.kind.lid);
 		break;
 	case MNID_STRING:
+		MAPISTORE_RETVAL_IF(!nameid.kind.lpwstr.Name, MAPISTORE_ERR_INVALID_PARAMETER, mem_ctx);
+		name = ldb_binary_encode_string(mem_ctx, nameid.kind.lpwstr.Name);
+		MAPISTORE_RETVAL_IF(!name, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		filter = talloc_asprintf(mem_ctx,
-				"(&(objectClass=MNID_STRING)(oleguid=%s)(cn=%s))",
-				guid, nameid.kind.lpwstr.Name);
+			"(&(objectClass=MNID_STRING)(oleguid=%s)(cn=%s))", guid, name);
 		break;
+	default:
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_INVALID_PARAMETER, mem_ctx);
 	}
-	talloc_free(guid);
-
-	struct ldb_context *ldb_ctx = self->data;
-	ret = ldb_search(ldb_ctx, mem_ctx, &res, ldb_get_default_basedn(ldb_ctx),
-			 LDB_SCOPE_SUBTREE, attrs, "%s", filter);
-	MAPISTORE_RETVAL_IF((ret != LDB_SUCCESS || !res->count), MAPISTORE_ERROR, mem_ctx);
-
-	*propID = ldb_msg_find_attr_as_uint(res->msgs[0], "mappedId", 0);
-	MAPISTORE_RETVAL_IF(!*propID, MAPISTORE_ERROR, mem_ctx);
-
+	MAPISTORE_RETVAL_IF(!filter, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	ret = ldb_search(self->data, mem_ctx, &res, ldb_get_default_basedn(self->data),
+		LDB_SCOPE_SUBTREE, attrs, "%s", filter);
+	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
+	MAPISTORE_RETVAL_IF(!res->count, MAPISTORE_ERR_NOT_FOUND, mem_ctx);
+	MAPISTORE_RETVAL_IF(res->count != 1, MAPISTORE_ERR_INVALID_DATA, mem_ctx);
+	id = ldb_msg_find_attr_as_uint(res->msgs[0], "mappedId", 0);
+	MAPISTORE_RETVAL_IF(!id || id > UINT16_MAX, MAPISTORE_ERR_INVALID_DATA, mem_ctx);
+	*propID = id;
 	talloc_free(mem_ctx);
-
 	return MAPISTORE_SUCCESS;
 }
-
 
 /**
    \details Return the next unused namedprops ID
@@ -189,7 +191,7 @@ static enum mapistore_error next_unused_id(struct namedprops_context *nprops, ui
 	const char * const	attrs[] = { "mappedId", NULL };
 	int			ret;
 	int			i;
-	uint16_t		current_id;
+	unsigned		current_id, highest = 0x8000;
 
 	/* Sanity checks */
 	MAPISTORE_RETVAL_IF(!nprops, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
@@ -205,14 +207,13 @@ static enum mapistore_error next_unused_id(struct namedprops_context *nprops, ui
 			 LDB_SCOPE_SUBTREE, attrs, "(cn=*)");
 	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
 
-	*highest_id = 0;
 	for (i = 0; i < res->count; i++) {
 		current_id = ldb_msg_find_attr_as_uint(res->msgs[i], "mappedId", 0);
-		if (current_id > 0 && *highest_id < current_id)
-			*highest_id = current_id;
+		if (highest < current_id) highest = current_id;
 	}
 
-	*highest_id = *highest_id + 1;
+	MAPISTORE_RETVAL_IF(highest >= 0xfffe, MAPISTORE_ERR_NOT_AVAILABLE, mem_ctx);
+	*highest_id = highest + 1;
 
 	talloc_free(mem_ctx);
 	return MAPISTORE_SUCCESS;
@@ -222,58 +223,48 @@ static enum mapistore_error create_id(struct namedprops_context *self,
 				      struct MAPINAMEID nameid,
 				      uint16_t mapped_id)
 {
-	TALLOC_CTX *mem_ctx = talloc_new(NULL);
+	TALLOC_CTX *mem_ctx;
+	struct ldb_message *msg;
+	char *guid, *escaped, *mapped, *lid = NULL;
+	const char *cn;
+	int ret;
 
-	char *dec_mappedid = talloc_asprintf(mem_ctx, "%u", mapped_id);
-	char *guid = GUID_string(mem_ctx, &nameid.lpguid);
-	char *ldif_record, *hex_id, *dec_id;
-	switch (nameid.ulKind) {
-	case MNID_ID:
-		hex_id = talloc_asprintf(mem_ctx, "%.4x", nameid.kind.lid);
-		dec_id = talloc_asprintf(mem_ctx, "%u", nameid.kind.lid);
-		ldif_record = talloc_asprintf(mem_ctx,
-			"dn: CN=0x%s,CN=%s,CN=default\n"
-			"objectClass: MNID_ID\n"
-			"cn: 0x%s\n"
-			"propType: PT_NULL\n"
-			"oleguid: %s\n"
-			"mappedId: %s\n"
-			"propId: %s\n",
-			hex_id, guid, hex_id, guid, dec_mappedid, dec_id);
-		break;
-	case MNID_STRING:
-		ldif_record = talloc_asprintf(mem_ctx,
-			"dn: CN=%s,CN=%s,CN=default\n"
-			"objectClass: MNID_STRING\n"
-			"cn: %s\n"
-			"propType: PT_NULL\n"
-			"oleguid: %s\n"
-			"mappedId: %s\n"
-			"propName: %s\n",
-			nameid.kind.lpwstr.Name, guid, nameid.kind.lpwstr.Name,
-			guid, dec_mappedid, nameid.kind.lpwstr.Name);
-		break;
-	default:
-		abort();
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(nameid.ulKind != MNID_ID && nameid.ulKind != MNID_STRING,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(nameid.ulKind == MNID_STRING && !nameid.kind.lpwstr.Name,
+		MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	msg = ldb_msg_new(mem_ctx);
+	guid = GUID_string(mem_ctx, &nameid.lpguid);
+	mapped = talloc_asprintf(mem_ctx, "%u", mapped_id);
+	cn = nameid.ulKind == MNID_ID
+		? talloc_asprintf(mem_ctx, "0x%.4x", nameid.kind.lid) : nameid.kind.lpwstr.Name;
+	MAPISTORE_RETVAL_IF(!msg || !guid || !mapped || !cn, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	msg->dn = ldb_dn_new_fmt(msg, self->data, "CN=%s,CN=default", guid);
+	MAPISTORE_RETVAL_IF(!msg->dn, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	/* Let LDB escape the RDN and store names as literal attribute values. */
+	escaped = ldb_dn_escape_value(mem_ctx, (struct ldb_val){(uint8_t *)cn, strlen(cn)});
+	MAPISTORE_RETVAL_IF(!escaped, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	MAPISTORE_RETVAL_IF(!ldb_dn_add_child_fmt(msg->dn, "CN=%s", escaped),
+		MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	ret = ldb_msg_add_string(msg, "objectClass", nameid.ulKind == MNID_ID ? "MNID_ID" : "MNID_STRING");
+	if (ret == LDB_SUCCESS) ret = ldb_msg_add_string(msg, "cn", cn);
+	if (ret == LDB_SUCCESS) ret = ldb_msg_add_string(msg, "propType", "PT_NULL");
+	if (ret == LDB_SUCCESS) ret = ldb_msg_add_string(msg, "oleguid", guid);
+	if (ret == LDB_SUCCESS) ret = ldb_msg_add_string(msg, "mappedId", mapped);
+	if (nameid.ulKind == MNID_ID) {
+		lid = talloc_asprintf(mem_ctx, "%u", nameid.kind.lid);
+		MAPISTORE_RETVAL_IF(!lid, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	}
-
-	OC_DEBUG(5, "inserting record:\n%s\n", ldif_record);
-
-	const char *ldif_records[] = { NULL, NULL };
-	ldif_records[0] = ldif_record;
-	struct ldb_context *ldb_ctx = self->data;
-	struct ldb_ldif	*ldif = ldb_ldif_read_string(ldb_ctx, ldif_records);
-
-	struct ldb_message *normalized_msg;
-	int ret = ldb_msg_normalize(ldb_ctx, mem_ctx, ldif->msg, &normalized_msg);
-	MAPISTORE_RETVAL_IF(ret, MAPISTORE_ERR_DATABASE_INIT, mem_ctx);
-
-	ret = ldb_add(ldb_ctx, normalized_msg);
-	talloc_free(normalized_msg);
-	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_DATABASE_INIT, mem_ctx);
-
+	if (ret == LDB_SUCCESS) ret = ldb_msg_add_string(msg,
+		nameid.ulKind == MNID_ID ? "propId" : "propName", lid ? lid : cn);
+	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	ret = ldb_add(self->data, msg);
+	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
 	talloc_free(mem_ctx);
-	return ret;
+	return MAPISTORE_SUCCESS;
 }
 
 static enum mapistore_error get_nameid(struct namedprops_context *self,
@@ -367,6 +358,15 @@ static enum mapistore_error transaction_commit(struct namedprops_context *self)
 	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERROR, NULL);
 	return MAPISTORE_SUCCESS;
 }
+static enum mapistore_error transaction_cancel(struct namedprops_context *self)
+{
+	int ret;
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	ret = ldb_transaction_cancel(self->data);
+	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, NULL);
+	return MAPISTORE_SUCCESS;
+}
+
 
 
 /**
@@ -466,6 +466,7 @@ enum mapistore_error mapistore_namedprops_ldb_init(TALLOC_CTX *mem_ctx,
 	nprops->get_nameid_type = get_nameid_type;
 	nprops->next_unused_id = next_unused_id;
 	nprops->transaction_commit = transaction_commit;
+	nprops->transaction_cancel = transaction_cancel;
 	nprops->transaction_start = transaction_start;
 	nprops->data = ldb_ctx;
 

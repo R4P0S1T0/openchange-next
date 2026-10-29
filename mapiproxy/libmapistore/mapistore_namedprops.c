@@ -311,3 +311,10 @@ _PUBLIC_ enum mapistore_error mapistore_namedprops_transaction_commit(struct nam
 
 	return nprops->transaction_commit(nprops);
 }
+
+_PUBLIC_ enum mapistore_error mapistore_namedprops_transaction_cancel(struct namedprops_context *nprops)
+{
+	MAPISTORE_RETVAL_IF(!nprops, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	MAPISTORE_RETVAL_IF(!nprops->transaction_cancel, MAPISTORE_ERR_NOT_IMPLEMENTED, NULL);
+	return nprops->transaction_cancel(nprops);
+}

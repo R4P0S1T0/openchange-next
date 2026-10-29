@@ -1137,87 +1137,102 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetPropertyIdsFromNames(TALLOC_CTX *mem_ctx,
 							    struct EcDoRpc_MAPI_REPL *mapi_repl,
 							    uint32_t *handles, uint16_t *size)
 {
-	enum mapistore_error	retval;
-	int			i;
-	int			ret;
-	struct GUID		*lpguid;
-	bool			has_transaction = false;
-	uint16_t		mapped_id = 0;
+	struct GetIDsFromNames_req *request;
+	struct GetIDsFromNames_repl *response;
+	struct namedprops_context *backend;
+	uint16_t *ids = NULL, next_id = 0, i;
+	enum mapistore_error ret;
+	bool active = false;
 
-	OC_DEBUG(4, "exchange_emsmdb: [OXCPRPT] GetPropertyIdsFromNames (0x56)\n");
-
-	/* Sanity checks */
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx, MAPI_E_NOT_INITIALIZED, NULL);
-	OPENCHANGE_RETVAL_IF(!mapi_req, MAPI_E_INVALID_PARAMETER, NULL);
-	OPENCHANGE_RETVAL_IF(!mapi_repl, MAPI_E_INVALID_PARAMETER, NULL);
-	OPENCHANGE_RETVAL_IF(!handles, MAPI_E_INVALID_PARAMETER, NULL);
-	OPENCHANGE_RETVAL_IF(!size, MAPI_E_INVALID_PARAMETER, NULL);
-
+	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx || !emsmdbp_ctx->mstore_ctx ||
+		!emsmdbp_ctx->mstore_ctx->nprops_ctx, MAPI_E_NOT_INITIALIZED, NULL);
+	OPENCHANGE_RETVAL_IF(!mapi_req || !mapi_repl || !handles || !size,
+		MAPI_E_INVALID_PARAMETER, NULL);
+	backend = emsmdbp_ctx->mstore_ctx->nprops_ctx;
+	request = &mapi_req->u.mapi_GetIDsFromNames;
+	response = &mapi_repl->u.mapi_GetIDsFromNames;
 	mapi_repl->opnum = mapi_req->opnum;
-	mapi_repl->error_code = MAPI_E_SUCCESS;
 	mapi_repl->handle_idx = mapi_req->handle_idx;
-	mapi_repl->u.mapi_GetIDsFromNames.count = mapi_req->u.mapi_GetIDsFromNames.count;
-	mapi_repl->u.mapi_GetIDsFromNames.propID = talloc_array(mem_ctx, uint16_t, 
-								mapi_req->u.mapi_GetIDsFromNames.count);
-
-	for (i = 0; i < mapi_req->u.mapi_GetIDsFromNames.count; i++) {
-		ret = mapistore_namedprops_get_mapped_id(emsmdbp_ctx->mstore_ctx->nprops_ctx, 
-							 mapi_req->u.mapi_GetIDsFromNames.nameid[i],
-							 &mapi_repl->u.mapi_GetIDsFromNames.propID[i]);
-		if (ret == MAPISTORE_SUCCESS)
-			continue;
-		// It doesn't exist, let's create it!
-		if (mapi_req->u.mapi_GetIDsFromNames.ulFlags == GetIDsFromNames_GetOrCreate) {
-			if (!has_transaction) {
-				has_transaction = true;
-				retval = mapistore_namedprops_transaction_start(emsmdbp_ctx->mstore_ctx->nprops_ctx);
-				if (retval != MAPISTORE_SUCCESS) {
-					return MAPI_E_UNABLE_TO_COMPLETE;
-				}
-
-				retval = mapistore_namedprops_next_unused_id(emsmdbp_ctx->mstore_ctx->nprops_ctx, &mapped_id);
-				if (retval != MAPISTORE_SUCCESS) {
-					OC_DEBUG(0, "ERROR: No remaining namedprops ID available\n");
-					abort();
-				}
-			} else {
-				mapped_id++;
-			}
-			mapistore_namedprops_create_id(emsmdbp_ctx->mstore_ctx->nprops_ctx,
-						       mapi_req->u.mapi_GetIDsFromNames.nameid[i],
-						       mapped_id);
-			mapi_repl->u.mapi_GetIDsFromNames.propID[i] = mapped_id;
-		} else {
-			mapi_repl->u.mapi_GetIDsFromNames.propID[i] = 0x0000;
-			lpguid = &mapi_req->u.mapi_GetIDsFromNames.nameid[i].lpguid;
-			OC_DEBUG(5, "  no mapping for property %.8x-%.4x-%.4x-%.2x%.2x-%.2x%.2x%.2x%.2x%.2x%.2x:",
-				  lpguid->time_low, lpguid->time_mid, lpguid->time_hi_and_version,
-				  lpguid->clock_seq[0], lpguid->clock_seq[1],
-				  lpguid->node[0], lpguid->node[1],
-				  lpguid->node[2], lpguid->node[3],
-				  lpguid->node[4], lpguid->node[5]);
-
-			if (mapi_req->u.mapi_GetIDsFromNames.nameid[i].ulKind == MNID_ID) {
-				OC_DEBUG(5, "%.4x\n", mapi_req->u.mapi_GetIDsFromNames.nameid[i].kind.lid);
-			} else if (mapi_req->u.mapi_GetIDsFromNames.nameid[i].ulKind == MNID_STRING) {
-				OC_DEBUG(5, "%s\n", mapi_req->u.mapi_GetIDsFromNames.nameid[i].kind.lpwstr.Name);
-			} else {
-				OC_DEBUG(5, "[invalid ulKind]");
-			}
-
+	mapi_repl->error_code = MAPI_E_SUCCESS;
+	response->count = 0;
+	response->propID = NULL;
+	if ((request->count && !request->nameid) ||
+	    (request->ulFlags != GetIDsFromNames_GetOnly && request->ulFlags != GetIDsFromNames_GetOrCreate)) {
+		mapi_repl->error_code = MAPI_E_INVALID_PARAMETER;
+		goto end;
+	}
+	for (i = 0; i < request->count; i++) {
+		if ((request->nameid[i].ulKind != MNID_ID && request->nameid[i].ulKind != MNID_STRING) ||
+		    (request->nameid[i].ulKind == MNID_STRING && !request->nameid[i].kind.lpwstr.Name)) {
+			mapi_repl->error_code = MAPI_E_INVALID_PARAMETER;
+			goto end;
+		}
+	}
+	ids = talloc_zero_array(mem_ctx, uint16_t, request->count);
+	if (request->count && !ids) {
+		mapi_repl->error_code = MAPI_E_NOT_ENOUGH_MEMORY;
+		goto end;
+	}
+	for (i = 0; i < request->count; i++) {
+		ret = mapistore_namedprops_get_mapped_id(backend, request->nameid[i], &ids[i]);
+		if (ret == MAPISTORE_SUCCESS) continue;
+		if (ret != MAPISTORE_ERR_NOT_FOUND) goto database_error;
+		if (request->ulFlags == GetIDsFromNames_GetOnly) {
 			mapi_repl->error_code = MAPI_W_ERRORS_RETURNED;
+			continue;
 		}
-	}
-
-	if (has_transaction) {
-		enum mapistore_error err = mapistore_namedprops_transaction_commit(emsmdbp_ctx->mstore_ctx->nprops_ctx);
-		if (err != MAPISTORE_SUCCESS) {
-			return MAPI_E_UNABLE_TO_COMPLETE;
+		if (!active) {
+			ret = mapistore_namedprops_transaction_start(backend);
+			if (ret != MAPISTORE_SUCCESS) goto database_error;
+			active = true;
+			/* Another writer may have created this mapping while we waited. */
+			ret = mapistore_namedprops_get_mapped_id(backend, request->nameid[i], &ids[i]);
+			if (ret == MAPISTORE_SUCCESS) continue;
+			if (ret != MAPISTORE_ERR_NOT_FOUND) goto database_error;
 		}
+		if (!next_id) {
+			ret = mapistore_namedprops_next_unused_id(backend, &next_id);
+			if (ret != MAPISTORE_SUCCESS) goto database_error;
+		} else {
+			if (next_id >= 0xfffe) {
+				ret = MAPISTORE_ERR_NOT_AVAILABLE;
+				goto database_error;
+			}
+			next_id++;
+		}
+		if (next_id <= 0x8000 || next_id >= 0xffff) {
+			ret = MAPISTORE_ERR_NOT_AVAILABLE;
+			goto database_error;
+		}
+		ret = mapistore_namedprops_create_id(backend, request->nameid[i], next_id);
+		if (ret == MAPISTORE_ERR_EXIST) {
+			ret = mapistore_namedprops_get_mapped_id(backend, request->nameid[i], &ids[i]);
+			if (ret != MAPISTORE_SUCCESS) goto database_error;
+			continue;
+		}
+		if (ret != MAPISTORE_SUCCESS) goto database_error;
+		ids[i] = next_id;
 	}
+	if (active) {
+		ret = mapistore_namedprops_transaction_commit(backend);
+		if (ret != MAPISTORE_SUCCESS) goto database_error;
+		active = false;
+	}
+	response->count = request->count;
+	response->propID = ids;
+	ids = NULL;
+	goto end;
 
+database_error:
+	mapi_repl->error_code = (ret == MAPISTORE_ERR_NO_MEMORY || ret == MAPISTORE_ERR_NOT_AVAILABLE)
+		? MAPI_E_NOT_ENOUGH_MEMORY : MAPI_E_UNABLE_TO_COMPLETE;
+end:
+	if (active && mapistore_namedprops_transaction_cancel(backend) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(0, "Cannot cancel named property transaction");
+		mapi_repl->error_code = MAPI_E_UNABLE_TO_COMPLETE;
+	}
+	talloc_free(ids);
 	*size += libmapiserver_RopGetPropertyIdsFromNames_size(mapi_repl);
-
 	return MAPI_E_SUCCESS;
 }
 

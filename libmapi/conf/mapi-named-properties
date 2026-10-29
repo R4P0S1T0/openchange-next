@@ -215,7 +215,7 @@ PidLidAppointmentUpdateTime			       ApptUpdateTime		     0x8226 NULL			  PT_SYS
 PidLidExceptionReplaceTime                             ExceptionReplaceTime          0x8228 NULL                          PT_SYSTIME    MNID_ID     PSETID_Appointment	   0x9249
 PidLidFInvited                                         FInvited                      0x8229 NULL                          PT_BOOLEAN    MNID_ID     PSETID_Appointment	   0x91c4
 PidLidFExceptionalAttendees                            FExceptionalAttendees         0x822B NULL                          PT_BOOLEAN    MNID_ID     PSETID_Appointment	   0x924a
-PidLidUnknown822c				       NULL			     0x822C NULL			  PT_NULL	MNID_ID	    PSETID_Appointment	   0x924c
+PidLidUnknown822c				       NULL			     0x822C NULL			  PT_NULL	MNID_ID	    PSETID_Appointment	   0x8002
 PidLidUnknown822d				       NULL			     0x822D NULL			  PT_NULL	MNID_ID	    PSETID_Appointment	   0x924e
 PidLidOwnerName					       OwnerName		     0x822E NULL			  PT_UNICODE	MNID_ID	    PSETID_Appointment	   0x91e0
 PidLidFOthersAppointment			       FOthersAppt		     0x822F NULL			  PT_BOOLEAN	MNID_ID	    PSETID_Appointment	   0x91c8
@@ -259,7 +259,7 @@ PidLidSingleBodyIcal				       IsSingleBodyIcal		     0x827B NULL			  PT_BOOLEAN
 PidLidDayOfMonth				       DayOfMonth			    0x1000 NULL			  PT_LONG       MNID_ID     PSETID_Common          0x91a2
 PidLidICalendarDayOfWeekMask			       ICalendarDayOfWeekMask		    0x1001 NULL			  PT_LONG	MNID_ID	    PSETID_Common	   0x91a3
 PidLidUnknown1003				       NULL				    0x1003 NULL			  PT_NULL	MNID_ID	    PSETID_Common	   0x91a5
-PidLidUnknown1004				       NULL				    0x1004 NULL			  PT_NULL	MNID_ID	    PSETID_Common	   0x91a7
+PidLidUnknown1004				       NULL				    0x1004 NULL			  PT_NULL	MNID_ID	    PSETID_Common	   0x8001
 PidLidOccurrences				       Occurrences			    0x1005 NULL			  PT_LONG	MNID_ID	    PSETID_Common	   0x91dd
 PidLidMonthOfYear				       MonthOfYear			    0x1006 NULL			  PT_LONG	MNID_ID	    PSETID_Common	   0x91d5
 PidLidUnknown100a				       NULL				    0x100A NULL			  PT_LONG	MNID_ID	    PSETID_Common	   0x91aa
@@ -478,7 +478,7 @@ NULL                                                   NULL                     
 NULL                                                   NULL                          0x0000 urn:schemas:calendar:sequence PT_LONG       MNID_STRING PS_PUBLIC_STRINGS
 NULL                                                   NULL                          0x0000 urn:schemas:calendar:version  PT_UNICODE    MNID_STRING PS_PUBLIC_STRINGS
 NULL						       NULL			     0x0000 urn:schemas-microsoft-com:office:outlook#storetypeprivate PT_BOOLEAN MNID_STRING PS_PUBLIC_STRINGS 0x90e7
-NULL						       NULL			     0x0000 urn:schemas-microsoft-com:office:outlook#noaclui PT_BOOLEAN MNID_STRING PS_PUBLIC_STRINGS 0x90e9
+NULL						       NULL			     0x0000 urn:schemas-microsoft-com:office:outlook#noaclui PT_BOOLEAN MNID_STRING PS_PUBLIC_STRINGS 0x8003
 
 ### PS_INTERNET_HEADERS
 PidNameAcceptLanguage                                  AcceptLanguage                0x0000 Accept-Language               PT_UNICODE    MNID_STRING PS_INTERNET_HEADERS
