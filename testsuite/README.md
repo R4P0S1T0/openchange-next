@@ -110,7 +110,8 @@ lookup/start/create/commit/cancel failures, transaction rollback and ID exhausti
 SQL allocation bounds and transaction commands are covered by `check-mysql-utils`
 with a substituted driver, including lock timeouts, recursive transaction
 rejection and lock/reconnect cleanup. `make check-mysql-live` additionally covers
-two SQL connections allocating IDs and connection-loss rollback on an explicitly
+two SQL connections allocating IDs, connection-loss rollback and termination of
+a live session after an injected rollback failure on an explicitly
 selected disposable endpoint. Use `OPENCHANGE_TEST_MYSQL_SOCKET` for a local
 socket, or the host/port variables above. Live RPC is not covered. The Python runtime SQL suite also exercises the actual
 version-3 schema migration, Unicode property identity, UNIQUE constraints and

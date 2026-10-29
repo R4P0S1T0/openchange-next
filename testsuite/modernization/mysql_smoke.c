@@ -9,7 +9,8 @@
 static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENTRY, FAIL_COPY, FAIL_CHARSET, FAIL_INIT_COMMAND, FAIL_POOL } failure;
 static bool need_database, charset_set, mode_set;
 static bool lock_held, reconnect_enabled = true;
-static bool lock_timeout, fail_reconnect_option, duplicate_entry;
+static bool lock_timeout, fail_reconnect_option, duplicate_entry, fail_disconnect, fail_session_id;
+static unsigned disconnected;
 static const char *fail_statement;
 static unsigned clock_mode, clock_calls;
 static int fixture_clock_gettime(clockid_t id, struct timespec *value)
@@ -84,6 +85,15 @@ static int fixture_mysql_query(MYSQL *mysql, const char *sql)
     assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
     if (duplicate_entry && !strncmp(sql, "INSERT", 6)) return 1;
     if (failure == FAIL_QUERY || (fail_statement && strstr(sql, fail_statement))) return 1;
+    if (!strcmp(sql, "SELECT CONNECTION_ID()")) {
+        if (fail_session_id) return 1;
+        result_values[0][0] = "1099511627777";
+    }
+    if (!strncmp(sql, "KILL CONNECTION ", 16)) {
+        assert(!reconnect_enabled && !strcmp(sql, "KILL CONNECTION 1099511627777"));
+        if (fail_disconnect) return 1;
+        lock_held = false; disconnected++;
+    }
     if (strstr(sql, "IS_USED_LOCK")) result_values[0][0] = lock_held ? "1" : "0";
     if (strstr(sql, "GET_LOCK")) {
         assert(!reconnect_enabled && !lock_held);
@@ -272,10 +282,18 @@ static int named_property_transaction_checks(void)
     CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
     fail_statement = "COMMIT";
     CHECK(transaction_commit(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && !reconnect_enabled);
-    fail_statement = "ROLLBACK";
+    fail_statement = "ROLLBACK"; fail_disconnect = true;
     CHECK(transaction_cancel(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && reconnect_enabled);
     CHECK(strstr(logs, "rollback failed") && strstr(logs, "retains its lock"));
+    fail_disconnect = false; fail_session_id = true;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && !disconnected);
+    fail_session_id = false; fail_reconnect_option = true;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held && !disconnected);
+    fail_reconnect_option = false;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held && reconnect_enabled);
+    CHECK(disconnected == 1 && strstr(logs, "Terminated failed named-property SQL session"));
     fail_statement = NULL;
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
     CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS && !lock_held && reconnect_enabled);
     CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
     fail_statement = "RELEASE_LOCK";

@@ -51,28 +51,38 @@ perform that conversion. Migration DDL is not a transactional database restore.
 
 ## Failed rollback and connection ownership
 
-If ROLLBACK fails, the C backend logs the driver error number, SQLSTATE and the
-retained-lock condition without SQL values or credentials. A surviving session
-keeps its advisory lock. This prevents another writer allocating IDs while the
-first transaction's outcome remains unknown. Closing a pooled MYSQL pointer in
-one context would invalidate other contexts borrowing that same pointer, so
-this change does not perform that unsafe close.
+If ROLLBACK fails, the C backend logs the driver error number and SQLSTATE
+without SQL values or credentials. With automatic reconnect disabled, it reads
+that connection's full SQL session ID and attempts `KILL CONNECTION` on that
+same session. It does not call `mysql_close()` on the shared MYSQL pointer.
+Borrowing contexts keep valid client handles; a later retry can reconnect with
+the configured character set and SQL mode.
 
-A lost session can reconnect on a later retry. For a surviving failed session,
-stop/quiesce its users and restart the affected service/connection pool before
-retrying, then check the database transaction state. Other writers time out
-rather than continue without serialization. Automatic pool-wide invalidation
-requires coordinated connection ownership and remains separate work.
+Terminating a session rolls back its transaction and releases its advisory
+lock according to [MariaDB's KILL semantics](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/kill).
+The failed request still returns a database error; recovery never publishes
+partial property IDs or reports a failed write as committed. Native tests also
+cover session IDs above 32 bits, so cleanup does not rely on a truncated client
+thread ID.
+
+If identifying or terminating the session fails, the diagnostic states that a
+surviving session retains its lock. Stop/quiesce its users and restart the
+affected service/connection pool before retrying. The fallback preserves
+serialization rather than freeing a lock around an uncertain transaction.
+This does not add support for concurrent threaded use of one MYSQL handle.
 
 ## Validation
 
 Native tests cover duplicate-key classification, a ROP refetch after an insert
-race, rollback diagnostics and cleanup. A generator test rejects duplicate seed
-IDs or identities. Actual SQL schema tests cover fresh import, a legacy charset
+race, rollback diagnostics, session termination and conservative recovery
+failures. A generator test rejects duplicate seed IDs or identities. Actual SQL schema tests cover fresh import, a legacy charset
 upgrade, case/accent/four-byte names, all three UNIQUE keys, GUID case, invalid
 union arms, downgrade/upgrade and rejection of ambiguous existing mappings.
 The live C harness covers its lookup/insert paths, concurrent writers and
-connection loss using a disposable SQL endpoint. CI runs both the native and
+connection loss using a disposable SQL endpoint. An injected ROLLBACK error
+leaves a real transaction alive; the check observes lock release from an
+independent connection, verifies rollback, then reuses the borrowed client handle
+and confirms that pool lookup still returns it. CI runs both the native and
 Python SQL suites; its result must be checked for the exact published commit.
 
 Local review validation passes: the full build, 17 native make check targets,

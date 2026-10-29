@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <mysql/mysql.h>
 #include <mysql/mysqld_error.h>
 #include <ldb.h>
@@ -272,15 +273,35 @@ static enum mapistore_error transaction_commit(struct namedprops_context *self)
 	return transaction_unlock(self);
 }
 
+static bool disconnect_failed_transaction(MYSQL *conn)
+{
+	my_bool reconnect = false;
+	uint64_t id;
+	char sql[64];
+
+	/* Never reconnect while identifying the session whose rollback failed. */
+	if (mysql_options(conn, MYSQL_OPT_RECONNECT, &reconnect) ||
+	    select_first_uint(conn, "SELECT CONNECTION_ID()", &id) != MYSQL_SUCCESS) {
+		return false;
+	}
+	/* Keep borrowed MYSQL pointers valid; terminate only their server session. */
+	snprintf(sql, sizeof(sql), "KILL CONNECTION %"PRIu64, id);
+	return mysql_query(conn, sql) == 0;
+}
+
 static enum mapistore_error transaction_cancel(struct namedprops_context *self)
 {
 	my_bool reconnect = true;
 	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 	if (mysql_query(self->data, "ROLLBACK") != 0) {
-		OC_DEBUG(0, "Named-property rollback failed (error %u, SQLSTATE %.5s); "
-			"a surviving SQL session retains its lock; connection recovery is required",
+		OC_DEBUG(0, "Named-property rollback failed (error %u, SQLSTATE %.5s)",
 			mysql_errno(self->data), mysql_sqlstate(self->data));
-		/* Keep a surviving session's lock; a lost session can reconnect on retry. */
+		if (disconnect_failed_transaction(self->data)) {
+			OC_DEBUG(0, "Terminated failed named-property SQL session; retry can reconnect");
+		} else {
+			OC_DEBUG(0, "Cannot terminate failed named-property SQL session; "
+				"a surviving session retains its lock and requires connection recovery");
+		}
 		mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect);
 		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
 	}

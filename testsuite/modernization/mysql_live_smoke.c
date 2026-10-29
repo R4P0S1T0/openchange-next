@@ -15,6 +15,13 @@ static MYSQL *test_connect(MYSQL *connection, const char *host, const char *user
 #define mysql_real_connect test_connect
 #include "mapiproxy/util/mysql.c"
 #include <unistd.h>
+static bool fail_rollback;
+static int test_query(MYSQL *connection, const char *sql)
+{
+    if (fail_rollback && !strcmp(sql, "ROLLBACK")) return 1;
+    return mysql_query(connection, sql);
+}
+#define mysql_query test_query
 #include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
 
 void mapistore_set_errno(int status) { errno = status; }
@@ -184,6 +191,39 @@ static bool named_properties_lost_transaction(MYSQL *connection, const char *hos
     return transaction_cancel(&backend) == MAPISTORE_SUCCESS;
 }
 
+static bool named_properties_failed_rollback(MYSQL *connection, const char *database, const char *host,
+    const char *user, const char *password, unsigned port)
+{
+    struct namedprops_context backend = { .data = connection };
+    struct MAPINAMEID name = { .ulKind = MNID_ID, .kind.lid = 778 };
+    MYSQL *observer = mysql_init(NULL), *borrowed = connection;
+    uint16_t id;
+    uint64_t old_session, new_session;
+    bool ok = false;
+    if (!observer || !mysql_real_connect(observer, host, user, password, database, port, NULL, 0)) FAIL();
+    if (select_first_uint(connection, "SELECT CONNECTION_ID()", &old_session) != MYSQL_SUCCESS ||
+        transaction_start(&backend) != MAPISTORE_SUCCESS ||
+        next_unused_id(&backend, &id) != MAPISTORE_SUCCESS ||
+        create_id(&backend, name, id) != MAPISTORE_SUCCESS) FAIL();
+    /* Inject a ROLLBACK error while the real session and transaction stay alive. */
+    fail_rollback = true;
+    if (transaction_cancel(&backend) != MAPISTORE_ERR_DATABASE_OPS) FAIL();
+    fail_rollback = false;
+    if (!scalar_equals(observer, "SELECT IS_FREE_LOCK("NAMEDPROPS_LOCK")", "1")) FAIL();
+    /* Both borrowers retain a valid handle and use a new, correctly configured session. */
+    if (mysql_ping(borrowed) ||
+        select_first_uint(borrowed, "SELECT CONNECTION_ID()", &new_session) != MYSQL_SUCCESS || new_session == old_session ||
+        !scalar_equals(borrowed, "SELECT @@character_set_connection", "utf8mb4") ||
+        !scalar_equals(borrowed, "SELECT @@SESSION.sql_mode NOT LIKE '%NO_BACKSLASH_ESCAPES%'", "1") ||
+        get_mapped_id(&backend, name, &id) != MAPISTORE_ERR_NOT_FOUND ||
+        transaction_start(&backend) != MAPISTORE_SUCCESS) FAIL();
+    ok = transaction_cancel(&backend) == MAPISTORE_SUCCESS;
+end:
+    fail_rollback = false;
+    if (observer) mysql_close(observer);
+    return ok;
+}
+
 static bool result_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
 {
     struct StringArrayW_r *array;
@@ -245,14 +285,16 @@ int main(void)
             !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(ctx, connection) ||
             !result_roundtrip(ctx, connection) ||
             !named_properties_concurrency(connection, name, host, user, password, strtoul(port, NULL, 10)) ||
-            !named_properties_lost_transaction(connection, host, user, password, strtoul(port, NULL, 10))) FAIL();
+            !named_properties_lost_transaction(connection, host, user, password, strtoul(port, NULL, 10)) ||
+            !named_properties_failed_rollback(connection, name, host, user, password, strtoul(port, NULL, 10))) FAIL();
+        if (create_connection(uri, &reused) != connection || !reused) FAIL();
         quoted = mysql_quote_dbname(ctx, name);
         drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE %s", quoted) : NULL;
         if (!drop || mysql_query(connection, drop) != 0) FAIL();
         close_all_connections();
     }
     result = 0;
-    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results, concurrent allocation, connection-loss rollback and cleanup: OK");
+    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results, concurrent allocation, connection-loss rollback, failed-rollback recovery and cleanup: OK");
 end:
     close_all_connections(); talloc_free(ctx);
     return result;

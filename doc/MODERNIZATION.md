@@ -931,6 +931,24 @@ identity, constraints, ambiguous legacy data, duplicate inserts and seed
 uniqueness. These changes do not implement mailbox storage or modern Outlook
 transports.
 
+## Failed SQL transaction recovery (2026-10-29)
+
+Named-property cancellation now attempts to terminate the failed server session
+when ROLLBACK fails, without freeing the pooled MYSQL handle that other contexts
+borrow. Automatic reconnect stays disabled while the full SQL connection ID is
+read and that session is terminated. The request still returns a database error;
+a later retry can reconnect with the configured charset and SQL mode. If the
+session cannot be identified or terminated, its surviving lock is retained with
+a diagnostic requiring recovery.
+
+Substituted-driver tests cover successful cleanup, session IDs above 32 bits,
+failed session lookup, reconnect-option failure and failed termination. A live
+SQL test injects a rollback error while the real transaction remains active,
+checks advisory-lock release from another connection, verifies the write was
+rolled back and reuses the same pooled handle after reconnect. This avoids
+requiring a pool-wide ownership refactor for the successful recovery path;
+threaded sharing and failed termination remain outside that guarantee.
+
 ## Planning estimate
 
 The requested first test-server milestone is tracked through concrete build,
