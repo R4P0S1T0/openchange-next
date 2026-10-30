@@ -1859,9 +1859,12 @@ bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard 
 	cp target/release/mapihttpd $@
 
 .PHONY: check-mapihttp
-check-mapihttp:
+check-mapihttp: $(if $(OC_MAPIHTTP),check-oc-emsmdb)
 	@test -n "$(CARGO)" || { echo "check-mapihttp: configure with --enable-mapihttp"; exit 1; }
 	$(CARGO) test --offline --locked
+	OC_EMSMDB_LIBDIR=$(CURDIR)/mapiproxy/servers OC_EMSMDB_SMB_CONF=$(CURDIR)/$(OC_EMSMDB_TEST)/smb.conf \
+		LD_LIBRARY_PATH=$(CURDIR):$(CURDIR)/mapiproxy:$(CURDIR)/mapiproxy/servers:$(LD_LIBRARY_PATH) \
+		$(CARGO) test --offline --locked --features c-backend
 
 clean::
 	test -z "$(CARGO)" || $(CARGO) clean

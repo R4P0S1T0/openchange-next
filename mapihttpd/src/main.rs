@@ -1,7 +1,13 @@
 //! openchange-mapihttpd: MAPI/HTTP service listening on 127.0.0.1 behind a TLS reverse proxy.
 
 mod auth;
+// Request handling uses the backend from Task 5; until then only the tests use it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod backend;
 mod dovecot;
+#[cfg(any(feature = "c-backend", test))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod ffi;
 mod request;
 // Until Connect/Execute (Task 5), only the tests use every item.
 #[cfg_attr(not(test), allow(dead_code))]
