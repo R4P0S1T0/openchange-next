@@ -223,3 +223,31 @@ for more detailed leak report.
 
 
 Enjoy!
+
+Rust MAPI/HTTP (M1)
+------------------
+
+On a disposable lab VM with Rust 1.85 and the native build dependencies:
+
+    ./configure --enable-mapihttp --with-samba=/usr
+    make all
+    make check-emsmdb check-oc-emsmdb check-mapihttp
+    cargo fmt --check
+    cargo clippy --offline --locked --all-targets -- -D warnings
+    OC_EMSMDB_LIBDIR="$PWD/mapiproxy/servers" cargo clippy --offline --locked --all-targets --features c-backend -- -D warnings
+
+`check-mapihttp` runs both feature sets and prepares the C test's private LDB.
+The HTTP tests use in-memory streams; the Dovecot tests use a fake local UNIX
+socket. Captures under `modernization/mapihttp/` are sanitized Task 0 fixtures.
+No production endpoints are used. The C Connect path fails closed until M2.
+
+Instrument the boundary and its execution core explicitly, then restore plain
+objects (changing CC alone does not invalidate existing Make outputs):
+
+    make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+    make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb
+
+This instruments the C boundary, extracted execution core and harness, not all
+native dependencies. See [deployment and limits](../doc/MAPIHTTP.md) and
+[recorded results](../doc/MODERNIZATION.md#m1-local-validation-2026-10-30).
+The default configure/build does not require Cargo or enable the daemon.

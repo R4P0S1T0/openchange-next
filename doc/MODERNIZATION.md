@@ -107,6 +107,64 @@ never on a production server.
 
 Open questions are tracked in [development continuity](CONTINUITY.md).
 
+## M1 local validation (2026-10-30)
+
+The Rust MAPI/HTTP service is implemented on `m1-rust`, with Tasks 5 and 6
+reviewed and integrated and Task 7 documentation added. This is local branch
+validation, pending maintainer approval to push and merge; it is not a deployed
+service or completed lab acceptance. See [MAPIHTTP.md](MAPIHTTP.md) for options,
+systemd/nginx examples, vendor refresh, client proxy/PAC exceptions and the
+complete deferred minor review list.
+
+Validated in the existing isolated development environment with the extracted
+Debian 13 toolchain (Rust 1.85.1, GCC 14.2.0, Samba/PIDL 4.22.10):
+
+- `./configure --enable-mapihttp` with the local Samba paths and `make -j2 all`.
+  The daemon links the C backend. Its library prerequisites and transitive
+  library search paths are explicit, including the SONAME links.
+- `make check-emsmdb check-oc-emsmdb check-mapihttp`: 82 Rust tests without
+  `c-backend`, 83 with it, plus the C boundary and existing RPC harnesses.
+- `check-oc-emsmdb` with ASan/UBSan: the boundary, extracted execution core and
+  harness were explicitly rebuilt with the sanitizer compiler flags. Plain
+  objects were rebuilt and the harness passed afterward. Native dependencies
+  were not instrumented in this run; default leak detection was retained.
+- All 17 focused native targets listed in CONTINUITY.md passed, including
+  EMSMDB/NSPI/RPC, named properties and MySQL utilities. These are isolated
+  harnesses; no live SQL endpoint was selected.
+- `cargo fmt --check` and offline, locked, all-target Clippy with `-D warnings`
+  passed both with and without `c-backend`.
+- Default configure followed by `make -j2 all` passed without the Rust wrapper;
+  generated CARGO and OC_MAPIHTTP settings were empty.
+- Direct versions are pinned exactly and the refreshed lock/vendor set is
+  within local Debian 13 package ceilings, including transitive crates.
+  Windows/WASI targets without Debian packages remain pruned and unsupported.
+
+Task 5/6 review found NotificationWait incorrectly blocked by ordinary session
+requests. A failing regression test demonstrated this; separate ordinary and
+notification slots now permit the overlap required by MS-OXCMAPIHTTP 3.1.5.5.
+Pending operations prevent expiry and completion refreshes the idle timer.
+The final pass also restored the plan's X-PendingPeriod header, verified with
+a test that failed before the fix. The whole-branch review found no Critical
+issues; its Important CI-coverage and dependency-ceiling findings were fixed.
+The updated native CI job checks the enabled daemon and C boundary after its
+default-off build, including sanitizer and plain rebuilds. This workflow has
+not been run remotely for these commits.
+
+`cargo audit` could not run locally because cargo-audit is not installed
+(`no such command: audit`); no local advisory verdict is claimed. The CI audit
+remains a pending check after an authorized push. Existing upstream C compiler
+warnings remain; the Rust checks are warning-free.
+
+Not validated against this Rust service: real Dovecot (including canonical
+full-email user output), nginx, TLS, any Outlook version, Interop-TestSuites,
+NSPI request types beyond PING, chunked/PENDING responses, successful C Connect,
+Outlook profile creation, mailbox content or a complete SamDB-free deployment.
+The C Connect path deliberately fails closed pending M2's identity check.
+Task 0's Microsoft 365 Outlook 16.0.19127.20800 spike is separate evidence;
+Outlook 2016/2019/2013 SP1 still need lab validation. NotificationWait currently
+returns no events after its timeout, and reconnect cleanup waits for the idle
+sweeper. Never run these checks or deployment examples against production.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
