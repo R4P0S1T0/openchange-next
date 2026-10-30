@@ -1,10 +1,17 @@
 # First server lab plan
 
 Decision on 2026-10-29: a server is useful now for inventory and an isolated
-source build/staged install. Starting OpenChange services, provisioning AD and
-trying mailbox/Outlook workflows still require the
+source build/staged install. Starting OpenChange services, configuring the test
+mail stack and trying mailbox/Outlook workflows still require the
 [first-deployment acceptance criteria](TEST_SERVER_READINESS.md). The 40% marker
 remains a planning estimate, not a substitute for those criteria.
+
+Direction change on 2026-10-30: the lab mirrors the target single-server stack
+from the [project direction](MODERNIZATION.md#project-direction-2026-10-30)
+(Postfix, Dovecot 2.4, SOGo 5.12, MariaDB with the PostfixAdmin schema, nginx)
+with **no Active Directory, LDAP or Samba daemon**. Samba is installed only as
+build/runtime libraries. All of it runs on a disposable VM, never on the
+production server.
 
 ## Phases and evidence
 
@@ -12,18 +19,19 @@ remains a planning estimate, not a substitute for those criteria.
 | --- | --- | --- | --- |
 | 0. Inventory | Record OS, architecture, RAM/disk, existing services, network access and whether the machine is disposable | Host inventory and an agreed lab scope; no configuration changes | Can begin now |
 | 1. Build on the target OS | Build from the reviewed sources; run native/Python checks, install under DESTDIR, run the install checker and uninstall | Build/test logs, exact dependency versions, install manifest and zero remaining staged files | Can begin after host details; this does not install system services |
-| 2. Complete the deployment design | Select a mailbox storage backend, verify its ABI and supported operations; finish dependency/input review; specify AD, SQL/cache endpoints and teardown | A concrete reviewed configuration and backend build/tests, with first-deployment criteria satisfied | Blocked by mailbox storage and remaining review |
-| 3. Start a disposable server | Use a dedicated VM and test domain, provision AD and storage, start services and check local RPC/authentication | Provision/startup/health logs and a demonstrated reset to the initial VM state | Not yet ready |
-| 4. Exercise clients | Test mailbox logon, folders, messages, attachment/calendar operations and notifications; then a recorded Outlook version | A feature/result matrix with failures captured and account isolation checked | Depends on phase 3 |
+| 2. Complete the deployment design | Specify the test stack (Postfix, Dovecot, SOGo, MariaDB/PostfixAdmin, nginx), test accounts under `example.invalid`, SQL endpoints, Dovecot auth socket and master user, TLS test certificate and teardown; finish dependency/input review | A concrete reviewed configuration, with first-deployment criteria satisfied | Can be drafted now; service start still blocked by M1/M2 |
+| 3. Start a disposable server | Use a dedicated VM; install and configure the test mail stack with test accounts only; start openchange-next on 127.0.0.1 behind nginx; check Autodiscover, Dovecot authentication and MAPI/HTTP Connect | Configuration/startup/health logs and a demonstrated reset to the initial VM state | Not yet ready (needs M1; Connect success needs M2) |
+| 4. Exercise clients | Outlook 2016 or 2019 and classic Microsoft 365 Outlook on a Windows VM (2013 SP1 if licensed): profile creation, GAL, mailbox reads, then writes, cached mode, calendar/contacts as milestones M2–M6 land | A feature/result matrix per recorded edition/version/build, with failures captured and account isolation checked | Depends on phase 3 |
 
 No real accounts or an existing production domain are needed in phases 0–1.
-For phases 2–3, preserve a VM reset point before AD/schema changes. Leave the
+For phases 2–3, preserve a VM reset point before configuring the mail stack.
+No directory schema is changed at any phase. Leave the
 optional cache plugin disabled in the first configuration until its unresolved
 identity/integrity review is complete.
 
 ## Concrete storage blocker
 
-This checkout implements the MAPIStore backend loader and API. Its
+Still valid on 2026-10-30. This checkout implements the MAPIStore backend loader and API. Its
 [`backends/` directory](../mapiproxy/libmapistore/backends/) contains named-property
 and indexing adapters; these are metadata/index services, not a mailbox content
 backend. The former fsocpf build registration is commented out in
@@ -32,7 +40,11 @@ backend. The former fsocpf build registration is commented out in
 registration tests use synthetic backends.
 
 The reported target SOGo 5.12 installation has no OpenChange mailbox plugin;
-this plan does not treat it as an available backend.
+this plan does not treat it as an available backend. The chosen path is two new
+backends that use open protocols: IMAP against Dovecot (milestones M3/M4) and
+CalDAV/CardDAV against SOGo (M6, first slice in
+[the dav calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)).
+Neither exists yet.
 
 A successful `make all` or module load therefore does not provide a usable
 mailbox store. Before functional deployment, identify a concrete backend source
@@ -42,9 +54,11 @@ backend has been selected or qualified by this plan.
 
 ## Client transport blocker
 
-The recovered native RPC/TCP entry points do not establish compatibility with
-current Outlook. The historical RPC-over-HTTP service remains unported and a
-MAPI/HTTP service has not been implemented here. A mailbox backend alone will
+Still valid on 2026-10-30. The recovered native RPC/TCP entry points do not
+establish compatibility with current Outlook. RPC/TCP and RPC-over-HTTP are no
+longer targets; the selected transport is MAPI/HTTP with Autodiscover, planned
+as milestone M1 in [the M1 plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
+It has not been implemented here. A mailbox backend alone will
 not complete that client path. Outlook's precise edition, version and build
 must be part of the acceptance matrix.
 
@@ -52,8 +66,10 @@ The client work needs an implemented and tested HTTP transport, authentication,
 session lifecycle, Autodiscover responses and wire-level client checks.
 Microsoft documents [MAPI/HTTP and Outlook connectivity](https://learn.microsoft.com/en-us/troubleshoot/outlook/connectivity/outlook-not-connect-exchange-use-mapi-over-http)
 and [Autodiscover](https://learn.microsoft.com/en-us/exchange/architecture/client-access/autodiscover).
-This is a separate implementation/integration milestone after selecting the
-mailbox storage path, not a feature established by the current test suite.
+This is a separate implementation/integration milestone, not a feature
+established by the current test suite. Even with M1 complete, Connect cannot
+create a session without SamDB until M2 replaces the directory lookups
+(`emsmdbp_init` in `mapiproxy/servers/default/emsmdb/emsmdbp.c`).
 
 ## Host information needed
 
@@ -66,9 +82,10 @@ cat /etc/os-release
 uname -m
 free -h
 df -h /
-command -v samba samba-tool testparm
+command -v postfix dovecot sogod mariadb nginx
 # Missing packages are expected before preparing a new lab.
-dpkg-query -W -f='${binary:Package}\t${Version}\n' samba samba-dev python3-samba libmariadb3
+dpkg-query -W -f='${binary:Package}\t${Version}\n' postfix dovecot-core dovecot-imapd \
+  sogo mariadb-server nginx samba-dev python3-samba libmariadb3
 ```
 
 Do not include passwords, private keys or full application configuration in the
