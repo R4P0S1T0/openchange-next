@@ -5,7 +5,7 @@
 mod auth;
 mod request;
 
-use auth::{parse_authorization, AuthResult, Authenticator, BasicCredentials, Password};
+use auth::{AuthResult, Authenticator, Password};
 use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
@@ -13,7 +13,9 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use request::{format_reply, handle, reply, MapiReply, MapiRequest, Server, MAX_BODY};
+use request::{
+    check_headers, format_reply, handle_body, reply, MapiReply, MapiRequest, Server, MAX_BODY,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -99,32 +101,20 @@ async fn serve<A: Authenticator>(
         real_ip: h("X-Real-IP").and_then(|v| v.parse().ok()),
         body: &[],
     };
-    // Decide from headers alone what must not cost a body read: no Basic credentials or
-    // an oversized declared body. Chunked bodies are still capped by Limited below.
-    if !matches!(
-        parse_authorization(base.authorization),
-        BasicCredentials::Basic { .. }
-    ) {
-        return Ok(to_response(&reply(&base, 401, 0), t0.elapsed(), start));
-    }
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
-    if declared.is_some_and(|n| n > MAX_BODY as u64) {
-        return Ok(to_response(&reply(&base, 200, 9), t0.elapsed(), start));
-    }
-    let rep = match Limited::new(body, MAX_BODY).collect().await {
-        Ok(collected) => {
-            let bytes = collected.to_bytes();
-            handle(
-                &srv,
-                MapiRequest {
+    let rep = match check_headers(&srv, &base, declared).await {
+        Err(rep) => rep,
+        Ok(()) => match Limited::new(body, MAX_BODY).collect().await {
+            Ok(collected) => {
+                let bytes = collected.to_bytes();
+                handle_body(&MapiRequest {
                     body: &bytes,
                     ..base
-                },
-            )
-            .await
-        }
-        Err(e) if e.is::<LengthLimitError>() => reply(&base, 200, 9),
-        Err(e) => return Err(e),
+                })
+            }
+            Err(e) if e.is::<LengthLimitError>() => reply(&base, 200, 9),
+            Err(e) => return Err(e),
+        },
     };
     Ok(to_response(&rep, t0.elapsed(), start))
 }
@@ -191,6 +181,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use request::handle;
     use request::tests::{call, ping, run, FakeAuth, BASIC, CLIENT_INFO};
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -259,14 +250,15 @@ mod tests {
     }
 
     /// Sends request headers only (the declared body is never written) and returns the
-    /// response head; fails if the server waits for the body instead of answering.
-    fn head_only(headers: &str) -> String {
+    /// response head and the authenticator call count; fails if the server waits for the
+    /// body instead of answering.
+    fn head_only(headers: &str) -> (String, usize) {
         run(async {
             let (mut client, server) = tokio::io::duplex(64 * 1024);
             let srv = Arc::new(Server {
                 auth: FakeAuth::default(),
             });
-            tokio::spawn(serve_conn(srv, server));
+            tokio::spawn(serve_conn(srv.clone(), server));
             client.write_all(headers.as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let mut buf = [0u8; 4096];
@@ -278,18 +270,20 @@ mod tests {
                 assert!(n > 0, "connection closed without a response");
                 out.extend_from_slice(&buf[..n]);
             }
-            String::from_utf8(out).unwrap()
+            let calls = srv.auth.calls.load(Ordering::SeqCst);
+            (String::from_utf8(out).unwrap(), calls)
         })
     }
 
     #[test]
     fn test_bearer_large_body_not_read() {
-        let out = head_only(
+        let (out, calls) = head_only(
             "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\n\
              Authorization: Bearer eyJ0eXAi\r\nContent-Type: application/mapi-http\r\n\
-             X-RequestType: Execute\r\nX-RequestId: {A}:1\r\nContent-Length: 16777217\r\n\r\n",
+             X-RequestType: PING\r\nX-RequestId: {A}:1\r\nContent-Length: 16777217\r\n\r\n",
         );
         assert!(out.starts_with("HTTP/1.1 401 "), "{out}");
+        assert_eq!(calls, 0);
         assert!(
             out.contains("www-authenticate: Basic realm=\"openchange\""),
             "{out}"
@@ -297,11 +291,23 @@ mod tests {
     }
 
     #[test]
+    fn test_wrong_basic_body_not_read() {
+        // user:nope; 1 MiB declared (within the limit) and never sent.
+        let (out, calls) = head_only(
+            "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\n\
+             Authorization: Basic dXNlcjpub3Bl\r\nContent-Type: application/mapi-http\r\n\
+             X-RequestType: PING\r\nX-RequestId: {A}:1\r\nContent-Length: 1048576\r\n\r\n",
+        );
+        assert!(out.starts_with("HTTP/1.1 401 "), "{out}");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
     fn test_declared_too_large_not_read() {
-        let out = head_only(&format!(
+        let (out, _) = head_only(&format!(
             "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\n\
              Authorization: {BASIC}\r\nContent-Type: application/mapi-http\r\n\
-             X-RequestType: Execute\r\nX-RequestId: {{A}}:1\r\nContent-Length: 16777217\r\n\r\n"
+             X-RequestType: PING\r\nX-RequestId: {{A}}:1\r\nContent-Length: 16777217\r\n\r\n"
         ));
         assert!(out.starts_with("HTTP/1.1 200 "), "{out}");
         assert!(out.contains("x-responsecode: 9\r\n"), "{out}");

@@ -23,10 +23,11 @@ pub struct MapiRequest<'a> {
     #[allow(dead_code)] // read by the session cookie check (Task 2)
     pub cookie: Option<&'a str>,
     pub real_ip: Option<IpAddr>,
+    #[allow(dead_code)] // read by the body-carrying request types (Task 4)
     pub body: &'a [u8],
 }
 
-#[derive(Debug)]
+/// No Debug: it carries the session cookie.
 pub struct MapiReply {
     pub http_status: u16,
     pub response_code: u32,
@@ -38,40 +39,62 @@ pub struct MapiReply {
     pub expiration_ms: u32,
 }
 
-/// The single entry the hyper glue calls; error codes are those of 2.2.3.3.3.
+/// Header and body stages in sequence, as the glue runs them around its body read.
+#[cfg(test)]
 pub async fn handle<A: Authenticator>(srv: &Server<A>, req: MapiRequest<'_>) -> MapiReply {
+    let declared = u64::try_from(req.body.len()).ok();
+    match check_headers(srv, &req, declared).await {
+        Ok(()) => handle_body(&req),
+        Err(rep) => rep,
+    }
+}
+
+/// Everything decided before the body is read, in one fixed order (codes of 2.2.3.3.3).
+/// `declared_len` is the Content-Length; the glue still caps chunked bodies itself.
+pub async fn check_headers<A: Authenticator>(
+    srv: &Server<A>,
+    req: &MapiRequest<'_>,
+    declared_len: Option<u64>,
+) -> Result<(), MapiReply> {
     if req.method != "POST" {
-        return reply(&req, 200, 2);
+        return Err(reply(req, 200, 2));
     }
     let is_path = |p: &str| req.path.eq_ignore_ascii_case(p);
     if !is_path("/mapi/emsmdb/") && !is_path("/mapi/nspi/") {
-        return reply(&req, 200, 3);
-    }
-    // Bearer and other schemes are challenged without reaching the authenticator.
-    let BasicCredentials::Basic { user, password } = parse_authorization(req.authorization) else {
-        return reply(&req, 401, 0);
-    };
-    match srv.auth.authenticate(&user, &password, req.real_ip).await {
-        AuthResult::Ok { .. } => {}
-        AuthResult::BadCredentials => return reply(&req, 401, 0),
-        AuthResult::TempFail => return reply(&req, 503, 0),
+        return Err(reply(req, 200, 3));
     }
     let (Some(request_type), Some(_), Some(ctype)) =
         (req.request_type, req.request_id, req.content_type)
     else {
-        return reply(&req, 200, 7);
+        return Err(reply(req, 200, 7));
     };
     if !ctype.to_ascii_lowercase().contains("application/mapi-http") {
-        return reply(&req, 200, 4);
-    }
-    if req.body.len() > MAX_BODY {
-        return reply(&req, 200, 9);
+        return Err(reply(req, 200, 4));
     }
     // Only PING so far; the other request types arrive with their endpoints.
     if request_type != "PING" {
-        return reply(&req, 200, 5);
+        return Err(reply(req, 200, 5));
     }
-    reply(&req, 200, 0)
+    // Bearer and other schemes are challenged without reaching the authenticator.
+    let BasicCredentials::Basic { user, password } = parse_authorization(req.authorization) else {
+        return Err(reply(req, 401, 0));
+    };
+    if declared_len.is_some_and(|n| n > MAX_BODY as u64) {
+        return Err(reply(req, 200, 9));
+    }
+    match srv.auth.authenticate(&user, &password, req.real_ip).await {
+        AuthResult::Ok { .. } => Ok(()),
+        AuthResult::BadCredentials => Err(reply(req, 401, 0)),
+        AuthResult::TempFail => Err(reply(req, 503, 0)),
+    }
+}
+
+/// Runs a request that passed `check_headers`, with its body read.
+pub fn handle_body(req: &MapiRequest<'_>) -> MapiReply {
+    match req.request_type {
+        Some("PING") => reply(req, 200, 0),
+        _ => reply(req, 200, 5),
+    }
 }
 
 /// A reply echoing the request's identifying headers with an empty body.
@@ -169,6 +192,13 @@ pub(crate) mod tests {
             ..ping("/mapi/emsmdb/")
         });
         assert_eq!((rep.http_status, rep.response_code), (200, 2));
+        // Verb is checked before credentials, in handle and in the glue alike.
+        let anon = call(MapiRequest {
+            method: "GET",
+            authorization: None,
+            ..ping("/mapi/emsmdb/")
+        });
+        assert_eq!((anon.http_status, anon.response_code), (200, 2));
     }
 
     #[test]
