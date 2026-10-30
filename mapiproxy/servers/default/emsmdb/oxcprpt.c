@@ -1265,7 +1265,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetNamesFromIDs(TALLOC_CTX *mem_ctx,
 	OC_DEBUG(4, "exchange_emsmdb: [OXCPRPT] GetNamesFromIDs (0x55)\n");
 
 	/* Sanity checks */
-	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx, MAPI_E_NOT_INITIALIZED, NULL);
+	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx || !emsmdbp_ctx->mstore_ctx ||
+		!emsmdbp_ctx->mstore_ctx->nprops_ctx, MAPI_E_NOT_INITIALIZED, NULL);
 	OPENCHANGE_RETVAL_IF(!mapi_req, MAPI_E_INVALID_PARAMETER, NULL);
 	OPENCHANGE_RETVAL_IF(!mapi_repl, MAPI_E_INVALID_PARAMETER, NULL);
 	OPENCHANGE_RETVAL_IF(!handles, MAPI_E_INVALID_PARAMETER, NULL);
@@ -1278,7 +1279,18 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetNamesFromIDs(TALLOC_CTX *mem_ctx,
 	request = &mapi_req->u.mapi_GetNamesFromIDs;
 	response = &mapi_repl->u.mapi_GetNamesFromIDs;
 
-	response->nameid = talloc_array(mem_ctx, struct MAPINAMEID, request->PropertyIdCount);
+	response->count = 0;
+	response->nameid = NULL;
+	if (request->PropertyIdCount && !request->PropertyIds) {
+		mapi_repl->error_code = MAPI_E_INVALID_PARAMETER;
+		goto end;
+	}
+	if (!request->PropertyIdCount) goto end;
+	response->nameid = talloc_zero_array(mem_ctx, struct MAPINAMEID, request->PropertyIdCount);
+	if (!response->nameid) {
+		mapi_repl->error_code = MAPI_E_NOT_ENOUGH_MEMORY;
+		goto end;
+	}
 	response->count = request->PropertyIdCount;
 	for (i = 0; i < request->PropertyIdCount; i++) {
 		if (request->PropertyIds[i] < 0x8000) {
@@ -1286,7 +1298,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetNamesFromIDs(TALLOC_CTX *mem_ctx,
 			GUID_from_string(PS_MAPI, &response->nameid[i].lpguid);
 			response->nameid[i].kind.lid = (uint32_t) request->PropertyIds[i] << 16 | get_property_type(request->PropertyIds[i]);
 		}
-		else if (mapistore_namedprops_get_nameid(emsmdbp_ctx->mstore_ctx->nprops_ctx, request->PropertyIds[i], mem_ctx, &nameid) == MAPISTORE_SUCCESS) {
+		else if (mapistore_namedprops_get_nameid(emsmdbp_ctx->mstore_ctx->nprops_ctx, request->PropertyIds[i], response->nameid, &nameid) == MAPISTORE_SUCCESS) {
 			response->nameid[i] = *nameid;
 		}
 		else {
@@ -1294,6 +1306,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetNamesFromIDs(TALLOC_CTX *mem_ctx,
 		}
 	}
 
+end:
 	*size += libmapiserver_RopGetNamesFromIDs_size(mapi_repl);
 
 	return MAPI_E_SUCCESS;

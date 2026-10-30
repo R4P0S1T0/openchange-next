@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <poll.h>
+#include <string.h>
 
 /* Route all test connections, including pooled ones, to the explicit socket. */
 static MYSQL *test_connect(MYSQL *connection, const char *host, const char *user,
@@ -13,16 +14,25 @@ static MYSQL *test_connect(MYSQL *connection, const char *host, const char *user
         test_socket && *test_socket ? test_socket : socket, flags);
 }
 #define mysql_real_connect test_connect
-#include "mapiproxy/util/mysql.c"
 #include <unistd.h>
-static bool fail_rollback;
+static bool fail_rollback, fail_start, fail_release;
+static unsigned start_failures, release_failures;
 static int test_query(MYSQL *connection, const char *sql)
 {
     if (fail_rollback && !strcmp(sql, "ROLLBACK")) return 1;
+    if (fail_start && !strcmp(sql, "START TRANSACTION")) { start_failures++; return 1; }
+    if (fail_release && strstr(sql, "RELEASE_LOCK")) { release_failures++; return 1; }
     return mysql_query(connection, sql);
 }
 #define mysql_query test_query
+#include "mapiproxy/util/mysql.c"
+#define migrate_named_properties_schema test_migrate_named_properties_schema
+#define mapistore_errstr test_mapistore_errstr
 #include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
+
+static unsigned migration_calls;
+int test_migrate_named_properties_schema(const char *uri) { migration_calls++; return 1; }
+const char *test_mapistore_errstr(enum mapistore_error error) { return "test error"; }
 
 void mapistore_set_errno(int status) { errno = status; }
 
@@ -111,6 +121,46 @@ static bool named_properties_roundtrip(TALLOC_CTX *ctx, MYSQL *connection)
         GUID_equal(&name.lpguid, &decoded->lpguid);
     talloc_free(decoded);
     return valid;
+}
+
+/* This exercises the real initializer; physical v3 constraints have separate migration tests. */
+static bool named_properties_schema_gate(TALLOC_CTX *ctx, MYSQL *connection, const char *database,
+    const char *host, const char *user, const char *password, const char *port)
+{
+    TALLOC_CTX *attempt = talloc_new(ctx);
+    struct loadparm_context *lp = attempt ? loadparm_init(attempt) : NULL;
+    struct namedprops_context *backend;
+    bool ok = false;
+    if (!lp || !lpcfg_set_cmdline(lp, "namedproperties:mysql_user", user) ||
+        !lpcfg_set_cmdline(lp, "namedproperties:mysql_pass", password) ||
+        !lpcfg_set_cmdline(lp, "namedproperties:mysql_host", host) ||
+        !lpcfg_set_cmdline(lp, "namedproperties:mysql_port", port) ||
+        !lpcfg_set_cmdline(lp, "namedproperties:mysql_db", database)) goto end;
+    migration_calls = 0;
+    if (mysql_query(connection, "CREATE TABLE namedXproperties (value INT)")) goto end;
+    for (unsigned i = 0; i < 4; i++) {
+        if (i == 1 && mysql_query(connection, "CREATE TABLE migrations (app VARCHAR(64), version INT)")) goto end;
+        if (i == 2 && mysql_query(connection, "INSERT INTO migrations VALUES ('named_properties',2)")) goto end;
+        if (i == 3 && mysql_query(connection, "INSERT INTO migrations VALUES ('named_properties',3)")) goto end;
+        backend = (void *)1;
+        if (mapistore_namedprops_mysql_init(attempt, lp, &backend) !=
+            (i == 3 ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_INIT)) {
+            fprintf(stderr, "Live named-property schema gate failed case %u (missing table/record, v2, v3)\n", i);
+            goto end;
+        }
+        if ((backend != NULL) != (i == 3) || migration_calls ||
+            !scalar_equals(connection, "SELECT COUNT(*) FROM named_properties", "8") ||
+            !scalar_equals(connection, "SELECT COUNT(*) FROM namedXproperties", "0")) {
+            fprintf(stderr, "Live schema gate mutated existing tables or invoked migration in case %u\n", i);
+            goto end;
+        }
+        if (backend) talloc_free(backend);
+        if (i && !scalar_equals(connection, "SELECT COUNT(*) FROM migrations", i == 1 ? "0" : i == 2 ? "1" : "2")) goto end;
+    }
+    ok = true;
+end:
+    talloc_free(attempt);
+    return ok;
 }
 
 static bool named_properties_concurrency(MYSQL *connection, const char *database,
@@ -209,7 +259,9 @@ static bool named_properties_failed_rollback(MYSQL *connection, const char *data
     fail_rollback = true;
     if (transaction_cancel(&backend) != MAPISTORE_ERR_DATABASE_OPS) FAIL();
     fail_rollback = false;
-    if (!scalar_equals(observer, "SELECT IS_FREE_LOCK("NAMEDPROPS_LOCK")", "1")) FAIL();
+    /* Session termination may finish asynchronously; wait for ownership from another session. */
+    if (!scalar_equals(observer, "SELECT GET_LOCK("NAMEDPROPS_LOCK",5)", "1") ||
+        !scalar_equals(observer, "SELECT RELEASE_LOCK("NAMEDPROPS_LOCK")", "1")) FAIL();
     /* Both borrowers retain a valid handle and use a new, correctly configured session. */
     if (mysql_ping(borrowed) ||
         select_first_uint(borrowed, "SELECT CONNECTION_ID()", &new_session) != MYSQL_SUCCESS || new_session == old_session ||
@@ -220,6 +272,37 @@ static bool named_properties_failed_rollback(MYSQL *connection, const char *data
     ok = transaction_cancel(&backend) == MAPISTORE_SUCCESS;
 end:
     fail_rollback = false;
+    if (observer) mysql_close(observer);
+    return ok;
+}
+
+static bool named_properties_failed_start(MYSQL *connection, const char *database, const char *host,
+    const char *user, const char *password, unsigned port)
+{
+    struct namedprops_context backend = { .data = connection };
+    MYSQL *observer = mysql_init(NULL), *borrowed = connection;
+    uint64_t old_session, new_session;
+    unsigned starts = start_failures, releases = release_failures;
+    bool ok = false;
+    if (!observer || !mysql_real_connect(observer, host, user, password, database, port, NULL, 0)) FAIL();
+    if (select_first_uint(connection, "SELECT CONNECTION_ID()", &old_session) != MYSQL_SUCCESS) FAIL();
+    /* Leave the acquired real lock intact when START and its RELEASE_LOCK cleanup fail. */
+    fail_start = fail_release = true;
+    if (transaction_start(&backend) != MAPISTORE_ERR_DATABASE_OPS ||
+        start_failures != starts + 1 || release_failures != releases + 1) FAIL();
+    fail_start = fail_release = false;
+    /* Session termination may finish asynchronously; wait for ownership from another session. */
+    if (!scalar_equals(observer, "SELECT GET_LOCK("NAMEDPROPS_LOCK",5)", "1") ||
+        !scalar_equals(observer, "SELECT RELEASE_LOCK("NAMEDPROPS_LOCK")", "1")) FAIL();
+    if (backend.data != borrowed || mysql_ping(borrowed) ||
+        select_first_uint(borrowed, "SELECT CONNECTION_ID()", &new_session) != MYSQL_SUCCESS || new_session == old_session ||
+        !scalar_equals(borrowed, "SELECT @@character_set_connection", "utf8mb4") ||
+        !scalar_equals(borrowed, "SELECT @@SESSION.sql_mode NOT LIKE '%NO_BACKSLASH_ESCAPES%'", "1") ||
+        transaction_start(&backend) != MAPISTORE_SUCCESS) FAIL();
+    ok = transaction_cancel(&backend) == MAPISTORE_SUCCESS;
+end:
+    fail_start = fail_release = false;
+    if (!ok) transaction_cancel(&backend);
     if (observer) mysql_close(observer);
     return ok;
 }
@@ -247,6 +330,8 @@ int main(void)
     const char *password = getenv("OPENCHANGE_TEST_MYSQL_PASSWORD");
     const char *port = getenv("OPENCHANGE_TEST_MYSQL_PORT");
     uint64_t nonce;
+    MYSQL *connection = NULL;
+    char *drop = NULL;
     int result = 1, i;
     if ((!host || !*host) && getenv("OPENCHANGE_TEST_MYSQL_SOCKET")) host = "localhost";
     if (!ctx || !host || !*host || getentropy(&nonce, sizeof(nonce)) != 0) {
@@ -259,11 +344,15 @@ int main(void)
     for (i = 0; i < 2; i++) {
         char *name = talloc_asprintf(ctx, "openchange_test_%"PRIx64"%s", nonce, i ? "`quoted" : "");
         char *uri;
-        MYSQL *connection = NULL, *reused = NULL;
+        MYSQL *reused = NULL;
+        connection = NULL;
         MYSQL_RES *rows;
         MYSQL_ROW row;
-        char *quoted, *drop;
+        char *quoted;
         if (!name) FAIL();
+        quoted = mysql_quote_dbname(ctx, name);
+        drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE IF EXISTS %s", quoted) : NULL;
+        if (!drop) FAIL();
         uri = talloc_asprintf(ctx, "mysql://%s:%s@%s:%s/%s", user, password, host, port, name);
         if (!uri || !create_connection(uri, &connection)) FAIL();
         if (create_connection(uri, &reused) != connection || !reused) FAIL();
@@ -283,19 +372,22 @@ int main(void)
             !scalar_equals(connection, "SELECT @@character_set_connection", "utf8mb4") ||
             !scalar_equals(connection, "SELECT DATABASE()", name) ||
             !literals_roundtrip(ctx, connection) || !named_properties_roundtrip(ctx, connection) ||
+            !named_properties_schema_gate(ctx, connection, name, host, user, password, port) ||
             !result_roundtrip(ctx, connection) ||
             !named_properties_concurrency(connection, name, host, user, password, strtoul(port, NULL, 10)) ||
             !named_properties_lost_transaction(connection, host, user, password, strtoul(port, NULL, 10)) ||
-            !named_properties_failed_rollback(connection, name, host, user, password, strtoul(port, NULL, 10))) FAIL();
+            !named_properties_failed_rollback(connection, name, host, user, password, strtoul(port, NULL, 10)) ||
+            !named_properties_failed_start(connection, name, host, user, password, strtoul(port, NULL, 10))) FAIL();
         if (create_connection(uri, &reused) != connection || !reused) FAIL();
-        quoted = mysql_quote_dbname(ctx, name);
-        drop = quoted ? talloc_asprintf(ctx, "DROP DATABASE %s", quoted) : NULL;
-        if (!drop || mysql_query(connection, drop) != 0) FAIL();
-        close_all_connections();
+        if (mysql_query(connection, drop) != 0) FAIL();
+        drop = NULL;
+        close_all_connections(); connection = NULL;
     }
     result = 0;
-    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results, concurrent allocation, connection-loss rollback, failed-rollback recovery and cleanup: OK");
+    puts("Live SQL creation/reopen/reuse, literal round trips, charset/mode, forced reconnect, named properties/results and schema gate, concurrent allocation, connection-loss rollback, failed-rollback/start recovery and cleanup: OK");
 end:
+    if (drop && connection && mysql_query(connection, drop))
+        fprintf(stderr, "Disposable SQL database cleanup failed (error %u)\n", mysql_errno(connection));
     close_all_connections(); talloc_free(ctx);
     return result;
 }

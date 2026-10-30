@@ -20,6 +20,7 @@
  */
 
 #include "libmapi/libmapi.h"
+#include "libmapi/libmapi_private.h"
 #include "namedprops_ldb.h"
 #include "../mapistore.h"
 #include "../mapistore_private.h"
@@ -272,49 +273,59 @@ static enum mapistore_error get_nameid(struct namedprops_context *self,
 				       TALLOC_CTX *mem_ctx,
 				       struct MAPINAMEID **nameidp)
 {
-	TALLOC_CTX			*local_mem_ctx;
-	struct ldb_result		*res = NULL;
-	const char * const		attrs[] = { "*", NULL };
-	const char			*guid, *oClass, *cn;
-        struct MAPINAMEID		*nameid;
-	int				rc = MAPISTORE_SUCCESS;
+	TALLOC_CTX *local_mem_ctx;
+	struct ldb_result *res = NULL;
+	const char * const attrs[] = { "*", NULL };
+	const char *guid, *oClass, *cn;
+	char *end;
+	struct MAPINAMEID *nameid = NULL;
+	unsigned long long lid;
+	size_t name_size;
+	int ret;
+	enum mapistore_error status = MAPISTORE_ERR_INVALID_DATA;
 
+	MAPISTORE_RETVAL_IF(!nameidp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	*nameidp = NULL;
+	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 	local_mem_ctx = talloc_new(NULL);
-
-	struct ldb_context *ldb_ctx = self->data;
-	int ret = ldb_search(ldb_ctx, local_mem_ctx, &res, ldb_get_default_basedn(ldb_ctx),
-			     LDB_SCOPE_SUBTREE, attrs, "(mappedId=%d)", propID);
+	MAPISTORE_RETVAL_IF(!local_mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	ret = ldb_search(self->data, local_mem_ctx, &res, ldb_get_default_basedn(self->data),
+		LDB_SCOPE_SUBTREE, attrs, "(mappedId=%u)", propID);
 	MAPISTORE_RETVAL_IF(ret != LDB_SUCCESS || !res->count, MAPISTORE_ERROR, local_mem_ctx);
+	MAPISTORE_RETVAL_IF(res->count != 1, MAPISTORE_ERR_INVALID_DATA, local_mem_ctx);
 
-	guid = ldb_msg_find_attr_as_string(res->msgs[0], "oleguid", 0);
-	MAPISTORE_RETVAL_IF(!guid, MAPISTORE_ERROR, local_mem_ctx);
-
-	cn = ldb_msg_find_attr_as_string(res->msgs[0], "cn", 0);
-	MAPISTORE_RETVAL_IF(!cn, MAPISTORE_ERROR, local_mem_ctx);
-
-	oClass = ldb_msg_find_attr_as_string(res->msgs[0], "objectClass", 0);
-	MAPISTORE_RETVAL_IF(!propID, MAPISTORE_ERROR, local_mem_ctx);
+	guid = ldb_msg_find_attr_as_string(res->msgs[0], "oleguid", NULL);
+	cn = ldb_msg_find_attr_as_string(res->msgs[0], "cn", NULL);
+	oClass = ldb_msg_find_attr_as_string(res->msgs[0], "objectClass", NULL);
+	MAPISTORE_RETVAL_IF(!guid || !cn || !oClass, MAPISTORE_ERR_INVALID_DATA, local_mem_ctx);
 
 	nameid = talloc_zero(mem_ctx, struct MAPINAMEID);
-	GUID_from_string(guid, &nameid->lpguid);
+	if (!nameid) { status = MAPISTORE_ERR_NO_MEMORY; goto end; }
+	if (!NT_STATUS_IS_OK(GUID_from_string(guid, &nameid->lpguid))) goto end;
 	if (strcmp(oClass, "MNID_ID") == 0) {
+		errno = 0;
+		lid = strtoull(cn, &end, 16);
+		if (errno || end == cn || *end || strchr(cn, '-') || lid > UINT32_MAX) goto end;
 		nameid->ulKind = MNID_ID;
-		nameid->kind.lid = strtol(cn, NULL, 16);
+		nameid->kind.lid = lid;
 	} else if (strcmp(oClass, "MNID_STRING") == 0) {
+		name_size = get_utf8_utf16_conv_length(cn);
+		if (name_size > UINT8_MAX) goto end;
 		nameid->ulKind = MNID_STRING;
-		nameid->kind.lpwstr.NameSize = strlen(cn) * 2 + 2;
+		nameid->kind.lpwstr.NameSize = name_size;
 		nameid->kind.lpwstr.Name = talloc_strdup(nameid, cn);
+		if (!nameid->kind.lpwstr.Name) { status = MAPISTORE_ERR_NO_MEMORY; goto end; }
 	} else {
-		talloc_free(nameid);
-		nameid = NULL;
-		rc = MAPISTORE_ERROR;
+		goto end;
 	}
-
 	*nameidp = nameid;
-
+	nameid = NULL;
+	status = MAPISTORE_SUCCESS;
+end:
+	talloc_free(nameid);
 	talloc_free(local_mem_ctx);
-
-	return rc;
+	if (status != MAPISTORE_SUCCESS) mapistore_set_errno(status);
+	return status;
 }
 
 static enum mapistore_error get_nameid_type(struct namedprops_context *self,

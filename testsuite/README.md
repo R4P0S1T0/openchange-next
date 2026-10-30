@@ -107,6 +107,9 @@ Named-property creation and rollback have a separate isolated check:
 It calls the actual GetPropertyIdsFromNames ROP with a temporary LDB database.
 It checks literal names, repeated names, invalid requests, allocation failures,
 lookup/start/create/commit/cancel failures, transaction rollback and ID exhaustion.
+It also calls the LDB reverse getter and GetNamesFromIDs: stored kind/GUID/LID
+validation, UTF-16 name-size limits, missing contexts, malformed input arrays,
+allocation failure, mixed reply sizes and response-owned string lifetime.
 SQL allocation bounds and transaction commands are covered by `check-mysql-utils`
 with a substituted driver, including lock timeouts, recursive transaction
 rejection and lock/reconnect cleanup. `make check-mysql-live` additionally covers
@@ -117,6 +120,32 @@ socket, or the host/port variables above. Live RPC is not covered. The Python ru
 version-3 schema migration, Unicode property identity, UNIQUE constraints and
 refusal to remap ambiguous legacy IDs. See
 [the upgrade procedure](../doc/NAMED_PROPERTIES_UPGRADE.md).
+
+The SQL utility harness also calls the actual initializer with a substituted
+driver. It checks exact table lookup, lookup errors, required migration version
+3, failed creation/postvalidation and no migration of existing tables. The live
+harness repeats the metadata gate with ordinary/quoted database names and a
+wildcard-like sibling table; physical v3 constraints are checked by the Python
+migration suite. Existing databases require the documented offline upgrade;
+version metadata alone is not a physical schema audit.
+
+Start-cleanup checks inject GET_LOCK result-read or START TRANSACTION failure
+after acquisition plus RELEASE_LOCK failure. They verify own-session recovery,
+unchanged borrowed handles, conservative manual recovery and controls that must
+leave existing sessions alive. The live START/release injection requires actual
+lock release to another connection and reconnect/reuse of the same handle.
+Failed session identification/termination or reconnect restoration can require
+quiescing users and recovering the affected service/connection pool. Concurrent
+threaded use of a MYSQL handle is not covered.
+
+On 2026-10-30, the cumulative checks passed locally: full/incremental build,
+namedprops/MySQL/EMSMDB/NDR targets, 40 tooling tests, 28 runtime tests (no skips),
+live SQL, focused ASan/UBSan with default leak detection, ordinary rebuild, and
+all 11 staged-install runtime checks followed by empty uninstall. SQL used an
+explicit private MariaDB 11.8.6 UNIX socket with TCP disabled; socket tests
+required execution outside the restricted sandbox. Dependencies were not
+sanitizer-instrumented. No network server, Outlook exchange or new remote CI
+run was validated. See [the consolidated results](../doc/MODERNIZATION.md#named-property-consolidated-validation-2026-10-30).
 
 Staged installation checks
 --------------------------

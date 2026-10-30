@@ -238,6 +238,22 @@ static enum mapistore_error transaction_unlock(struct namedprops_context *self)
 	return MAPISTORE_SUCCESS;
 }
 
+static bool disconnect_failed_transaction(MYSQL *conn)
+{
+	my_bool reconnect = false;
+	uint64_t id;
+	char sql[64];
+
+	/* Never reconnect while identifying the session whose cleanup failed. */
+	if (mysql_options(conn, MYSQL_OPT_RECONNECT, &reconnect) ||
+	    select_first_uint(conn, "SELECT CONNECTION_ID()", &id) != MYSQL_SUCCESS) {
+		return false;
+	}
+	/* Keep borrowed MYSQL pointers valid; terminate only their server session. */
+	snprintf(sql, sizeof(sql), "KILL CONNECTION %"PRIu64, id);
+	return mysql_query(conn, sql) == 0;
+}
+
 static enum mapistore_error transaction_start(struct namedprops_context *self)
 {
 	uint64_t locked;
@@ -254,16 +270,28 @@ static enum mapistore_error transaction_start(struct namedprops_context *self)
 	ret = select_first_uint(self->data, "SELECT GET_LOCK("NAMEDPROPS_LOCK",5)", &locked);
 	if (ret != MYSQL_SUCCESS || locked != 1) {
 		/* A result-read failure may occur after the server acquired the lock. */
-		if (ret != MYSQL_SUCCESS) transaction_unlock(self);
-		reconnect = true;
-		mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect);
-		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
+		if (ret != MYSQL_SUCCESS) goto unlock;
+		goto error;
 	}
-	if (mysql_query(self->data, "START TRANSACTION") != 0) {
-		transaction_unlock(self);
-		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
-	}
+	if (mysql_query(self->data, "START TRANSACTION") != 0) goto unlock;
 	return MAPISTORE_SUCCESS;
+unlock:
+	if (transaction_unlock(self) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(0, "Named-property start cleanup failed (error %u, SQLSTATE %.5s)",
+			mysql_errno(self->data), mysql_sqlstate(self->data));
+		if (disconnect_failed_transaction(self->data)) {
+			OC_DEBUG(0, "Terminated failed named-property SQL session; retry can reconnect");
+		} else {
+			OC_DEBUG(0, "Cannot terminate failed named-property SQL session; "
+				"a surviving session retains its lock and requires connection recovery");
+		}
+	}
+error:
+	reconnect = true;
+	if (mysql_options(self->data, MYSQL_OPT_RECONNECT, &reconnect)) {
+		OC_DEBUG(0, "Cannot restore named-property SQL reconnect policy after failed start");
+	}
+	MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_OPS, NULL);
 }
 
 static enum mapistore_error transaction_commit(struct namedprops_context *self)
@@ -271,22 +299,6 @@ static enum mapistore_error transaction_commit(struct namedprops_context *self)
 	MAPISTORE_RETVAL_IF(!self || !self->data, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 	MAPISTORE_RETVAL_IF(mysql_query(self->data, "COMMIT"), MAPISTORE_ERR_DATABASE_OPS, NULL);
 	return transaction_unlock(self);
-}
-
-static bool disconnect_failed_transaction(MYSQL *conn)
-{
-	my_bool reconnect = false;
-	uint64_t id;
-	char sql[64];
-
-	/* Never reconnect while identifying the session whose rollback failed. */
-	if (mysql_options(conn, MYSQL_OPT_RECONNECT, &reconnect) ||
-	    select_first_uint(conn, "SELECT CONNECTION_ID()", &id) != MYSQL_SUCCESS) {
-		return false;
-	}
-	/* Keep borrowed MYSQL pointers valid; terminate only their server session. */
-	snprintf(sql, sizeof(sql), "KILL CONNECTION %"PRIu64, id);
-	return mysql_query(conn, sql) == 0;
 }
 
 static enum mapistore_error transaction_cancel(struct namedprops_context *self)
@@ -374,6 +386,20 @@ static char *connection_string_from_parameters(TALLOC_CTX *mem_ctx, struct named
 	return talloc_asprintf_append(connection_string, "/%s", parms->db);
 }
 
+static enum mapistore_error validate_namedprops_schema(MYSQL *conn)
+{
+	uint64_t version;
+
+	if (select_first_uint(conn,
+		"SELECT MAX(version) FROM migrations WHERE app='named_properties'",
+		&version) != MYSQL_SUCCESS || version != 3) {
+		OC_DEBUG(0, "Named-property SQL schema requires migration version 3; "
+			"follow the named-property upgrade procedure before retrying");
+		return MAPISTORE_ERR_DATABASE_INIT;
+	}
+	return MAPISTORE_SUCCESS;
+}
+
 /**
    \details Initialize mapistore named properties MySQL backend
 
@@ -394,10 +420,12 @@ enum mapistore_error mapistore_namedprops_mysql_init(TALLOC_CTX *mem_ctx,
 	MYSQL				*conn = NULL;
 	char				*connection_string = NULL;
 	int				schema_created_ret;
+	uint64_t			table_count;
 
 	/* Sanity checks */
-	MAPISTORE_RETVAL_IF(!lp_ctx, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 	MAPISTORE_RETVAL_IF(!nprops_ctx, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	*nprops_ctx = NULL;
+	MAPISTORE_RETVAL_IF(!lp_ctx, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
 
 	/* Retrieve smb.conf arguments */
 	retval = mapistore_namedprops_mysql_parameters(lp_ctx, &parms);
@@ -414,14 +442,21 @@ enum mapistore_error mapistore_namedprops_mysql_init(TALLOC_CTX *mem_ctx,
 	if (parms.sock) {
 		// FIXME
 		OC_DEBUG(0, "Not implemented connect through unix socket to mysql");
-		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_INIT, NULL);
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_INIT, connection_string);
 	} else {
 		create_connection(connection_string, &conn);
 	}
-	MAPISTORE_RETVAL_IF(!conn, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!conn, MAPISTORE_ERR_NOT_INITIALIZED, connection_string);
 
 	/* Initialize the database */
-	if (!table_exists(conn, NAMEDPROPS_MYSQL_TABLE)) {
+	if (select_first_uint(conn,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE "
+		"BINARY table_schema=BINARY DATABASE() AND BINARY table_name='named_properties'",
+		&table_count) != MYSQL_SUCCESS) {
+		OC_DEBUG(0, "Failed to read named-property SQL table existence");
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_DATABASE_INIT, connection_string);
+	}
+	if (table_count == 0) {
 		OC_DEBUG(3, "Creating schema for named_properties on MySQL");
 		schema_created_ret = migrate_named_properties_schema(connection_string);
 		if (schema_created_ret) {
@@ -431,6 +466,8 @@ enum mapistore_error mapistore_namedprops_mysql_init(TALLOC_CTX *mem_ctx,
 		}
 	}
 
+	retval = validate_namedprops_schema(conn);
+	MAPISTORE_RETVAL_IF(retval != MAPISTORE_SUCCESS, retval, connection_string);
 	talloc_free(connection_string);
 
 	/* Create context */

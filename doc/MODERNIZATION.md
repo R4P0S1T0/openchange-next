@@ -798,8 +798,8 @@ allocation. Native and ASan/UBSan/LeakSanitizer checks pass, along with both ful
 build trees. The real private SQL test now verifies reverse names, GUIDs, numeric
 property IDs, property types and independently recorded UTF-16 sizes after a
 forced reconnect. The private server and all fixture data are removed afterward.
-The LDB named-property backend and broader protocol semantics remain separate
-review work.
+The LDB reverse-decoding and GetNamesFromIDs follow-up is recorded below under
+the 2026-10-30 validation; broader protocol semantics remain separate review work.
 
 ## Remaining blockers
 
@@ -948,6 +948,59 @@ checks advisory-lock release from another connection, verifies the write was
 rolled back and reuses the same pooled handle after reconnect. This avoids
 requiring a pool-wide ownership refactor for the successful recovery path;
 threaded sharing and failed termination remain outside that guarantee.
+
+## Named-property consolidated validation (2026-10-30)
+
+The LDB reverse getter now validates stored kinds, GUIDs, numeric LIDs and
+UTF-16 name sizes before publishing a caller-owned result. Invalid data and
+allocation failures leave no partial name. `GetNamesFromIDs` validates its
+contexts and input array, handles allocation failure, and owns backend names
+under the response array. Valid mixed replies keep their existing wire sizes
+and per-property `0xff` failure markers.
+
+SQL initialization now requires exactly migration version 3. It rejects a
+failed exact-table lookup and unsupported or missing migration metadata without
+migrating an existing table. Existing databases require the offline upgrade and
+data assessment in [the upgrade procedure](NAMED_PROPERTIES_UPGRADE.md) before
+writers restart. Version metadata alone does not certify physical constraints.
+
+Failed transaction start also checks cleanup after GET_LOCK result-read or
+START TRANSACTION errors. If RELEASE_LOCK fails, it attempts to terminate only
+its own session while preserving the borrowed MYSQL handle and returning the
+original database error. If session identification/termination or reconnect
+restoration fails, quiesce users and recover the affected service/connection
+pool as documented in the upgrade procedure. Concurrent threaded use of one
+MYSQL handle remains unsupported.
+
+The following checks passed locally on the cumulative uncommitted changes over
+`42c5fbc4`, using GCC 14.2.0, Python 3.13.5, Samba/PIDL 4.22.10 and MariaDB 11.8.6
+with the existing extracted Debian toolchain:
+
+- `make -j4 all` and a final incremental repeat.
+- `make check-namedprops check-mysql-utils check-emsmdb check-ndr-modernization`.
+- All 40 tooling tests and all 28 Python runtime tests, with no skips.
+- `make check-mysql-live` against an explicitly selected private UNIX socket
+  with TCP disabled. SQL runtime tests used that same disposable endpoint.
+- The four named-property/MySQL harnesses force-rebuilt with ASan/UBSan and
+  default leak detection, including the live check, then force-rebuilt and
+  rerun with ordinary compiler flags. Linked dependencies were not instrumented.
+- Private DESTDIR install, all 11 installed runtime checks (seven libraries,
+  nine modules, CLI help and Python/template discovery), and uninstall with
+  zero remaining files or symlinks, following [TEST_INSTALL.md](TEST_INSTALL.md).
+
+The tooling socket tests required execution outside the restricted sandbox
+after its socket creation restriction caused five errors. SQL driver failure
+injection remains a mock test; the live harness separately checks actual lock
+release, reconnect and reuse, while Python tests exercise real v3 migrations
+and constraints. Existing Make targets and CI jobs invoke these cases; no
+workflow change or successful remote CI result is claimed for this snapshot.
+
+The controller retains the private SQL daemon and one earlier failed-run
+fixture database; they were not removed by this validation. No AD, Samba RPC,
+SMTP, SOGo or Outlook service/client exchange was started. Broader native
+NSPI/RPC/async/pack/cache suites and the legacy bare `make check` were not rerun;
+their prior results are historical evidence. This validation adds no server
+readiness acceptance or modernization percentage claim.
 
 ## Planning estimate
 

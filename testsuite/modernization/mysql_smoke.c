@@ -10,7 +10,8 @@ static enum { FAIL_NONE, FAIL_INIT, FAIL_AUTH, FAIL_QUERY, FAIL_SELECT, FAIL_ENT
 static bool need_database, charset_set, mode_set;
 static bool lock_held, reconnect_enabled = true;
 static bool lock_timeout, fail_reconnect_option, duplicate_entry, fail_disconnect, fail_session_id;
-static unsigned disconnected;
+static unsigned disconnected, disconnect_attempts;
+static bool fail_get_lock_fetch, get_lock_result, fail_release;
 static const char *fail_statement;
 static unsigned clock_mode, clock_calls;
 static int fixture_clock_gettime(clockid_t id, struct timespec *value)
@@ -26,14 +27,26 @@ static uint64_t result_rows_count = 1;
 static unsigned result_fields = 1, result_cursor, acquired, released;
 static char *result_values[3][4] = {{"one"}};
 static bool fail_store, fail_fetch, fail_result_copy, fail_escape;
+static bool namedprops_exists = true;
+static bool namedprops_wildcard_sibling, fail_table_lookup, table_lookup_query;
+static const char *schema_version = "3", *migrated_version = "3";
+static unsigned schema_reads, ddl_statements, migration_calls;
+static int migration_result;
+static MYSQL_RES *fixture_mysql_list_tables(MYSQL *mysql, const char *table)
+{
+    assert(!strcmp(table, "named_properties"));
+    if (fail_table_lookup) return NULL;
+    result_rows_count = namedprops_exists + namedprops_wildcard_sibling;
+    result_cursor = 0; acquired++; return &result_fixture;
+}
 static MYSQL_RES *fixture_mysql_store_result(MYSQL *mysql)
-{ if (fail_store) return NULL; result_cursor = 0; acquired++; return &result_fixture; }
+{ if (fail_store && !table_lookup_query) return NULL; result_cursor = 0; acquired++; return &result_fixture; }
 static void fixture_mysql_free_result(MYSQL_RES *result)
 { assert(result == &result_fixture && released < acquired); released++; }
 static my_ulonglong fixture_mysql_num_rows(MYSQL_RES *result) { return result_rows_count; }
 static unsigned fixture_mysql_field_count(MYSQL *mysql) { return result_fields; }
 static MYSQL_ROW fixture_mysql_fetch_row(MYSQL_RES *result)
-{ return fail_fetch || result_cursor >= result_rows_count ? NULL : result_values[result_cursor++]; }
+{ return (fail_fetch && !table_lookup_query) || (fail_get_lock_fetch && get_lock_result) || result_cursor >= result_rows_count ? NULL : result_values[result_cursor++]; }
 static char logs[8192], query[512];
 static size_t logged;
 static void fixture_debug(const char *format, ...)
@@ -83,6 +96,18 @@ static const char *fixture_mysql_sqlstate(MYSQL *mysql) { return "42000"; }
 static int fixture_mysql_query(MYSQL *mysql, const char *sql)
 {
     assert(mysql && strlen(sql) < sizeof(query)); strcpy(query, sql);
+    get_lock_result = strstr(sql, "GET_LOCK") != NULL;
+    table_lookup_query = !strcmp(sql, "SELECT COUNT(*) FROM information_schema.tables WHERE "
+        "BINARY table_schema=BINARY DATABASE() AND BINARY table_name='named_properties'");
+    if (table_lookup_query) {
+        if (fail_table_lookup) return 1;
+        result_rows_count = 1; result_values[0][0] = namedprops_exists ? "1" : "0";
+    }
+    if (!strncmp(sql, "CREATE ", 7) || !strncmp(sql, "ALTER ", 6) || !strncmp(sql, "DROP ", 5)) ddl_statements++;
+    if (!strcmp(sql, "SELECT MAX(version) FROM migrations WHERE app='named_properties'")) {
+        schema_reads++;
+        result_rows_count = 1; result_values[0][0] = (char *)schema_version;
+    }
     if (duplicate_entry && !strncmp(sql, "INSERT", 6)) return 1;
     if (failure == FAIL_QUERY || (fail_statement && strstr(sql, fail_statement))) return 1;
     if (!strcmp(sql, "SELECT CONNECTION_ID()")) {
@@ -91,6 +116,7 @@ static int fixture_mysql_query(MYSQL *mysql, const char *sql)
     }
     if (!strncmp(sql, "KILL CONNECTION ", 16)) {
         assert(!reconnect_enabled && !strcmp(sql, "KILL CONNECTION 1099511627777"));
+        disconnect_attempts++;
         if (fail_disconnect) return 1;
         lock_held = false; disconnected++;
     }
@@ -101,6 +127,7 @@ static int fixture_mysql_query(MYSQL *mysql, const char *sql)
         result_values[0][0] = lock_held ? "1" : "0";
     }
     if (strstr(sql, "RELEASE_LOCK")) {
+        if (fail_release) return 1;
         result_values[0][0] = lock_held ? "1" : NULL;
         lock_held = false;
     }
@@ -126,8 +153,20 @@ static int fixture_mysql_select(MYSQL *mysql, const char *database)
 #define mysql_num_rows fixture_mysql_num_rows
 #define mysql_field_count fixture_mysql_field_count
 #define mysql_fetch_row fixture_mysql_fetch_row
+#define mysql_list_tables fixture_mysql_list_tables
+#define migrate_named_properties_schema fixture_migrate_named_properties_schema
+#define mapistore_errstr fixture_mapistore_errstr
 #include "mapiproxy/util/mysql.c"
 #include "mapiproxy/libmapistore/backends/namedprops_mysql.c"
+
+int fixture_migrate_named_properties_schema(const char *uri)
+{
+    assert(strstr(uri, "fixture-secret"));
+    migration_calls++;
+    if (!migration_result) { namedprops_exists = true; schema_version = migrated_version; }
+    return migration_result;
+}
+const char *fixture_mapistore_errstr(enum mapistore_error error) { return "fixture error"; }
 
 void mapistore_set_errno(int status) { errno = status; }
 
@@ -153,6 +192,104 @@ bool __wrap_htable_add(struct htable *table, size_t hash, const void *entry)
     fprintf(stderr, "MySQL utility check failed at %d: %s\n", __LINE__, #c); \
     return 1; \
 } } while (0)
+
+static int named_property_initializer_checks(TALLOC_CTX *ctx)
+{
+    struct loadparm_context *lp = loadparm_init(ctx);
+    struct namedprops_context *backend;
+    TALLOC_CTX *attempt;
+    size_t blocks;
+    static const struct {
+        const char *label, *version;
+        bool query_error, store_error, fetch_error;
+    } rejected[] = {
+        {"legacy v2", "2"}, {"missing migration record", NULL}, {"NULL version", NULL},
+        {"invalid text", "junk"}, {"future v4", "4"}, {"zero version", "0"},
+        {"trailing text", "3x"}, {"overflow", "18446744073709551616"},
+        {"missing migrations table", "3", true}, {"read query failure", "3", true},
+        {"buffer failure", "3", false, true}, {"fetch failure", "3", false, false, true}
+    };
+    CHECK(lp);
+    backend = (void *)1;
+    CHECK(mapistore_namedprops_mysql_init(ctx, NULL, &backend) == MAPISTORE_ERR_INVALID_PARAMETER && !backend);
+    CHECK(mapistore_namedprops_mysql_init(ctx, lp, NULL) == MAPISTORE_ERR_INVALID_PARAMETER);
+    backend = (void *)1;
+    CHECK(mapistore_namedprops_mysql_init(ctx, lp, &backend) == MAPISTORE_ERR_BACKEND_INIT && !backend);
+    CHECK(lpcfg_set_cmdline(lp, "namedproperties:mysql_user", "user"));
+    CHECK(lpcfg_set_cmdline(lp, "namedproperties:mysql_pass", "fixture-secret"));
+    CHECK(lpcfg_set_cmdline(lp, "namedproperties:mysql_host", "host"));
+    CHECK(lpcfg_set_cmdline(lp, "namedproperties:mysql_db", "database"));
+    need_database = false;
+    bool existence_checks_ok = true;
+    for (unsigned i = 0; i < 2; i++) {
+        namedprops_wildcard_sibling = i == 0; fail_table_lookup = i == 1;
+        schema_version = "2";
+        schema_reads = ddl_statements = migration_calls = 0;
+        backend = (void *)1; attempt = talloc_new(ctx); CHECK(attempt);
+        blocks = talloc_total_blocks(attempt);
+        enum mapistore_error status = mapistore_namedprops_mysql_init(attempt, lp, &backend);
+        if (status != MAPISTORE_ERR_DATABASE_INIT || backend || migration_calls || ddl_statements) {
+            fprintf(stderr, "Unsafe initializer existence check (%s): status=%d, published=%u, migrations=%u, DDL=%u\n",
+                i == 0 ? "exact table plus wildcard sibling" : "lookup failure", status,
+                backend != NULL, migration_calls, ddl_statements);
+            existence_checks_ok = false;
+        }
+        if (backend) talloc_free(backend);
+        CHECK(talloc_total_blocks(attempt) == blocks);
+        talloc_free(attempt); close_all_connections();
+    }
+    namedprops_wildcard_sibling = fail_table_lookup = false;
+    CHECK(existence_checks_ok);
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        schema_version = rejected[i].version;
+        fail_statement = rejected[i].query_error ? "FROM migrations" : NULL;
+        fail_store = rejected[i].store_error; fail_fetch = rejected[i].fetch_error;
+        schema_reads = ddl_statements = migration_calls = 0;
+        backend = (void *)1; attempt = talloc_new(ctx); CHECK(attempt);
+        blocks = talloc_total_blocks(attempt);
+        if (mapistore_namedprops_mysql_init(attempt, lp, &backend) != MAPISTORE_ERR_DATABASE_INIT) {
+            fprintf(stderr, "Initializer accepted %s\n", rejected[i].label);
+            return 1;
+        }
+        CHECK(!backend && schema_reads == 1 && !ddl_statements && !migration_calls);
+        CHECK(talloc_total_blocks(attempt) == blocks);
+        talloc_free(attempt); close_all_connections();
+        fail_statement = NULL; fail_store = fail_fetch = false;
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        namedprops_exists = i == 0;
+        schema_version = migrated_version = i == 2 ? "2" : "3";
+        migration_result = i == 3 ? 1 : 0;
+        schema_reads = ddl_statements = migration_calls = 0;
+        backend = (void *)1; attempt = talloc_new(ctx); CHECK(attempt);
+        blocks = talloc_total_blocks(attempt);
+        CHECK(mapistore_namedprops_mysql_init(attempt, lp, &backend) ==
+            (i < 2 ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_INIT));
+        CHECK((backend != NULL) == (i < 2));
+        CHECK(schema_reads == (i == 3 ? 0 : 1) && !ddl_statements && migration_calls == (i == 0 ? 0 : 1));
+        if (backend) {
+            CHECK(backend->data && !strcmp(backend->backend_type, "mysql") && backend->get_nameid);
+            talloc_free(backend);
+        }
+        CHECK(talloc_total_blocks(attempt) == blocks);
+        talloc_free(attempt); close_all_connections();
+    }
+    namedprops_exists = true; migration_result = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        attempt = talloc_new(ctx); CHECK(attempt);
+        blocks = talloc_total_blocks(attempt); backend = (void *)1;
+        if (i == 0) failure = FAIL_AUTH;
+        else CHECK(lpcfg_set_cmdline(lp, "namedproperties:mysql_sock", "/fixture/socket"));
+        CHECK(mapistore_namedprops_mysql_init(attempt, lp, &backend) ==
+            (i == 0 ? MAPISTORE_ERR_NOT_INITIALIZED : MAPISTORE_ERR_DATABASE_INIT));
+        CHECK(!backend && talloc_total_blocks(attempt) == blocks);
+        failure = FAIL_NONE; talloc_free(attempt); close_all_connections();
+    }
+    CHECK(acquired == released && !strstr(logs, "fixture-secret") && !strstr(logs, "mysql://"));
+    CHECK(strstr(logs, "version 3"));
+    talloc_free(lp);
+    return 0;
+}
 
 static int result_checks(TALLOC_CTX *ctx)
 {
@@ -307,6 +444,55 @@ static int named_property_transaction_checks(void)
     return 0;
 }
 
+/* Ignoring failed start cleanup must leave an observable lock/session leak. */
+static int named_property_start_recovery_checks(void)
+{
+    MYSQL *borrowed = fixture_mysql_init(NULL);
+    struct namedprops_context backend = { .data = borrowed };
+    unsigned before = disconnect_attempts, closed_before = closed, ended = disconnected;
+    CHECK(borrowed);
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held &&
+        !reconnect_enabled && disconnect_attempts == before);
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS);
+    lock_timeout = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held &&
+        reconnect_enabled && disconnect_attempts == before);
+    lock_timeout = false; fail_statement = "IS_USED_LOCK"; lock_held = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held &&
+        disconnect_attempts == before);
+    fail_statement = NULL;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS);
+    /* Fail only the GET_LOCK fetch, after acquisition, not the preflight read. */
+    fail_get_lock_fetch = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held &&
+        reconnect_enabled && disconnect_attempts == before);
+    fail_release = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held &&
+        reconnect_enabled && disconnect_attempts == before + 1 && disconnected == ended + 1);
+    CHECK(backend.data == borrowed && closed == closed_before);
+    fail_get_lock_fetch = false; fail_statement = "START TRANSACTION";
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && !lock_held &&
+        reconnect_enabled && disconnect_attempts == before + 2 && disconnected == ended + 2);
+    CHECK(backend.data == borrowed && closed == closed_before);
+    fail_disconnect = true; logged = 0; logs[0] = 0;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held &&
+        reconnect_enabled && disconnect_attempts == before + 3 && disconnected == ended + 2);
+    CHECK(strstr(logs, "start cleanup failed") && strstr(logs, "retains its lock"));
+    fail_disconnect = false; fail_release = false; fail_statement = NULL;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS);
+    fail_release = true; fail_statement = "START TRANSACTION"; fail_session_id = true;
+    CHECK(transaction_start(&backend) == MAPISTORE_ERR_DATABASE_OPS && lock_held &&
+        reconnect_enabled && disconnect_attempts == before + 3);
+    fail_session_id = false; fail_release = false; fail_statement = NULL;
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS);
+    CHECK(transaction_start(&backend) == MAPISTORE_SUCCESS);
+    CHECK(transaction_cancel(&backend) == MAPISTORE_SUCCESS && backend.data == borrowed && closed == closed_before);
+    CHECK(acquired == released);
+    fixture_mysql_close(borrowed);
+    return 0;
+}
+
 static int named_property_read_checks(TALLOC_CTX *ctx)
 {
     struct namedprops_context backend = { .data = (MYSQL *)1 };
@@ -447,12 +633,15 @@ int main(void)
     query[0] = 0;
     CHECK(execute_query(NULL, "SELECT 1") == MYSQL_ERROR);
     CHECK(execute_query((MYSQL *)1, NULL) == MYSQL_ERROR && query[0] == 0);
+    CHECK(named_property_initializer_checks(ctx) == 0);
+    result_rows_count = 1; result_values[0][0] = "one";
     CHECK(result_checks(ctx) == 0);
     CHECK(named_property_checks() == 0);
     CHECK(named_property_transaction_checks() == 0);
+    CHECK(named_property_start_recovery_checks() == 0);
     CHECK(named_property_read_checks(ctx) == 0);
     CHECK(diagnostic_checks() == 0);
     talloc_free(ctx);
-    puts("MySQL URI/pool failures, escaping, row ownership/shapes, numeric bounds and named property queries: OK");
+    puts("MySQL URI/pool failures, escaping, row ownership/shapes, numeric bounds, named-property schema gate and queries: OK");
     return 0;
 }
