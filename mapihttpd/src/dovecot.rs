@@ -298,6 +298,7 @@ mod tests {
                     socket: path.clone(),
                     service: "openchange".into(),
                 },
+                sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
             };
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
             assert!(fake.await.unwrap().starts_with("AUTH\t1\tPLAIN\t"));
@@ -330,6 +331,7 @@ mod tests {
                     socket: path.clone(),
                     service: "openchange".into(),
                 },
+                sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
             };
             let t0 = tokio::time::Instant::now();
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
@@ -347,6 +349,7 @@ mod tests {
                 socket: "/nonexistent/mapihttpd-auth".into(),
                 service: "openchange".into(),
             },
+            sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
         };
         let rep = run(handle(&srv, ping("/mapi/emsmdb/")));
         assert_eq!(rep.http_status, 503);

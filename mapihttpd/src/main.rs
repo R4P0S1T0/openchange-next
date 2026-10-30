@@ -3,6 +3,9 @@
 mod auth;
 mod dovecot;
 mod request;
+// Until Connect/Execute (Task 5), only the tests use every item.
+#[cfg_attr(not(test), allow(dead_code))]
+mod session;
 
 use auth::Authenticator;
 use bytes::Bytes;
@@ -16,6 +19,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use request::{
     check_headers, format_reply, handle_body, reply, MapiReply, MapiRequest, Server, MAX_BODY,
 };
+use session::SessionTable;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -27,8 +31,8 @@ use tokio::net::TcpListener;
 const CHALLENGE: &str = "Basic realm=\"openchange\"";
 /// Connections that have not sent complete request headers by then are closed.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-const USAGE: &str =
-    "usage: openchange-mapihttpd --port PORT --dovecot-socket PATH [--dovecot-service NAME]";
+const USAGE: &str = "usage: openchange-mapihttpd --port PORT --dovecot-socket PATH \
+     [--dovecot-service NAME] [--session-idle-seconds SECONDS]";
 
 /// Builds the HTTP response; the only place reply headers and bodies are laid out.
 fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Response<Full<Bytes>> {
@@ -84,6 +88,13 @@ async fn serve<A: Authenticator>(
     let (start, t0) = (SystemTime::now(), Instant::now());
     let (parts, body) = req.into_parts();
     let h = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok());
+    // Clients may split cookies over several Cookie fields (MS-OXCMAPIHTTP 4.2).
+    let cookies = parts
+        .headers
+        .get_all("Cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok());
+    let cookies = cookies.collect::<Vec<_>>().join("; ");
     let base = MapiRequest {
         method: parts.method.as_str(),
         path: parts.uri.path(),
@@ -92,7 +103,7 @@ async fn serve<A: Authenticator>(
         client_info: h("X-ClientInfo"),
         content_type: h("Content-Type"),
         authorization: h("Authorization"),
-        cookie: h("Cookie"),
+        cookie: (!cookies.is_empty()).then_some(cookies.as_str()),
         real_ip: h("X-Real-IP")
             .filter(|_| trust_real_ip)
             .and_then(|v| v.parse().ok()),
@@ -101,13 +112,14 @@ async fn serve<A: Authenticator>(
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
     let rep = match check_headers(&srv, &base, declared).await {
         Err(rep) => rep,
-        Ok(()) => match Limited::new(body, MAX_BODY).collect().await {
+        Ok(session) => match Limited::new(body, MAX_BODY).collect().await {
             Ok(collected) => {
                 let bytes = collected.to_bytes();
-                handle_body(&MapiRequest {
+                let req = MapiRequest {
                     body: &bytes,
                     ..base
-                })
+                };
+                handle_body(&req, session.as_ref())
             }
             Err(e) if e.is::<LengthLimitError>() => reply(&base, 200, 9),
             Err(e) => return Err(e),
@@ -135,10 +147,11 @@ struct Args {
     port: u16,
     dovecot_socket: PathBuf,
     dovecot_service: String,
+    session_idle_seconds: u64,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
-    let (mut port, mut socket, mut service) = (None, None, "openchange".to_owned());
+    let (mut port, mut socket, mut service, mut idle) = (None, None, "openchange".to_owned(), 1800);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -149,6 +162,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 return Err(format!("bad service name: {value:?}"))
             }
             "--dovecot-service" => service = value,
+            "--session-idle-seconds" => {
+                idle = value
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or(format!("bad session idle seconds: {value}"))?
+            }
             _ => return Err(format!("unknown option: {flag}")),
         }
     }
@@ -156,6 +176,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         port: port.ok_or("--port is required")?,
         dovecot_socket: socket.ok_or("--dovecot-socket is required")?,
         dovecot_service: service,
+        session_idle_seconds: idle,
     })
 }
 
@@ -191,6 +212,7 @@ fn main() -> ExitCode {
                 socket: args.dovecot_socket,
                 service: args.dovecot_service,
             },
+            sessions: SessionTable::new(Duration::from_secs(args.session_idle_seconds)),
         });
         loop {
             match listener.accept().await {
@@ -211,7 +233,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use request::handle;
-    use request::tests::{call, ping, run, FakeAuth, BASIC, CLIENT_INFO};
+    use request::tests::{call, connect, execute, ping, run, server, BASIC, CLIENT_INFO};
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -238,9 +260,7 @@ mod tests {
 
     #[test]
     fn test_bearer_challenged() {
-        let srv = Server {
-            auth: FakeAuth::default(),
-        };
+        let srv = server();
         let rep = run(handle(
             &srv,
             MapiRequest {
@@ -283,6 +303,7 @@ mod tests {
                 port: 8080,
                 dovecot_socket: "/run/dovecot/auth-client".into(),
                 dovecot_service: "openchange".into(),
+                session_idle_seconds: 1800,
             })
         );
         let full = args(&[
@@ -310,6 +331,24 @@ mod tests {
         ])
         .is_err());
         assert!(args(&[]).is_err());
+        let idle = args(&[
+            "--session-idle-seconds",
+            "60",
+            "--port",
+            "8080",
+            "--dovecot-socket",
+            "/s",
+        ]);
+        assert_eq!(idle.unwrap().session_idle_seconds, 60);
+        assert!(args(&[
+            "--port",
+            "8080",
+            "--dovecot-socket",
+            "/s",
+            "--session-idle-seconds",
+            "0"
+        ])
+        .is_err());
     }
 
     /// Sends request headers only (the declared body is never written) and returns the
@@ -317,11 +356,9 @@ mod tests {
     /// body instead of answering.
     fn head_only(headers: &str) -> (String, usize) {
         run(async {
-            let (mut client, server) = tokio::io::duplex(64 * 1024);
-            let srv = Arc::new(Server {
-                auth: FakeAuth::default(),
-            });
-            tokio::spawn(serve_conn(srv.clone(), server, false));
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            let srv = Arc::new(server());
+            tokio::spawn(serve_conn(srv.clone(), conn, false));
             client.write_all(headers.as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let mut buf = [0u8; 4096];
@@ -377,6 +414,39 @@ mod tests {
     }
 
     #[test]
+    fn test_session_reply_headers() {
+        let srv = server();
+        let sc = connect(&srv, Instant::now());
+        let rep = run(handle(&srv, execute(Some(sc.split(';').next().unwrap()))));
+        let r = respond(&rep);
+        assert_eq!(header(&r, "Set-Cookie"), Some(sc));
+        assert_eq!(header(&r, "X-ExpirationInfo").as_deref(), Some("1800000"));
+    }
+
+    #[test]
+    fn test_glue_split_cookie_fields() {
+        let srv = Arc::new(server());
+        let sc = connect(&srv, Instant::now());
+        let raw = format!(
+            "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\nConnection: close\r\n\
+             Content-Length: 0\r\nContent-Type: application/mapi-http\r\n\
+             X-RequestType: Execute\r\nX-RequestId: {{A}}:1\r\nAuthorization: {BASIC}\r\n\
+             Cookie: sid=1\r\nCookie: {}\r\n\r\n",
+            sc.split(';').next().unwrap()
+        );
+        let out = run(async {
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(serve_conn(srv.clone(), conn, false));
+            client.write_all(raw.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        });
+        assert!(!out.contains("x-responsecode: 13\r\n"), "{out}");
+        assert!(out.contains(&format!("set-cookie: {sc}\r\n")), "{out}");
+    }
+
+    #[test]
     fn test_glue_outlook_headers() {
         // Headers of the Connect entry in testsuite/modernization/mapihttp/headers.json, sent as PING.
         let raw = format!(
@@ -404,11 +474,9 @@ mod tests {
              \r\n"
         );
         let out = run(async {
-            let (mut client, server) = tokio::io::duplex(64 * 1024);
-            let srv = Arc::new(Server {
-                auth: FakeAuth::default(),
-            });
-            tokio::spawn(serve_conn(srv, server, false));
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            let srv = Arc::new(server());
+            tokio::spawn(serve_conn(srv, conn, false));
             client.write_all(raw.as_bytes()).await.unwrap();
             let mut out = String::new();
             client.read_to_string(&mut out).await.unwrap();
@@ -425,11 +493,9 @@ mod tests {
     fn test_real_ip_only_from_proxy() {
         for (trusted, want) in [(false, None), (true, "192.0.2.7".parse().ok())] {
             let rip = run(async {
-                let (mut client, server) = tokio::io::duplex(64 * 1024);
-                let srv = Arc::new(Server {
-                    auth: FakeAuth::default(),
-                });
-                tokio::spawn(serve_conn(srv.clone(), server, trusted));
+                let (mut client, conn) = tokio::io::duplex(64 * 1024);
+                let srv = Arc::new(server());
+                tokio::spawn(serve_conn(srv.clone(), conn, trusted));
                 let raw = format!(
                     "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\n\
                      Connection: close\r\nAuthorization: {BASIC}\r\n\
