@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">
+ <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
+  <User>
+   <DisplayName>alice@example.invalid</DisplayName>
+   <LegacyDN>/o=First Organization/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=alice</LegacyDN>
+   <AutoDiscoverSMTPAddress>alice@example.invalid</AutoDiscoverSMTPAddress>
+   <DeploymentId>78d66dbf-bec6-8c3f-b4aa-150451ce5c0c</DeploymentId>
+  </User>
+  <Account>
+   <AccountType>email</AccountType>
+   <Action>settings</Action>
+   <MicrosoftOnline>False</MicrosoftOnline>
+   <Protocol Type="mapiHttp" Version="1">
+    <MailStore>
+     <InternalUrl>https://mail.example.invalid/mapi/emsmdb/?MailboxId=78d66dbf-bec6-8c3f-b4aa-150451ce5c0c@mail.example.invalid</InternalUrl>
+     <ExternalUrl>https://mail.example.invalid/mapi/emsmdb/?MailboxId=78d66dbf-bec6-8c3f-b4aa-150451ce5c0c@mail.example.invalid</ExternalUrl>
+    </MailStore>
+    <AddressBook>
+     <InternalUrl>https://mail.example.invalid/mapi/nspi/?MailboxId=78d66dbf-bec6-8c3f-b4aa-150451ce5c0c@mail.example.invalid</InternalUrl>
+     <ExternalUrl>https://mail.example.invalid/mapi/nspi/?MailboxId=78d66dbf-bec6-8c3f-b4aa-150451ce5c0c@mail.example.invalid</ExternalUrl>
+    </AddressBook>
+   </Protocol>
+  </Account>
+ </Response>
+</Autodiscover>

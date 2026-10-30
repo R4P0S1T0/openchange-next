@@ -6,6 +6,7 @@
 #define DEBUG(level, body) ((void)0)
 #define DEBUGLEVEL 0
 #include "mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c"
+#include "mapiproxy/servers/default/emsmdb/emsmdb_execute.c"
 
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "EMSMDB check failed at %d: %s\n", __LINE__, #c); \

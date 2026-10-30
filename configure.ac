@@ -935,6 +935,30 @@ if test "x$enable_openchange_qt4" = "xyes"; then
 fi
 AC_SUBST(OPENCHANGE_QT4)
 
+dnl ##########################################################################
+dnl MAPI/HTTP service (Rust, vendored crates)
+dnl ##########################################################################
+AC_ARG_ENABLE(mapihttp,
+              AS_HELP_STRING([--enable-mapihttp],
+                             [Build the MAPI/HTTP service (needs cargo >= 1.85)]),
+              enable_mapihttp=$enableval,
+              enable_mapihttp="no")
+OC_MAPIHTTP=
+if test x"$enable_mapihttp" = x"yes"; then
+   AC_PATH_PROG([CARGO], [cargo])
+   if test -z "$CARGO"; then
+      AC_MSG_ERROR([--enable-mapihttp needs cargo >= 1.85])
+   fi
+   AC_MSG_CHECKING([cargo version])
+   cargo_version=`$CARGO --version 2>/dev/null | sed -n 's/^cargo \([[0-9.]]*\).*/\1/p'`
+   AC_MSG_RESULT([$cargo_version])
+   AS_VERSION_COMPARE([$cargo_version], [1.85],
+                      [AC_MSG_ERROR([--enable-mapihttp needs cargo >= 1.85])])
+   test -n "$cargo_version" || AC_MSG_ERROR([--enable-mapihttp needs cargo >= 1.85])
+   OC_MAPIHTTP=bin/openchange-mapihttpd
+fi
+AC_SUBST(OC_MAPIHTTP)
+
 dnl ***********************
 dnl Options
 dnl ***********************
@@ -999,6 +1023,7 @@ OpenChange Configuration (Please review)
 
 	   * OpenChange Server:
 	     - mapiproxy:		$enable_mapiproxy
+	     - mapihttpd (Rust):	$enable_mapihttp
 
 	   * OpenChange mapistore backends:
 	     - backends dependencies goes here

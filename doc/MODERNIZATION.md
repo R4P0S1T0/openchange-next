@@ -107,6 +107,85 @@ never on a production server.
 
 Open questions are tracked in [development continuity](CONTINUITY.md).
 
+## M1 local validation (2026-10-30)
+
+The Rust MAPI/HTTP service is reviewed and merged into `main`, including
+Tasks 5/6 and Task 7 documentation. The maintainer authorized integration after
+green CI. This is implementation validation; lab acceptance and deployment
+remain outstanding. See [MAPIHTTP.md](MAPIHTTP.md) for options,
+systemd/nginx examples, vendor refresh, client proxy/PAC exceptions and the
+complete deferred minor review list.
+
+Validated in the existing isolated development environment with the extracted
+Debian 13 toolchain (Rust 1.85.1, GCC 14.2.0, Samba/PIDL 4.22.10):
+
+- `./configure --enable-mapihttp` with the local Samba paths and `make -j2 all`.
+  The daemon links the C backend. Its library prerequisites and transitive
+  library search paths are explicit, including the SONAME links.
+- `make check-emsmdb check-oc-emsmdb check-mapihttp`: 83 Rust tests without
+  `c-backend`, 84 with it, plus the C boundary and existing RPC harnesses.
+- `check-oc-emsmdb` with ASan/UBSan: the boundary, extracted execution core and
+  harness were explicitly rebuilt with the sanitizer compiler flags. Plain
+  objects were rebuilt and the harness passed afterward. Native dependencies
+  were not instrumented in this run; default leak detection was retained.
+- All 17 focused native targets listed in CONTINUITY.md passed, including
+  EMSMDB/NSPI/RPC, named properties and MySQL utilities. These are isolated
+  harnesses; no live SQL endpoint was selected.
+- `cargo fmt --check` and offline, locked, all-target Clippy with `-D warnings`
+  passed both with and without `c-backend`.
+- Default configure followed by `make -j2 all` passed without the Rust wrapper;
+  generated CARGO and OC_MAPIHTTP settings were empty.
+- Direct versions are pinned exactly and the refreshed lock/vendor set is
+  within local Debian 13 package ceilings, including transitive crates, except
+  the subsequently authorized bytes/quick-xml security updates below.
+  Windows/WASI targets without Debian packages remain pruned and unsupported.
+
+Task 5/6 review found NotificationWait incorrectly blocked by ordinary session
+requests. A failing regression test demonstrated this; separate ordinary and
+notification slots now permit the overlap required by MS-OXCMAPIHTTP 3.1.5.5.
+Pending operations prevent expiry and completion refreshes the idle timer.
+The final pass also restored the plan's X-PendingPeriod header, verified with
+a test that failed before the fix. The whole-branch review found no Critical
+issues; its Important CI-coverage and dependency-ceiling findings were fixed.
+The updated native CI job checks the enabled daemon and C boundary after its
+default-off build, including sanitizer and plain rebuilds. The final code
+commit `de5387f6` passed all ten checks across
+[push CI](https://github.com/R4P0S1T0/openchange-next/actions/runs/41116650682) and
+[PR CI](https://github.com/R4P0S1T0/openchange-next/actions/runs/41116658873),
+including the Rust audit and enabled C backend.
+
+Audit follow-up after the authorized push: CI run 41111907637 passed
+native-library, tooling 3.11/3.13 and python-runtime, but the Rust job failed.
+Local cargo-audit 0.21.2 reproduced a CVSS 4.0 database parse error. The workflow
+now installs cargo-audit 0.22.1, verified to build with Rust 1.85.1 and read the
+current database. It initially reported bytes RUSTSEC-2026-0007 and quick-xml
+RUSTSEC-2026-0194/0195. The maintainer authorized upstream packages outside
+Debian 13's version ceiling for these fixes. bytes 1.11.1 and quick-xml 0.41.0
+are now pinned and vendored; all other locked versions remain unchanged.
+Local audit against advisory database commit
+2295466c4e9df26647fd67d8fa1c705ac2fc7f81 now returns zero vulnerabilities and
+exit status 0, without suppressions. Informational warnings remain for unused
+adler/backtrace and Tokio AsyncFd constructors; the service does not use the
+affected APIs. See MAPIHTTP.md for the explicit disposition.
+
+The XML migration preserves named/numeric references, literal whitespace and
+reference whitespace; the regression test ran before the update, failed with
+a mechanical API migration, and passed with the new event handling. These
+crates declare Rust minimum versions of 1.57/1.79 and are built here with
+Rust 1.85.1. Existing upstream C compiler warnings remain. The authorized
+merge followed the green CI results above; this merge adds only handoff
+documentation changes to the tested code.
+
+Not validated against this Rust service: real Dovecot (including canonical
+full-email user output), nginx, TLS, any Outlook version, Interop-TestSuites,
+NSPI request types beyond PING, chunked/PENDING responses, successful C Connect,
+Outlook profile creation, mailbox content or a complete SamDB-free deployment.
+The C Connect path deliberately fails closed pending M2's identity check.
+Task 0's Microsoft 365 Outlook 16.0.19127.20800 spike is separate evidence;
+Outlook 2016/2019/2013 SP1 still need lab validation. NotificationWait currently
+returns no events after its timeout, and reconnect cleanup waits for the idle
+sweeper. Never run these checks or deployment examples against production.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern

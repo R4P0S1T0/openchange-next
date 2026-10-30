@@ -8,19 +8,45 @@ Target: Outlook 2013 SP1+ (2016/2019/2021/2024, classic Microsoft 365) over
 MAPI/HTTP only, against Postfix, Dovecot 2.4, SOGo 5.12, MariaDB/PostfixAdmin
 and nginx on one server, with no AD, LDAP or Samba daemon.
 
-**Next milestone: M1** — MAPI/HTTP, Autodiscover and Dovecot authentication.
-Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
-Task 0, the lab spike with real Outlook, is done with a go (results in the
-plan's Task 0 section, fixtures in `testsuite/modernization/mapihttp/`).
-The plan was revised on 2026-10-30 (revision 2) for a Rust service; **wait for
-the maintainer's approval of revision 2 before starting Task 1.** Revision 1's
-unfinished C Task 1 is kept for reference only on branch `m1-mapihttp`
-(commit `139ee83a`); do not merge or continue it.
-Bearer first: Outlook sends `Authorization: Bearer` before Basic on every
-request; the service must answer 401 with the Basic challenge without
-contacting Dovecot or logging a failed login (plan Review Focus item 0).
-The [dav calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)
-is deferred until after M1 (milestone M6) and has not started.
+**M1 implementation is reviewed and merged into `main`.** Tasks 1–4 were
+previously reviewed; Tasks 5–6 have now been reviewed and merged, including
+NotificationWait concurrency and native build fixes. Task 7 records validation
+in [MAPIHTTP.md](MAPIHTTP.md) and the dated M1 section in
+[MODERNIZATION.md](MODERNIZATION.md#m1-local-validation-2026-10-30).
+Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)
+(revision 2, approved; the earlier approval wait is obsolete).
+
+The maintainer authorized pushing and merging after green CI. The final code
+commit `de5387f6` passed all ten checks across the
+[push workflow](https://github.com/R4P0S1T0/openchange-next/actions/runs/41116650682)
+and [PR workflow](https://github.com/R4P0S1T0/openchange-next/actions/runs/41116658873):
+native-library, Rust (including audit), tooling 3.11/3.13 and python-runtime in
+each run. This merge includes that code and updates these handoff records.
+cargo-audit 0.21.2 initially failed to parse CVSS 4.0; the workflow now uses
+0.22.1, built successfully with Rust 1.85.1.
+
+The maintainer subsequently authorized upstream security packages outside the
+Debian 13 repository, retaining Rust 1.85 and offline vendoring. bytes 1.11.1
+and quick-xml 0.41.0 replace 1.9.0/0.36.1; these are the only lockfile version
+changes. Autodiscover preserves XML references across quick-xml's new events.
+The updated local audit reports zero vulnerabilities and two informational
+warnings: unused backtrace-chain adler and unused Tokio AsyncFd constructors.
+No audit suppressions were added. Next: perform the plan's lab acceptance
+against real Dovecot/nginx
+and Outlook on a disposable VM. C Connect deliberately fails closed until M2
+implements Dovecot-user/PostfixAdmin-mailbox/LegacyDN identity verification.
+Profile creation remains M2 acceptance. Dovecot's canonical user must be a full
+email address for the current Autodiscover implementation; verify this in lab.
+
+The whole-branch review found no Critical issues. Its Important findings were
+missing C-backend CI and versions above the Debian 13 cap; both are corrected.
+The local build also exposed missing transitive-library search paths, now fixed.
+The protocol exception in MS-OXCMAPIHTTP 3.1.5.5 overrides the plan's blanket
+one-request concurrency summary: NotificationWait has a separate in-flight slot.
+Deferred minor findings and deliberate limits are listed in MAPIHTTP.md.
+Revision 1's unfinished C daemon remains reference-only on `m1-mapihttp`.
+The [DAV calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)
+remains deferred to M6. No production deployment is authorized.
 
 Do not touch:
 
@@ -143,9 +169,9 @@ commits or a deployed server.
 [Server readiness](TEST_SERVER_READINESS.md) and the [lab phases](TEST_LAB_PLAN.md)
 remain binding. Inventory and an isolated build on a disposable VM are useful
 now. No mailbox content backend exists yet (IMAP for M3/M4 and DAV for M6 are
-planned), and the MAPI/HTTP transport, Dovecot authentication and Autodiscover
-(M1) are not implemented; only the Task 0 lab spike has talked to a real
-Outlook. No Dovecot, SMTP, SOGo, MariaDB/PostfixAdmin
+planned), and the Rust MAPI/HTTP transport, Dovecot authentication and Autodiscover
+are implemented only on the milestone branch; only the Task 0 lab spike has
+talked to a real Outlook. No Dovecot, SMTP, SOGo, MariaDB/PostfixAdmin
 directory or Outlook exchange has been validated.
 Do not infer a working mail server from harness or installed-module checks.
 
@@ -174,5 +200,6 @@ The user authorized continued work and local commits/pushes to this fork to
 preserve progress. This does not authorize production deployment, destructive
 cleanup, existing-domain/schema changes or global machine configuration.
 Before new implementation, inspect current Git state and relevant instructions,
-start with milestone M1 once its plan's decisions are approved, and preserve
-existing work.
+continue from the milestone branch after reading the current validation record,
+and preserve existing work. The maintainer approved this M1 push and merge after green CI; production
+deployment and unrelated future integration remain outside that authorization.

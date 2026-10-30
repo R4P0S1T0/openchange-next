@@ -1,0 +1,36 @@
+[package]
+name = "mapihttpd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Exact Debian 13 versions, with approved bytes/quick-xml security updates; Rust 1.85.
+[dependencies]
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+bytes = { version = "=1.11.1", default-features = false }
+getrandom = { version = "=0.2.15", default-features = false }
+hmac = { version = "=0.12.1", default-features = false }
+http = { version = "=1.2.0", default-features = false }
+http-body-util = { version = "=0.1.2", default-features = false }
+quick-xml = { version = "=0.41.0", default-features = false }
+httpdate = { version = "=1.0.2", default-features = false }
+hyper = { version = "=1.5.2", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.10", default-features = false, features = ["tokio"] }
+sha2 = { version = "=0.10.8", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
+tokio = { version = "=1.43.1", default-features = false, features = ["rt-multi-thread", "net", "time", "io-util"] }
+
+[features]
+# Links liboc_emsmdb (OC_EMSMDB_LIBDIR); off so the crate builds without Samba.
+c-backend = ["tokio/sync"]
+
+[dev-dependencies]
+tokio = { version = "=1.43.1", default-features = false, features = ["test-util"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

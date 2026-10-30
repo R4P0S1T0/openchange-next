@@ -3,6 +3,7 @@
 /* The source harness and module intentionally coexist; give its GUID export a private name. */
 #define MagicGUIDp smoke_MagicGUIDp
 #include "mapiproxy/servers/default/emsmdb/emsmdbp.c"
+#include "mapiproxy/servers/default/emsmdb/emsmdbp_verify.c"
 #include "mapiproxy/libmapiproxy/mapi_handles.c"
 #include "mapiproxy/servers/default/emsmdb/oxcstor.c"
 
