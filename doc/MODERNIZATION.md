@@ -16,6 +16,18 @@ and classic Microsoft 365 Outlook), **over MAPI/HTTP only**. Microsoft lists
 Outlook 2010 is not supported. Mobile devices are out of scope; SOGo's
 ActiveSync already serves them.
 
+### Language policy
+
+Maintainer decision on 2026-10-30: **new code is written in Rust.** The
+existing C core (libmapi, emsmdb, nspi, mapistore) stays in C and keeps being
+fixed. C code is migrated only gradually, and only when there is a clear gain
+(for example a parser of untrusted input that keeps needing memory-safety
+fixes), each migration as its own planned change. Rust talks to C through
+narrow, explicit C APIs that pass bytes, strings, integers and opaque handles;
+Samba, talloc and dcerpc types stay on the C side, and `unsafe` Rust is
+confined to the FFI module. Rust crates are vendored for offline builds and a
+future Debian package.
+
 ### Architecture
 
 ```text
@@ -25,9 +37,9 @@ ActiveSync already serves them.
  nginx (TLS termination, request size/time limits)
         |  HTTP on 127.0.0.1 only
         v
- openchange-next MAPI/HTTP service ---- Dovecot auth socket (Basic credentials)
+ mapihttpd (Rust) MAPI/HTTP service --- Dovecot auth socket (Basic credentials)
    | Autodiscover (POX)
-   | EMSMDB: Connect/Execute/Disconnect/NotificationWait -> existing ROP handlers
+   | EMSMDB: Connect/Execute/Disconnect/NotificationWait -> existing C ROP handlers via liboc_emsmdb
    | NSPI: Bind/Unbind/GetProps/QueryRows/... -> existing NSPI logic
    | mapistore backends
    |    +-- imap: Dovecot IMAP on localhost, master user, CONDSTORE/QRESYNC
@@ -51,6 +63,7 @@ daemon runs and no AD is provisioned.
 | SOGo 5.12 | CalDAV/CardDAV content for calendar and contacts (M6), authenticated with the user's own Basic credentials held in session memory only | Mobile (stays on SOGo ActiveSync); any SOGo-specific code path; `SOGoTrustProxyAuthentication` or any other SOGo configuration change |
 | MariaDB | PostfixAdmin `mailbox`/`alias`/`domain` read-only; openchange state through the existing `indexing_mysql` and `namedprops_mysql` | Writing PostfixAdmin tables |
 | Samba 4.22 libraries | NDR/PIDL generated code, talloc, tevent | samba daemon, SamDB, AD schema, NTLM/Kerberos |
+| Rust 1.85 (Debian 13) and vendored crates (tokio, hyper, quick-xml, ...) | New code, starting with the M1 MAPI/HTTP service | Rewriting the C core without a planned, clear gain |
 
 ### Scope
 
@@ -84,7 +97,7 @@ never on a production server.
 
 | Milestone | Work | Acceptance |
 | --- | --- | --- |
-| M1 | Lab spike with real Outlook first, then MAPI/HTTP service, Autodiscover, authentication through Dovecot | Autodiscover with `mapiHttp`, Basic verified by Dovecot, and a well-formed Connect response against the lab server; a real Outlook Connect captured, sanitized and used as a test fixture ([plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)) |
+| M1 | Lab spike with real Outlook first (done 2026-10-30), then the Rust MAPI/HTTP service, Autodiscover, authentication through Dovecot | Autodiscover with `mapiHttp`, Basic verified by Dovecot, and a well-formed Connect response against the lab server; a real Outlook Connect captured, sanitized and used as a test fixture ([plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)) |
 | M2 | PostfixAdmin directory: provisioning/openchangedb without SamDB or AD schema (`python/openchange/provision.py` imports `samba.samdb.SamDB` and extends the schema today); NSPI GAL from MariaDB | Outlook creates the profile (moved from M1 on 2026-10-30) and the GAL lists the users |
 | M3 | Read-only IMAP mapistore backend (folders, contents tables, messages) | Outlook in online mode reads the Inbox |
 | M4 | Writes: send through submission 587, move, delete, flags | Recorded send/move/delete/flag results per client version |
