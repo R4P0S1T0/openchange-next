@@ -96,6 +96,13 @@ pub async fn check_headers<'s, A: Authenticator>(
             Err(code) => Err(reply(req, 200, code)),
         };
     }
+    // PING with a live cookie keeps the session alive (3.1.5.3); otherwise authenticate.
+    if request_type == "PING" {
+        let hash = srv.sessions.credential_hash(&user, &password);
+        if let Some(touched) = srv.sessions.touch(req.cookie, hash, Instant::now()) {
+            return Ok(Some(touched));
+        }
+    }
     match srv.auth.authenticate(&user, &password, req.real_ip).await {
         AuthResult::Ok { .. } => Ok(None),
         AuthResult::BadCredentials => Err(reply(req, 401, 0)),
@@ -147,7 +154,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::auth::Password;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Accepts only `user:pass` and counts calls.
     #[derive(Default)]
@@ -300,6 +307,75 @@ pub(crate) mod tests {
         }
         assert_eq!(srv.sessions.last_used(value), Some(then));
         assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn ping_with<'a>(cookie: Option<&'a str>, authorization: Option<&'a str>) -> MapiRequest<'a> {
+        MapiRequest {
+            cookie,
+            authorization,
+            ..ping("/mapi/emsmdb/")
+        }
+    }
+
+    #[test]
+    fn test_ping_refreshes_session() {
+        let srv = server();
+        let then = Instant::now() - Duration::from_secs(1);
+        let sc = connect(&srv, then);
+        let value = &cookie_of(&sc)["MapiContext=".len()..];
+        let rep = run(handle(&srv, ping_with(Some(cookie_of(&sc)), Some(BASIC))));
+        assert_eq!(code(&rep), (200, 0));
+        assert_eq!(rep.expiration_ms, 1_800_000);
+        assert_eq!(rep.set_cookie.as_deref(), Some(sc.as_str()));
+        assert!(srv.sessions.last_used(value).unwrap() > then);
+        assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_ping_while_busy() {
+        let srv = server();
+        let then = Instant::now() - Duration::from_secs(1);
+        let sc = connect(&srv, then);
+        let value = &cookie_of(&sc)["MapiContext=".len()..];
+        let exec = execute(Some(cookie_of(&sc)));
+        let held = run(check_headers(&srv, &exec, Some(0))).ok().unwrap();
+        let before = srv.sessions.last_used(value).unwrap();
+        let rep = run(handle(&srv, ping_with(Some(cookie_of(&sc)), Some(BASIC))));
+        assert_eq!(code(&rep), (200, 0));
+        assert_eq!(rep.expiration_ms, 1_800_000);
+        assert!(srv.sessions.last_used(value).unwrap() >= before);
+        // The Execute still holds the session.
+        assert_eq!(
+            code(&run(handle(&srv, execute(Some(cookie_of(&sc)))))),
+            (200, 15)
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn test_ping_other_credentials() {
+        let srv = server();
+        let then = Instant::now() - Duration::from_secs(1);
+        let sc = connect(&srv, then);
+        let value = &cookie_of(&sc)["MapiContext=".len()..];
+        // user:nope
+        let rep = run(handle(
+            &srv,
+            ping_with(Some(cookie_of(&sc)), Some("Basic dXNlcjpub3Bl")),
+        ));
+        assert_eq!(rep.http_status, 401);
+        assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(srv.sessions.last_used(value), Some(then));
+        assert!(rep.set_cookie.is_none());
+    }
+
+    #[test]
+    fn test_ping_garbage_cookie() {
+        let srv = server();
+        let rep = run(handle(&srv, ping_with(Some("MapiContext=zz"), Some(BASIC))));
+        assert_eq!(code(&rep), (200, 0));
+        assert_eq!(rep.expiration_ms, 0);
+        assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
