@@ -211,12 +211,11 @@ M6 adds, after the read-only slice:
 - Contacts through CardDAV (vCard ↔ MAPI contact properties).
 - Free/busy (`mapistore_folder_fetch_freebusy_properties`) from CalDAV
   free-busy data.
-- Authentication to the local SOGo. The project direction assumes
-  `SOGoTrustProxyAuthentication` with the `x-webobjects-remote-user` header
-  ([SOGo FAQ](https://sogo.nu/support/faq/how-to-use-webauth-with-sogo.html)).
-  **Unverified for SOGo 5.12 DAV routes.** Open SOGo issue
-  [#5987](https://bugs.sogo.nu/view.php?id=5987) (reported on 5.10.0) describes
-  credentials not being checked on DAV/ActiveSync when that header is absent and
-  proxy trust is enabled; the lab must confirm that only the local service can
-  set the header and that SOGo's own DAV/ActiveSync vhost is unaffected.
+- Authentication to the local SOGo: forward the user's own HTTP Basic
+  credentials, kept in session memory only and never written to disk or logs.
+  Maintainer decision 2026-10-30: do **not** use `SOGoTrustProxyAuthentication`
+  (open SOGo issue [#5987](https://bugs.sogo.nu/view.php?id=5987), reported on
+  5.10.0, describes credentials not being checked on DAV/ActiveSync in that
+  mode) and make no SOGo configuration change. Open question for the lab:
+  does SOGo DAV accept Basic credentials for an account with TOTP enabled?
   This replaces design decision 2 above ("no authentication") for M6.
