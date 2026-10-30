@@ -18,6 +18,7 @@ struct Session {
     backend: SessionId,
     last_used: Instant,
     busy: bool,
+    waiting: bool,
 }
 
 /// No Debug: it holds cookies and credential hashes.
@@ -33,7 +34,14 @@ pub struct SessionGuard<'a> {
     table: &'a SessionTable,
     cookie: String,
     backend: SessionId,
-    holds_busy: bool,
+    slot: Slot,
+}
+
+#[derive(Clone, Copy)]
+enum Slot {
+    Request,
+    Notification,
+    Ping,
 }
 
 fn random<const N: usize>() -> [u8; N] {
@@ -81,7 +89,7 @@ impl SessionTable {
     }
 
     fn expired(&self, s: &Session, now: Instant) -> bool {
-        now.saturating_duration_since(s.last_used) > self.idle
+        !s.busy && !s.waiting && now.saturating_duration_since(s.last_used) > self.idle
     }
 
     pub fn credential_hash(&self, user: &str, password: &Password) -> [u8; 32] {
@@ -101,6 +109,7 @@ impl SessionTable {
             backend,
             last_used: now,
             busy: false,
+            waiting: false,
         };
         self.lock().insert(cookie.clone(), session);
         set_cookie(&cookie)
@@ -112,6 +121,26 @@ impl SessionTable {
         cred_hash: [u8; 32],
         now: Instant,
     ) -> Result<SessionGuard<'_>, u32> {
+        self.acquire(cookie_header, cred_hash, now, Slot::Request)
+    }
+
+    /// NotificationWait may overlap an ordinary request (MS-OXCMAPIHTTP 3.1.5.5).
+    pub fn begin_notification(
+        &self,
+        cookie_header: Option<&str>,
+        cred_hash: [u8; 32],
+        now: Instant,
+    ) -> Result<SessionGuard<'_>, u32> {
+        self.acquire(cookie_header, cred_hash, now, Slot::Notification)
+    }
+
+    fn acquire(
+        &self,
+        cookie_header: Option<&str>,
+        cred_hash: [u8; 32],
+        now: Instant,
+        slot: Slot,
+    ) -> Result<SessionGuard<'_>, u32> {
         let cookie = find_cookie(cookie_header)?;
         let mut sessions = self.lock();
         // Other credentials look like an unknown cookie (3.2.5.1), and are checked before busy.
@@ -119,16 +148,20 @@ impl SessionTable {
             .get_mut(cookie)
             .filter(|s| self.usable(s, &cred_hash, now))
             .ok_or(10u32)?;
-        if s.busy {
+        let busy = match slot {
+            Slot::Notification => &mut s.waiting,
+            _ => &mut s.busy,
+        };
+        if *busy {
             return Err(15);
         }
-        s.busy = true;
+        *busy = true;
         s.last_used = now;
         Ok(SessionGuard {
             table: self,
             cookie: cookie.to_owned(),
             backend: s.backend,
-            holds_busy: true,
+            slot,
         })
     }
 
@@ -150,7 +183,7 @@ impl SessionTable {
             table: self,
             cookie: cookie.to_owned(),
             backend: s.backend,
-            holds_busy: false,
+            slot: Slot::Ping,
         })
     }
 
@@ -216,11 +249,16 @@ impl SessionGuard<'_> {
 
 impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
-        if !self.holds_busy {
+        if matches!(self.slot, Slot::Ping) {
             return;
         }
         if let Some(s) = self.table.lock().get_mut(&self.cookie) {
-            s.busy = false;
+            match self.slot {
+                Slot::Request => s.busy = false,
+                Slot::Notification => s.waiting = false,
+                Slot::Ping => unreachable!(),
+            }
+            s.last_used = Instant::now();
         }
     }
 }

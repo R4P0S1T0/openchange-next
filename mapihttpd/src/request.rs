@@ -107,7 +107,13 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     if needs_session {
         // The session's credential hash stands in for the authenticator (decision 4).
         let hash = srv.sessions.credential_hash(&user, &password);
-        return match srv.sessions.begin(req.cookie, hash, Instant::now()) {
+        let session = if request_type == "NotificationWait" {
+            srv.sessions
+                .begin_notification(req.cookie, hash, Instant::now())
+        } else {
+            srv.sessions.begin(req.cookie, hash, Instant::now())
+        };
+        return match session {
             Ok(guard) => Ok(Admitted::Session(guard)),
             Err(code) => Err(reply(req, 200, code)),
         };
@@ -273,6 +279,43 @@ pub(crate) mod tests {
             .sessions
             .credential_hash("user", &Password::from("pass"));
         srv.sessions.create(h, 1, now)
+    }
+
+    #[test]
+    fn test_notification_wait_overlaps_execute() {
+        let srv = server();
+        let sc = connect(&srv, Instant::now());
+        let ordinary = execute(Some(cookie_of(&sc)));
+        let wait = MapiRequest {
+            request_type: Some("NotificationWait"),
+            ..execute(Some(cookie_of(&sc)))
+        };
+        for (first, second) in [(&ordinary, &wait), (&wait, &ordinary)] {
+            let held = run(check_headers(&srv, first, Some(0))).ok().unwrap();
+            let other = run(check_headers(&srv, second, Some(0))).ok();
+            assert!(other.is_some(), "NotificationWait and Execute must overlap");
+            assert_eq!(
+                run(check_headers(&srv, &ordinary, Some(0)))
+                    .err()
+                    .unwrap()
+                    .response_code,
+                15
+            );
+            assert_eq!(
+                run(check_headers(&srv, &wait, Some(0)))
+                    .err()
+                    .unwrap()
+                    .response_code,
+                15
+            );
+            // Pending requests keep the context alive even with a short idle timeout.
+            assert!(srv
+                .sessions
+                .expire(Instant::now() + Duration::from_secs(1801))
+                .is_empty());
+            drop(other);
+            drop(held);
+        }
     }
 
     fn cookie_of(set_cookie: &str) -> &str {

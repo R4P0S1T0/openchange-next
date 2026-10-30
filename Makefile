@@ -1853,7 +1853,7 @@ $(OC_EMSMDB_TEST)/smb.conf:
 clean::
 	rm -rf $(OC_EMSMDB_TEST)
 
-bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs)
+bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs) $(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT))
 	$(if $(OC_MAPIHTTP),OC_EMSMDB_LIBDIR=$(CURDIR)/mapiproxy/servers) $(CARGO) build --offline --locked --release $(if $(OC_MAPIHTTP),--features c-backend)
 	mkdir -p bin
 	cp target/release/mapihttpd $@
