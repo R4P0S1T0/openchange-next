@@ -74,7 +74,8 @@ fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Respons
             };
             b = b
                 .header("Content-Type", ctype)
-                .header("X-ResponseCode", rep.response_code);
+                .header("X-ResponseCode", rep.response_code)
+                .header("X-PendingPeriod", 15_000);
             if rep.expiration_ms != 0 {
                 b = b.header("X-ExpirationInfo", rep.expiration_ms);
             }
@@ -413,6 +414,7 @@ mod tests {
             Some(request::SERVER_APPLICATION)
         );
         assert_eq!(header(&r, "X-ResponseCode").as_deref(), Some("0"));
+        assert_eq!(header(&r, "X-PendingPeriod").as_deref(), Some("15000"));
         assert_eq!(
             header(&r, "Content-Type").as_deref(),
             Some("application/mapi-http")
