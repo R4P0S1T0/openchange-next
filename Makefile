@@ -1172,7 +1172,8 @@ mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/
 						mapiproxy/servers/default/emsmdb/oxomsg.po			\
 						mapiproxy/servers/default/emsmdb/oxosfld.po			\
 						mapiproxy/servers/default/emsmdb/oxorule.po			\
-						mapiproxy/servers/default/emsmdb/oxcperm.po \
+						mapiproxy/servers/default/emsmdb/oxcperm.po			\
+						mapiproxy/servers/default/emsmdb/emsmdb_execute.po \
 		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
 		mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
@@ -1813,7 +1814,7 @@ check-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb-backend
 
-bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/emsmdb_execute.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=talloc_strdup mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
 
