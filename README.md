@@ -4,6 +4,9 @@ About OpenChange
 Modernization is in progress. The client library builds with Samba 4.22.10,
 and the recovered provisioning/migration tests pass with Python 3.13.
 The full server is not yet validated. See the [status and remaining work](doc/MODERNIZATION.md).
+New direction (2026-10-30): let Outlook 2013 SP1+ connect over MAPI/HTTP to a single
+server running Postfix, Dovecot, SOGo, MariaDB/PostfixAdmin and nginx, without
+Active Directory or LDAP. See the [project direction and M1–M7 roadmap](doc/MODERNIZATION.md#project-direction-2026-10-30).
 For a read-only prerequisite inventory, run `python3 script/doctor.py`.
 For the latest handoff, verified scope and next blockers, see
 [development continuity](doc/CONTINUITY.md).
