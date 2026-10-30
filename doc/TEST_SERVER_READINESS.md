@@ -3,7 +3,7 @@
 Service deployment to the test server follows the local recovery and security
 preparation below, in line with the requested **40% planning milestone**. That percentage is
 an approximate work estimate; it does not certify security or Exchange feature
-coverage. The milestone is **not ready** as of 2026-10-29.
+coverage. The milestone is **not ready** as of 2026-10-30.
 
 Inventory and an isolated source build/staged install can already run on a lab
 host without starting services or provisioning AD. The next steps and storage
@@ -15,10 +15,10 @@ blocker are recorded in [the server lab plan](TEST_LAB_PLAN.md).
 | --- | --- |
 | Build the required server, plugins and storage components from source on a selected, patched OS | Default `make -j2 all` passes from a source-only copy, including libraries, RPC modules, plugins, default servers and clients; patched deployment baseline and storage installation remain pending |
 | Select and validate a mailbox content backend | The repository includes the backend loader and named-property/indexing adapters, but no production mailbox backend implementation; external backend selection, build and operation/ownership tests are pending |
-| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); 40 Python tooling checks (one environment-dependent skip) and 28 runtime checks have local passing evidence, with disposable SQL for the runtime validation. Complete C/server integration suites remain pending |
+| Pass native and Python regression checks from a source-only checkout | Focused native checks and offline client suite pass (30 successes, one known expected LZXpress failure); the 2026-10-30 follow-up passed all 17 non-live focused native Make targets, 40 Python tooling tests and 28 runtime tests with no skips, plus disposable live SQL. These are separate from the historical source-only build; complete C/server integration suites remain pending |
 | Review and test exposed input and authentication boundaries | RPC state isolation, cancellation and pack validation covered; remaining NDR allocation/length handling, default servers, directory/database inputs and cache paths still need review |
 | Resolve or explicitly assess security findings affecting the test configuration | Focused fixes have regression tests; repository-wide review and dependency CVE assessment are incomplete |
-| Prepare reproducible installation, configuration, startup/health checks and teardown for a disposable instance | Local DESTDIR installation, module/CLI/template checks and removal are covered; disposable AD/storage configuration, startup and live health checks remain pending; no deployment to the user's server has been attempted |
+| Prepare reproducible installation, configuration, startup/health checks and teardown for a disposable instance | Local DESTDIR installation (149 entries), all 11 module/CLI/template runtime checks and removal with zero files/symlinks are covered; disposable AD/storage configuration, startup and live health checks remain pending; no deployment to the user's server has been attempted |
 | Produce a reviewable test build with exact dependency versions, checks run and known limitations | Staged install hashes and runtime/removal reports are available; exact patched deployment baseline and complete test-server artifact remain pending |
 
 After these criteria are met, the first server test should establish real AD

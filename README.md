@@ -5,6 +5,8 @@ Modernization is in progress. The client library builds with Samba 4.22.10,
 and the recovered provisioning/migration tests pass with Python 3.13.
 The full server is not yet validated. See the [status and remaining work](doc/MODERNIZATION.md).
 For a read-only prerequisite inventory, run `python3 script/doctor.py`.
+For the latest handoff, verified scope and next blockers, see
+[development continuity](doc/CONTINUITY.md).
 
 The OpenChange Project aims to provide a portable Open Source
 implementation of Microsoft Exchange Server and Exchange

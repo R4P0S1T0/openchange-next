@@ -144,8 +144,14 @@ live SQL, focused ASan/UBSan with default leak detection, ordinary rebuild, and
 all 11 staged-install runtime checks followed by empty uninstall. SQL used an
 explicit private MariaDB 11.8.6 UNIX socket with TCP disabled; socket tests
 required execution outside the restricted sandbox. Dependencies were not
-sanitizer-instrumented. No network server, Outlook exchange or new remote CI
-run was validated. See [the consolidated results](../doc/MODERNIZATION.md#named-property-consolidated-validation-2026-10-30).
+sanitizer-instrumented. That local validation did not include network server
+or Outlook exchange checks. See [the consolidated results](../doc/MODERNIZATION.md#named-property-consolidated-validation-2026-10-30).
+A subsequent same-day run passed all 17 non-live focused native Make targets,
+including NSPI/RPC/async/pack/cache, on the source contents committed as
+`5cab4bdb`. These harnesses do not replace real network/server integration.
+The same implementation commit passed all four jobs of
+[GitHub CI run 41052249892](https://github.com/R4P0S1T0/openchange-next/actions/runs/41052249892)
+(native-library, tooling on Python 3.11/3.13, and python-runtime).
 
 Staged installation checks
 --------------------------

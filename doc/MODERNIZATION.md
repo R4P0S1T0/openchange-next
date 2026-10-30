@@ -972,8 +972,8 @@ restoration fails, quiesce users and recover the affected service/connection
 pool as documented in the upgrade procedure. Concurrent threaded use of one
 MYSQL handle remains unsupported.
 
-The following checks passed locally on the cumulative uncommitted changes over
-`42c5fbc4`, using GCC 14.2.0, Python 3.13.5, Samba/PIDL 4.22.10 and MariaDB 11.8.6
+The following checks passed locally on the changes committed as `5cab4bdb`
+(over `42c5fbc4`), using GCC 14.2.0, Python 3.13.5, Samba/PIDL 4.22.10 and MariaDB 11.8.6
 with the existing extracted Debian toolchain:
 
 - `make -j4 all` and a final incremental repeat.
@@ -993,14 +993,21 @@ after its socket creation restriction caused five errors. SQL driver failure
 injection remains a mock test; the live harness separately checks actual lock
 release, reconnect and reuse, while Python tests exercise real v3 migrations
 and constraints. Existing Make targets and CI jobs invoke these cases; no
-workflow change or successful remote CI result is claimed for this snapshot.
+workflow change was needed. The later remote CI result is recorded below.
 
-The controller retains the private SQL daemon and one earlier failed-run
-fixture database; they were not removed by this validation. No AD, Samba RPC,
-SMTP, SOGo or Outlook service/client exchange was started. Broader native
-NSPI/RPC/async/pack/cache suites and the legacy bare `make check` were not rerun;
-their prior results are historical evidence. This validation adds no server
+The private SQL daemon was shut down after validation; its data directory and
+one earlier failed-run fixture database remain preserved locally. No AD, Samba
+RPC, SMTP, SOGo or Outlook service/client exchange was started. A subsequent
+2026-10-30 run passed all 17 non-live focused native Make targets, including
+NSPI/RPC/async/pack/cache, against the same committed source contents. These
+harnesses use substituted peers and do not establish network interoperability.
+The legacy bare `make check` was not rerun. This validation adds no server
 readiness acceptance or modernization percentage claim.
+
+After publication, [CI run 41052249892](https://github.com/R4P0S1T0/openchange-next/actions/runs/41052249892)
+for `5cab4bdb` completed successfully in all four jobs: native-library, tooling
+(Python 3.11 and 3.13) and python-runtime. This is additional remote build/test
+evidence for that implementation commit; it does not qualify a deployed server.
 
 ## Planning estimate
 
