@@ -127,16 +127,19 @@ pub(crate) mod tests {
     use super::*;
     use crate::auth::Password;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
-    /// Accepts only `user:pass` and counts calls.
+    /// Accepts only `user:pass`, counts calls and records the last `rip`.
     #[derive(Default)]
     pub struct FakeAuth {
         pub calls: AtomicUsize,
+        pub rip: Mutex<Option<IpAddr>>,
     }
 
     impl Authenticator for FakeAuth {
-        async fn authenticate(&self, user: &str, pw: &Password, _: Option<IpAddr>) -> AuthResult {
+        async fn authenticate(&self, user: &str, pw: &Password, rip: Option<IpAddr>) -> AuthResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.rip.lock().unwrap() = rip;
             if user == "user" && pw.expose() == "pass" {
                 AuthResult::Ok {
                     user: user.to_owned(),

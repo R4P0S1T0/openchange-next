@@ -1,12 +1,12 @@
 //! openchange-mapihttpd: MAPI/HTTP service listening on 127.0.0.1 behind a TLS reverse proxy.
 
-// Until the Dovecot authenticator (Task 3), only the tests use every item.
-#[cfg_attr(not(test), allow(dead_code))]
 mod auth;
+mod dovecot;
 mod request;
 
-use auth::{AuthResult, Authenticator, Password};
+use auth::Authenticator;
 use bytes::Bytes;
+use dovecot::DovecotAuthenticator;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
@@ -17,6 +17,7 @@ use request::{
     check_headers, format_reply, handle_body, reply, MapiReply, MapiRequest, Server, MAX_BODY,
 };
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -26,16 +27,8 @@ use tokio::net::TcpListener;
 const CHALLENGE: &str = "Basic realm=\"openchange\"";
 /// Connections that have not sent complete request headers by then are closed.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-const USAGE: &str = "usage: openchange-mapihttpd --port PORT";
-
-/// Placeholder until the Dovecot authenticator lands: nobody gets in.
-struct RejectAll;
-
-impl Authenticator for RejectAll {
-    async fn authenticate(&self, _: &str, _: &Password, _: Option<IpAddr>) -> AuthResult {
-        AuthResult::BadCredentials
-    }
-}
+const USAGE: &str =
+    "usage: openchange-mapihttpd --port PORT --dovecot-socket PATH [--dovecot-service NAME]";
 
 /// Builds the HTTP response; the only place reply headers and bodies are laid out.
 fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Response<Full<Bytes>> {
@@ -82,8 +75,10 @@ fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Respons
     })
 }
 
+/// `trust_real_ip`: the peer is the local reverse proxy, so its X-Real-IP is believed.
 async fn serve<A: Authenticator>(
     srv: Arc<Server<A>>,
+    trust_real_ip: bool,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
     let (start, t0) = (SystemTime::now(), Instant::now());
@@ -98,7 +93,9 @@ async fn serve<A: Authenticator>(
         content_type: h("Content-Type"),
         authorization: h("Authorization"),
         cookie: h("Cookie"),
-        real_ip: h("X-Real-IP").and_then(|v| v.parse().ok()),
+        real_ip: h("X-Real-IP")
+            .filter(|_| trust_real_ip)
+            .and_then(|v| v.parse().ok()),
         body: &[],
     };
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
@@ -119,12 +116,12 @@ async fn serve<A: Authenticator>(
     Ok(to_response(&rep, t0.elapsed(), start))
 }
 
-async fn serve_conn<A, IO>(srv: Arc<Server<A>>, io: IO)
+async fn serve_conn<A, IO>(srv: Arc<Server<A>>, io: IO, trust_real_ip: bool)
 where
     A: Authenticator + 'static,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let svc = service_fn(move |req| serve(srv.clone(), req));
+    let svc = service_fn(move |req| serve(srv.clone(), trust_real_ip, req));
     // Connection errors are the client's business (resets, bad framing); nothing to log.
     let _ = http1::Builder::new()
         .timer(TokioTimer::new())
@@ -133,18 +130,44 @@ where
         .await;
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Option<u16> {
-    match (args.next().as_deref(), args.next(), args.next()) {
-        (Some("--port"), Some(port), None) => port.parse().ok(),
-        _ => None,
+#[derive(Debug, PartialEq)]
+struct Args {
+    port: u16,
+    dovecot_socket: PathBuf,
+    dovecot_service: String,
+}
+
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
+    let (mut port, mut socket, mut service) = (None, None, "openchange".to_owned());
+    while let Some(flag) = args.next() {
+        let value = args.next().ok_or(format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--port" => port = Some(value.parse().map_err(|_| format!("bad port: {value}"))?),
+            "--dovecot-socket" => socket = Some(PathBuf::from(value)),
+            // Sent unescaped in the AUTH line.
+            "--dovecot-service" if value.is_empty() || value.contains(char::is_control) => {
+                return Err(format!("bad service name: {value:?}"))
+            }
+            "--dovecot-service" => service = value,
+            _ => return Err(format!("unknown option: {flag}")),
+        }
     }
+    Ok(Args {
+        port: port.ok_or("--port is required")?,
+        dovecot_socket: socket.ok_or("--dovecot-socket is required")?,
+        dovecot_service: service,
+    })
 }
 
 fn main() -> ExitCode {
-    let Some(port) = parse_args(std::env::args().skip(1)) else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("openchange-mapihttpd: {e}\n{USAGE}");
+            return ExitCode::from(2);
+        }
     };
+    let port = args.port;
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -163,11 +186,17 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let srv = Arc::new(Server { auth: RejectAll });
+        let srv = Arc::new(Server {
+            auth: DovecotAuthenticator {
+                socket: args.dovecot_socket,
+                service: args.dovecot_service,
+            },
+        });
         loop {
             match listener.accept().await {
-                Ok((sock, _)) => {
-                    tokio::spawn(serve_conn(srv.clone(), sock));
+                Ok((sock, peer)) => {
+                    let proxy = peer.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST);
+                    tokio::spawn(serve_conn(srv.clone(), sock, proxy));
                 }
                 Err(e) => {
                     eprintln!("openchange-mapihttpd: accept: {e}");
@@ -243,10 +272,44 @@ mod tests {
     #[test]
     fn test_parse_args() {
         let args = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
-        assert_eq!(args(&["--port", "8080"]), Some(8080));
-        assert_eq!(args(&["--port"]), None);
-        assert_eq!(args(&["--port", "8080", "x"]), None);
-        assert_eq!(args(&[]), None);
+        assert_eq!(
+            args(&[
+                "--port",
+                "8080",
+                "--dovecot-socket",
+                "/run/dovecot/auth-client"
+            ]),
+            Ok(Args {
+                port: 8080,
+                dovecot_socket: "/run/dovecot/auth-client".into(),
+                dovecot_service: "openchange".into(),
+            })
+        );
+        let full = args(&[
+            "--dovecot-service",
+            "mapi",
+            "--dovecot-socket",
+            "/s",
+            "--port",
+            "1",
+        ]);
+        assert_eq!(full.unwrap().dovecot_service, "mapi");
+        assert_eq!(
+            args(&["--port", "8080"]),
+            Err("--dovecot-socket is required".into())
+        );
+        assert!(args(&["--port"]).is_err());
+        assert!(args(&["--port", "8080", "x"]).is_err());
+        assert!(args(&[
+            "--dovecot-socket",
+            "/s",
+            "--port",
+            "1",
+            "--dovecot-service",
+            "a\tb"
+        ])
+        .is_err());
+        assert!(args(&[]).is_err());
     }
 
     /// Sends request headers only (the declared body is never written) and returns the
@@ -258,7 +321,7 @@ mod tests {
             let srv = Arc::new(Server {
                 auth: FakeAuth::default(),
             });
-            tokio::spawn(serve_conn(srv.clone(), server));
+            tokio::spawn(serve_conn(srv.clone(), server, false));
             client.write_all(headers.as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let mut buf = [0u8; 4096];
@@ -345,7 +408,7 @@ mod tests {
             let srv = Arc::new(Server {
                 auth: FakeAuth::default(),
             });
-            tokio::spawn(serve_conn(srv, server));
+            tokio::spawn(serve_conn(srv, server, false));
             client.write_all(raw.as_bytes()).await.unwrap();
             let mut out = String::new();
             client.read_to_string(&mut out).await.unwrap();
@@ -356,5 +419,31 @@ mod tests {
         assert!(lower.contains("\r\nx-responsecode: 0\r\n"), "{out}");
         assert!(lower.contains("\r\nx-requesttype: ping\r\n"), "{out}");
         assert!(out.contains("\r\n\r\nPROCESSING\r\nDONE\r\nX-ResponseCode: 0\r\n"));
+    }
+
+    #[test]
+    fn test_real_ip_only_from_proxy() {
+        for (trusted, want) in [(false, None), (true, "192.0.2.7".parse().ok())] {
+            let rip = run(async {
+                let (mut client, server) = tokio::io::duplex(64 * 1024);
+                let srv = Arc::new(Server {
+                    auth: FakeAuth::default(),
+                });
+                tokio::spawn(serve_conn(srv.clone(), server, trusted));
+                let raw = format!(
+                    "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\n\
+                     Connection: close\r\nAuthorization: {BASIC}\r\n\
+                     Content-Type: application/mapi-http\r\nX-RequestType: PING\r\n\
+                     X-RequestId: {{A}}:1\r\nX-Real-IP: 192.0.2.7\r\nContent-Length: 0\r\n\r\n"
+                );
+                client.write_all(raw.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                client.read_to_string(&mut out).await.unwrap();
+                assert!(out.starts_with("HTTP/1.1 200 "), "{out}");
+                let rip = *srv.auth.rip.lock().unwrap();
+                rip
+            });
+            assert_eq!(rip, want);
+        }
     }
 }
