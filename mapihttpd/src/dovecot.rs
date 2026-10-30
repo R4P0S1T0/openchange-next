@@ -5,9 +5,12 @@ use base64::Engine;
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+/// Whole check (connect, handshake, AUTH reply); past it the request gets 503.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest line either side may send, newline included.
 const MAX_LINE: u64 = 16384;
 
@@ -149,6 +152,21 @@ impl Authenticator for DovecotAuthenticator {
         password: &Password,
         rip: Option<IpAddr>,
     ) -> AuthResult {
+        let check = self.check(user, password, rip);
+        tokio::time::timeout(AUTH_TIMEOUT, check)
+            .await
+            .unwrap_or_else(|_| {
+                eprintln!(
+                    "openchange-mapihttpd: dovecot auth: no answer within {}s",
+                    AUTH_TIMEOUT.as_secs()
+                );
+                AuthResult::TempFail
+            })
+    }
+}
+
+impl DovecotAuthenticator {
+    async fn check(&self, user: &str, password: &Password, rip: Option<IpAddr>) -> AuthResult {
         // Errors never carry credentials: only static texts and I/O errors.
         let stream = match UnixStream::connect(&self.socket).await {
             Ok(s) => s,
@@ -287,6 +305,39 @@ mod tests {
         });
         let _ = std::fs::remove_file(&path);
         assert_eq!(status, 503);
+    }
+
+    #[test]
+    fn test_auth_timeout() {
+        let path =
+            std::env::temp_dir().join(format!("mapihttpd-t3-to-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let (status, waited) = rt.block_on(async {
+            let listener = UnixListener::bind(&path).unwrap();
+            // Accepts and then never says anything.
+            let _silent = tokio::spawn(async move {
+                let (sock, _) = listener.accept().await.unwrap();
+                std::future::pending::<()>().await;
+                drop(sock);
+            });
+            let srv = Server {
+                auth: DovecotAuthenticator {
+                    socket: path.clone(),
+                    service: "openchange".into(),
+                },
+            };
+            let t0 = tokio::time::Instant::now();
+            let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
+            (rep.http_status, t0.elapsed())
+        });
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status, 503);
+        assert!(waited >= AUTH_TIMEOUT, "{waited:?}");
     }
 
     #[test]

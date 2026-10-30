@@ -17,6 +17,9 @@ hyper = { version = "~1.5", default-features = false, features = ["http1", "serv
 hyper-util = { version = "~0.1.10", default-features = false, features = ["tokio"] }
 tokio = { version = "~1.43", default-features = false, features = ["rt-multi-thread", "net", "time", "io-util"] }
 
+[dev-dependencies]
+tokio = { version = "~1.43", default-features = false, features = ["test-util"] }
+
 [lints.rust]
 unsafe_code = "deny"
 
