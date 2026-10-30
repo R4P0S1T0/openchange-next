@@ -137,6 +137,12 @@ go) confirmed decisions 3, 4 and 7 and added the Bearer rule to decision 4.
 
 ## Global Constraints
 
+**Security exception approved 2026-10-30:** the maintainer permits downloading
+upstream packages outside Debian 13 for security fixes while retaining Rust
+1.85 and vendored/offline builds. bytes 1.11.1 and quick-xml 0.41.0 replace the
+Debian-capped versions after RUSTSEC-2026-0007/0194/0195; other locked versions
+remain unchanged. This supersedes the version ceiling only for those updates.
+
 - New code is Rust; existing C changes only where the C boundary needs it (Task 4). Migration of other C code happens only when there is a clear gain, as a separately planned change.
 - `--enable-mapihttp` is off by default; default `./configure && make all` must not need cargo or rustc. Enabled without `cargo` ≥ 1.85 → `AC_MSG_ERROR`.
 - Builds use only vendored crates: `cargo build --offline --locked`; `Cargo.lock` and `vendor/` are committed; `.cargo/config.toml` replaces crates.io with `vendor/`.

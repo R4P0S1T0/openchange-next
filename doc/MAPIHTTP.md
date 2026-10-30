@@ -147,7 +147,9 @@ prevent Outlook from reaching the service.
 
 ## Refresh vendored dependencies
 
-Keep versions at or below Debian 13's packaged versions, and commit Cargo.lock,
+Use Debian 13's packaged versions by default. The maintainer authorized
+bytes 1.11.1 and quick-xml 0.41.0 from crates.io for security fixes; both support
+Rust 1.85 and are included in vendor/. Commit Cargo.lock,
 the vendor tree and `.cargo/config.toml` together. On a development machine
 with network access, deliberately update the required locked versions, then:
 
@@ -195,7 +197,7 @@ The maintainer authorized a push and a merge only after green CI. Commit
 the Rust job failed. Local cargo-audit 0.21.2 reproduced an inability to parse
 CVSS 4.0 in the current advisory database. The workflow now uses 0.22.1,
 successfully built with Rust 1.85.1. Against database commit
-`2295466c4e9df26647fd67d8fa1c705ac2fc7f81`, it reports:
+`2295466c4e9df26647fd67d8fa1c705ac2fc7f81`, it initially reported:
 
 | Advisory | Locked crate | Patched version |
 | --- | --- | --- |
@@ -203,19 +205,25 @@ successfully built with Rust 1.85.1. Against database commit
 | RUSTSEC-2026-0194 | quick-xml 0.36.1 | >=0.41.0 |
 | RUSTSEC-2026-0195 | quick-xml 0.36.1 | >=0.41.0 |
 
-These exceed the approved Debian 13 version ceiling. A maintainer decision is
-pending; no advisories are suppressed and main is unchanged. The quick-xml
-notices concern attribute iteration and namespace resolution; the current
-Autodiscover parser uses plain Reader without either API. The bytes notice
-concerns overflowing reserve sizes in release builds. Package-version audit
-findings do not by themselves prove a remotely reachable exploit in this
-service, and the current gate remains red.
+The maintainer authorized these two upstream security updates beyond the
+Debian 13 package ceiling. bytes 1.11.1 and quick-xml 0.41.0 are pinned,
+vendored and compatible with Rust 1.85; no other locked version changes.
+The updated audit returns exit status 0 and zero vulnerabilities without any
+suppression. The XML reader handles quick-xml's separate GeneralRef events,
+preserving entity decoding and whitespace, with a regression test.
 
-Informational warnings also report unmaintained adler 1.0.2 (only in the unused
-backtrace dependency chain) and unsound Tokio AsyncFd constructors
-(RUSTSEC-2026-0386). This service does not call those constructors; its TCP and
-UNIX sockets use Tokio's higher-level network types. These warnings still
-need explicit disposition before a clean security report can be claimed.
+Two informational warnings remain, with these dispositions:
+
+- Unmaintained adler 1.0.2 (RUSTSEC-2025-0056) belongs only to the unused,
+  pruned backtrace chain. The supported Linux service does not compile it;
+  revisit before enabling taskdump/backtrace or expanding supported targets.
+- Tokio 1.43.1's AsyncFd constructors are unsound (RUSTSEC-2026-0386).
+  The service never calls those APIs; its TCP and UNIX socket types use
+  PollEvented instead. Keep this warning visible and revisit if adding AsyncFd.
+
+No advisories are ignored in configuration. A passing version audit is scoped
+to the database revision above; it does not establish live interoperability.
+The authorized merge still waits for green CI on the updated branch.
 
 ### Earlier code review
 
@@ -245,7 +253,7 @@ interoperability or weaken the fail-closed Connect decision:
 | Symbol-check pipeline | `nm` failure can be masked by the negative grep; a successful pipeline alone is weaker evidence than a link/run |
 | C integration test setup | Bare C-feature Cargo tests require the LDB seed made by `check-oc-emsmdb`; use `make check-mapihttp` |
 | Binary body exhaustion | Trailing bytes and some auxiliary header inconsistencies are ignored; reads remain bounded and auxiliary content is dropped |
-| Autodiscover XML validation | Multiple roots, namespaces and attributes are not fully validated; CDATA or text split by comments can reject otherwise valid requests; settings still belong only to the authenticated user |
+| Autodiscover XML validation | Multiple roots, namespaces and attributes are not fully validated; CDATA can reject otherwise valid requests; settings still belong only to the authenticated user |
 | PING credential mismatch | A mismatched live cookie falls back to authentication instead of code 10; the original session is untouched; reconcile this with section 3.2.5.1 before claiming full conformance |
 
 The known delayed reconnect cleanup and absent PENDING keep-alives remain

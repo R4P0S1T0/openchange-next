@@ -158,34 +158,52 @@ fn xml(req: &MapiRequest<'_>, body: String) -> MapiReply {
 /// `(LegacyDN, EMailAddress)` of a well-formed request (2.2.3.1); `None` if malformed.
 fn requested(body: &[u8]) -> Option<(Option<String>, Option<String>)> {
     let mut reader = Reader::from_reader(body);
-    reader.config_mut().trim_text(true);
     let (mut path, mut dn, mut address) = (Vec::new(), None, None);
     loop {
-        match reader.read_event().ok()? {
+        let event = reader.read_event().ok()?;
+        match &event {
             // Never interpret a DTD (entity expansion): stop here.
             Event::DocType(_) => return None,
             Event::Start(e) => path.push(e.local_name().as_ref().to_vec()),
             Event::End(_) => {
                 path.pop();
-            }
-            Event::Text(t) => {
-                let slot = match path.as_slice() {
-                    [a, r, field] if a == b"Autodiscover" && r == b"Request" => match &field[..] {
-                        b"LegacyDN" => &mut dn,
-                        b"EMailAddress" => &mut address,
-                        _ => continue,
-                    },
-                    _ => continue,
-                };
-                if slot.replace(t.unescape().ok()?.into_owned()).is_some() {
-                    return None;
-                }
+                continue;
             }
             Event::Eof if path.is_empty() => break,
             Event::Eof => return None,
             _ => {}
         }
+        let slot = match path.as_slice() {
+            [a, r, field] if a == b"Autodiscover" && r == b"Request" => match &field[..] {
+                b"LegacyDN" => &mut dn,
+                b"EMailAddress" => &mut address,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        match event {
+            Event::Start(_) => {
+                if slot.replace(String::new()).is_some() {
+                    return None;
+                }
+            }
+            Event::Text(t) => slot.as_mut()?.push_str(&t.decode().ok()?),
+            // quick-xml 0.41 emits references separately from adjacent text.
+            Event::GeneralRef(r) => {
+                slot.as_mut()?.push_str(&format!("&{};", r.decode().ok()?));
+            }
+            _ => {}
+        }
     }
+    let normalize = |s: Option<String>| -> Option<Option<String>> {
+        let Some(s) = s else { return Some(None) };
+        let s = s.trim_matches([' ', '\t', '\r', '\n']);
+        if s.is_empty() {
+            return Some(None);
+        }
+        Some(Some(quick_xml::escape::unescape(s).ok()?.into_owned()))
+    };
+    let (dn, address) = (normalize(dn)?, normalize(address)?);
     (dn.is_some() || address.is_some()).then_some((dn, address))
 }
 
@@ -299,6 +317,28 @@ mod tests {
         assert_eq!(
             mailbox_guid("Alice@Example.invalid"),
             "78d66dbf-bec6-8c3f-b4aa-150451ce5c0c"
+        );
+    }
+
+    #[test]
+    fn test_requested_xml_references() {
+        let body = b"<Autodiscover><Request>\
+            <EMailAddress> alice&#64;example.invalid </EMailAddress>\
+            <LegacyDN> /o=A &amp; B/cn=alice </LegacyDN>\
+            </Request></Autodiscover>";
+        assert_eq!(
+            requested(body),
+            Some((
+                Some("/o=A & B/cn=alice".into()),
+                Some("alice@example.invalid".into())
+            ))
+        );
+        assert!(requested(b"<Autodiscover><Request><EMailAddress>alice&unknown;example.invalid</EMailAddress></Request></Autodiscover>").is_none());
+        assert_eq!(
+            requested(
+                b"<Autodiscover><Request><LegacyDN>&#32;</LegacyDN></Request></Autodiscover>"
+            ),
+            Some((Some(" ".into()), None))
         );
     }
 

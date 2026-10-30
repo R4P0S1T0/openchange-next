@@ -23,11 +23,15 @@ passed native-library, tooling 3.11/3.13 and python-runtime; Rust failed.
 Local reproduction found cargo-audit 0.21.2 cannot parse CVSS 4.0; the workflow
 now uses 0.22.1 (built successfully with Rust 1.85.1).
 
-The working auditor reports three blocking advisories in bytes 1.9.0 and
-quick-xml 0.36.1. Patched versions require bytes >=1.11.1 and quick-xml >=0.41.0,
-above the approved Debian 13 ceiling. A maintainer decision on that constraint
-is pending; no audit suppressions were added. Keep main unchanged until the
-findings are resolved and CI is green. See MAPIHTTP.md for the audit IDs.
+The maintainer subsequently authorized upstream security packages outside the
+Debian 13 repository, retaining Rust 1.85 and offline vendoring. bytes 1.11.1
+and quick-xml 0.41.0 replace 1.9.0/0.36.1; these are the only lockfile version
+changes. Autodiscover preserves XML references across quick-xml's new events.
+The updated local audit reports zero vulnerabilities and two informational
+warnings: unused backtrace-chain adler and unused Tokio AsyncFd constructors.
+No audit suppressions were added. Next: finish CI for this update and merge
+only after it is green; the maintainer already authorized that integration.
+See MAPIHTTP.md for the audit IDs and remaining lab limits.
 After integration, perform the plan's lab acceptance against real Dovecot/nginx
 and Outlook on a disposable VM. C Connect deliberately fails closed until M2
 implements Dovecot-user/PostfixAdmin-mailbox/LegacyDN identity verification.

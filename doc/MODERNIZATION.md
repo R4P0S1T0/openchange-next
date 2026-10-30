@@ -122,8 +122,8 @@ Debian 13 toolchain (Rust 1.85.1, GCC 14.2.0, Samba/PIDL 4.22.10):
 - `./configure --enable-mapihttp` with the local Samba paths and `make -j2 all`.
   The daemon links the C backend. Its library prerequisites and transitive
   library search paths are explicit, including the SONAME links.
-- `make check-emsmdb check-oc-emsmdb check-mapihttp`: 82 Rust tests without
-  `c-backend`, 83 with it, plus the C boundary and existing RPC harnesses.
+- `make check-emsmdb check-oc-emsmdb check-mapihttp`: 83 Rust tests without
+  `c-backend`, 84 with it, plus the C boundary and existing RPC harnesses.
 - `check-oc-emsmdb` with ASan/UBSan: the boundary, extracted execution core and
   harness were explicitly rebuilt with the sanitizer compiler flags. Plain
   objects were rebuilt and the harness passed afterward. Native dependencies
@@ -136,7 +136,8 @@ Debian 13 toolchain (Rust 1.85.1, GCC 14.2.0, Samba/PIDL 4.22.10):
 - Default configure followed by `make -j2 all` passed without the Rust wrapper;
   generated CARGO and OC_MAPIHTTP settings were empty.
 - Direct versions are pinned exactly and the refreshed lock/vendor set is
-  within local Debian 13 package ceilings, including transitive crates.
+  within local Debian 13 package ceilings, including transitive crates, except
+  the subsequently authorized bytes/quick-xml security updates below.
   Windows/WASI targets without Debian packages remain pruned and unsupported.
 
 Task 5/6 review found NotificationWait incorrectly blocked by ordinary session
@@ -147,20 +148,29 @@ The final pass also restored the plan's X-PendingPeriod header, verified with
 a test that failed before the fix. The whole-branch review found no Critical
 issues; its Important CI-coverage and dependency-ceiling findings were fixed.
 The updated native CI job checks the enabled daemon and C boundary after its
-default-off build, including sanitizer and plain rebuilds. This workflow has
-not been run remotely for these commits.
+default-off build, including sanitizer and plain rebuilds. The first remote
+run passed that native job; the security update requires its own green CI.
 
 Audit follow-up after the authorized push: CI run 41111907637 passed
 native-library, tooling 3.11/3.13 and python-runtime, but the Rust job failed.
 Local cargo-audit 0.21.2 reproduced a CVSS 4.0 database parse error. The workflow
 now installs cargo-audit 0.22.1, verified to build with Rust 1.85.1 and read the
-current database. Its audit reports three blocking advisories: bytes
-RUSTSEC-2026-0007 and quick-xml RUSTSEC-2026-0194/0195. The patched versions
-(bytes >=1.11.1, quick-xml >=0.41.0) exceed the approved Debian 13 ceiling;
-the maintainer has been asked to decide that constraint. No suppressions or
-merge to main were made. Additional informational warnings cover unused adler
-and Tokio's AsyncFd API; see MAPIHTTP.md. Existing upstream C compiler warnings
-remain; the Rust compiler/Clippy checks are warning-free.
+current database. It initially reported bytes RUSTSEC-2026-0007 and quick-xml
+RUSTSEC-2026-0194/0195. The maintainer authorized upstream packages outside
+Debian 13's version ceiling for these fixes. bytes 1.11.1 and quick-xml 0.41.0
+are now pinned and vendored; all other locked versions remain unchanged.
+Local audit against advisory database commit
+2295466c4e9df26647fd67d8fa1c705ac2fc7f81 now returns zero vulnerabilities and
+exit status 0, without suppressions. Informational warnings remain for unused
+adler/backtrace and Tokio AsyncFd constructors; the service does not use the
+affected APIs. See MAPIHTTP.md for the explicit disposition.
+
+The XML migration preserves named/numeric references, literal whitespace and
+reference whitespace; the regression test ran before the update, failed with
+a mechanical API migration, and passed with the new event handling. These
+crates declare Rust minimum versions of 1.57/1.79 and are built here with
+Rust 1.85.1. Existing upstream C compiler warnings remain. The updated branch
+still requires green remote CI before the authorized merge to main.
 
 Not validated against this Rust service: real Dovecot (including canonical
 full-email user output), nginx, TLS, any Outlook version, Interop-TestSuites,
