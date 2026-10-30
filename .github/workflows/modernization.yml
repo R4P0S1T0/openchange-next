@@ -113,6 +113,18 @@ jobs:
         run: make -W testsuite/modernization/registry_smoke.c check-mapiproxy-registries CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
       - run: python3 -c 'import ctypes; ctypes.CDLL("./libmapi.so.2.3")'
       - run: make -q libmapi
+      # Keep the default build above independent of the Rust toolchain.
+      - name: Enable and check the MAPI/HTTP C backend
+        run: |
+          apt-get update && apt-get install -y cargo rustc rust-clippy rustfmt
+          ./configure --enable-mapihttp --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
+          make -j2 all
+          make check-emsmdb check-oc-emsmdb check-mapihttp
+          OC_EMSMDB_LIBDIR="$PWD/mapiproxy/servers" cargo clippy --offline --locked --all-targets --features c-backend -- -D warnings
+      - name: Check the C boundary with sanitizers and restore plain objects
+        run: |
+          make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+          make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb
 
   rust:
     runs-on: ubuntu-24.04
