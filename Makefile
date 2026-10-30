@@ -57,6 +57,7 @@ all: 		$(OC_IDL)		\
 		$(OC_LIBS)		\
 		$(OC_TOOLS)		\
 		$(OC_SERVER)		\
+		$(OC_MAPIHTTP)		\
 		$(PYOPENCHANGEALL)	\
 		$(OC_TESTSUITE)		\
 		$(COVERAGE_INIT)	\
@@ -1819,6 +1820,19 @@ bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/ems
 bin/emsmdb-backend: testsuite/modernization/emsmdb_backend_smoke.c mapiproxy/servers/default/emsmdb/emsmdbp.c mapiproxy/libmapiproxy/mapi_handles.c mapiproxy/servers/default/emsmdb/oxcstor.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=tdb_open -Wl,--wrap=tdb_close -Wl,--wrap=tdb_store mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS)
+
+bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs)
+	$(CARGO) build --offline --locked --release
+	mkdir -p bin
+	cp target/release/mapihttpd $@
+
+.PHONY: check-mapihttp
+check-mapihttp:
+	@test -n "$(CARGO)" || { echo "check-mapihttp: configure with --enable-mapihttp"; exit 1; }
+	$(CARGO) test --offline --locked
+
+clean::
+	test -z "$(CARGO)" || $(CARGO) clean
 
 .PHONY: check-mpm-pack
 check-mpm-pack: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/modules/mpm_pack.$(SHLIBEXT) bin/mpm-pack

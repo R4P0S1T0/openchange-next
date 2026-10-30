@@ -1,0 +1,9 @@
+# Refresh: cargo vendor --versioned-dirs vendor && script/vendor-prune.sh (empties crates unused on Linux).
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[resolver]
+incompatible-rust-versions = "fallback"

@@ -1,0 +1,27 @@
+[package]
+name = "mapihttpd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Tilde requirements track the Debian 13 minor versions.
+[dependencies]
+base64 = { version = "~0.22", default-features = false, features = ["std"] }
+bytes = { version = "~1.9", default-features = false }
+http = { version = "~1.2", default-features = false }
+http-body-util = { version = "~0.1.2", default-features = false }
+httpdate = { version = "~1.0", default-features = false }
+hyper = { version = "~1.5", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "~0.1.10", default-features = false, features = ["tokio"] }
+tokio = { version = "~1.43", default-features = false, features = ["rt-multi-thread", "net", "time"] }
+
+[dev-dependencies]
+tokio = { version = "~1.43", default-features = false, features = ["io-util"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

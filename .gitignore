@@ -60,3 +60,6 @@ test_results.xml
 *.gcda
 *.gcno
 python/openchange/migration/mapistore_namedprops.py
+/target/
+# Vendored crates are committed verbatim (cargo checks their checksums).
+!/vendor/**

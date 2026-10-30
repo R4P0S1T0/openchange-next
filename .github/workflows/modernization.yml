@@ -114,6 +114,24 @@ jobs:
       - run: python3 -c 'import ctypes; ctypes.CDLL("./libmapi.so.2.3")'
       - run: make -q libmapi
 
+  rust:
+    runs-on: ubuntu-24.04
+    container: debian:13
+    steps:
+      - run: >-
+          apt-get update && apt-get install -y
+          git ca-certificates build-essential pkg-config
+          cargo rustc rust-clippy rustfmt
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+      - run: cargo clippy --offline --locked --all-targets -- -D warnings
+      - run: cargo test --offline --locked
+      # Installed outside the checkout so the vendored-source override does not apply.
+      - name: Audit the locked dependencies
+        run: |
+          cd / && cargo install cargo-audit --locked --version 0.21.2
+          cd "$GITHUB_WORKSPACE" && "$HOME/.cargo/bin/cargo-audit" audit
+
   tooling:
     runs-on: ubuntu-latest
     strategy:
