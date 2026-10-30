@@ -301,6 +301,7 @@ mod tests {
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
+                autodiscover: crate::request::tests::settings(),
             };
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
             assert!(fake.await.unwrap().starts_with("AUTH\t1\tPLAIN\t"));
@@ -336,6 +337,7 @@ mod tests {
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
+                autodiscover: crate::request::tests::settings(),
             };
             let t0 = tokio::time::Instant::now();
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
@@ -356,6 +358,7 @@ mod tests {
             sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
             backend: crate::backend::FakeBackend::default(),
             notification_wait: Duration::from_secs(300),
+            autodiscover: crate::request::tests::settings(),
         };
         let rep = run(handle(&srv, ping("/mapi/emsmdb/")));
         assert_eq!(rep.http_status, 503);

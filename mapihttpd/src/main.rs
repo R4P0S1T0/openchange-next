@@ -1,15 +1,18 @@
 //! openchange-mapihttpd: MAPI/HTTP service listening on 127.0.0.1 behind a TLS reverse proxy.
 
 mod auth;
-// FakeBackend and its Call log serve the tests only.
+mod autodiscover;
+mod emsmdb;
+// Request handling uses the backend from Task 5; until then only the tests use it.
 #[cfg_attr(not(test), allow(dead_code))]
 mod backend;
 mod dovecot;
-mod emsmdb;
 #[cfg(any(feature = "c-backend", test))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ffi;
 mod request;
+// Until Connect/Execute (Task 5), only the tests use every item.
+#[cfg_attr(not(test), allow(dead_code))]
 mod session;
 
 use auth::Authenticator;
@@ -37,11 +40,10 @@ use tokio::net::TcpListener;
 const CHALLENGE: &str = "Basic realm=\"openchange\"";
 /// Connections that have not sent complete request headers by then are closed.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// How often idle Session Contexts are swept.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const USAGE: &str = "usage: openchange-mapihttpd --port PORT --dovecot-socket PATH \
-     [--dovecot-service NAME] [--session-idle-seconds SECONDS] \
-     [--notification-wait-seconds SECONDS] [--smb-conf PATH]";
+     --external-host HOST [--org NAME] [--ou NAME] [--dovecot-service NAME] \
+     [--session-idle-seconds SECONDS] [--notification-wait-seconds SECONDS] [--smb-conf PATH]";
 
 /// Builds the HTTP response; the only place reply headers and bodies are laid out.
 fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Response<Full<Bytes>> {
@@ -60,6 +62,10 @@ fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Respons
         }
     }
     let body = match rep.http_status {
+        200 if rep.xml => {
+            b = b.header("Content-Type", "text/xml; charset=utf-8");
+            rep.body.clone()
+        }
         200 => {
             let ctype = if rep.response_code == 0 {
                 "application/mapi-http"
@@ -77,6 +83,10 @@ fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Respons
         }
         401 => {
             b = b.header("WWW-Authenticate", CHALLENGE);
+            Vec::new()
+        }
+        405 => {
+            b = b.header("Allow", "POST");
             Vec::new()
         }
         _ => Vec::new(),
@@ -119,6 +129,11 @@ async fn serve<A: Authenticator, B: Backend>(
         body: &[],
     };
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
+    if autodiscover::is_path(base.path) {
+        let cap = h("X-MapiHttpCapability");
+        let rep = serve_autodiscover(&srv, base, declared, body, cap).await?;
+        return Ok(to_response(&rep, t0.elapsed(), start));
+    }
     let rep = match check_headers(&srv, &base, declared).await {
         Err(rep) => rep,
         Ok(admitted) => match Limited::new(body, MAX_BODY).collect().await {
@@ -135,6 +150,33 @@ async fn serve<A: Authenticator, B: Backend>(
         },
     };
     Ok(to_response(&rep, t0.elapsed(), start))
+}
+
+async fn serve_autodiscover<A: Authenticator, B: Backend>(
+    srv: &Server<A, B>,
+    base: MapiRequest<'_>,
+    declared: Option<u64>,
+    body: Incoming,
+    mapihttp_capability: Option<&str>,
+) -> Result<MapiReply, Box<dyn std::error::Error + Send + Sync>> {
+    let user = match autodiscover::check_headers(srv, &base, declared).await {
+        Ok(user) => user,
+        Err(rep) => return Ok(rep),
+    };
+    Ok(
+        match Limited::new(body, autodiscover::MAX_BODY).collect().await {
+            Ok(collected) => {
+                let bytes = collected.to_bytes();
+                let req = MapiRequest {
+                    body: &bytes,
+                    ..base
+                };
+                autodiscover::handle_body(srv, &req, &user, mapihttp_capability)
+            }
+            Err(e) if e.is::<LengthLimitError>() => autodiscover::error(srv, &base, 600),
+            Err(e) => return Err(e),
+        },
+    )
 }
 
 async fn serve_conn<A, B, IO>(srv: Arc<Server<A, B>>, io: IO, trust_real_ip: bool)
@@ -160,6 +202,9 @@ struct Args {
     session_idle_seconds: u64,
     notification_wait_seconds: u64,
     smb_conf: Option<PathBuf>,
+    external_host: String,
+    org: String,
+    ou: String,
 }
 
 /// A positive number of seconds.
@@ -174,6 +219,9 @@ fn seconds(what: &str, value: &str) -> Result<u64, String> {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut port, mut socket, mut service, mut idle) = (None, None, "openchange".to_owned(), 1800);
     let (mut wait, mut smb_conf) = (300, None);
+    let mut host = None;
+    let mut org = "First Organization".to_owned();
+    let mut ou = "Exchange Administrative Group (FYDIBOHF23SPDLT)".to_owned();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -184,9 +232,27 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 return Err(format!("bad service name: {value:?}"))
             }
             "--dovecot-service" => service = value,
-            "--session-idle-seconds" => idle = seconds("session idle seconds", &value)?,
+            "--session-idle-seconds" => {
+                idle = value
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or(format!("bad session idle seconds: {value}"))?
+            }
             "--notification-wait-seconds" => wait = seconds("notification wait seconds", &value)?,
             "--smb-conf" => smb_conf = Some(PathBuf::from(value)),
+            // Becomes the authority of the advertised URLs.
+            "--external-host"
+                if value.is_empty()
+                    || !value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)) =>
+            {
+                return Err(format!("bad external host: {value:?}"))
+            }
+            "--external-host" => host = Some(value),
+            "--org" => org = value,
+            "--ou" => ou = value,
             _ => return Err(format!("unknown option: {flag}")),
         }
     }
@@ -197,6 +263,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         session_idle_seconds: idle,
         notification_wait_seconds: wait,
         smb_conf,
+        external_host: host.ok_or("--external-host is required")?,
+        org,
+        ou,
     })
 }
 
@@ -261,6 +330,11 @@ fn main() -> ExitCode {
             sessions: SessionTable::new(Duration::from_secs(args.session_idle_seconds)),
             backend,
             notification_wait: Duration::from_secs(args.notification_wait_seconds),
+            autodiscover: autodiscover::Settings {
+                external_host: args.external_host,
+                org: args.org,
+                ou: args.ou,
+            },
         });
         let sweeper = srv.clone();
         tokio::spawn(async move {
@@ -353,7 +427,9 @@ mod tests {
                 "--port",
                 "8080",
                 "--dovecot-socket",
-                "/run/dovecot/auth-client"
+                "/run/dovecot/auth-client",
+                "--external-host",
+                "mail.example.invalid",
             ]),
             Ok(Args {
                 port: 8080,
@@ -362,6 +438,9 @@ mod tests {
                 session_idle_seconds: 1800,
                 notification_wait_seconds: 300,
                 smb_conf: None,
+                external_host: "mail.example.invalid".into(),
+                org: "First Organization".into(),
+                ou: "Exchange Administrative Group (FYDIBOHF23SPDLT)".into(),
             })
         );
         let full = args(&[
@@ -371,9 +450,43 @@ mod tests {
             "/s",
             "--port",
             "1",
-        ]);
-        assert_eq!(full.unwrap().dovecot_service, "mapi");
-        let base = ["--port", "1", "--dovecot-socket", "/s"];
+            "--external-host",
+            "h",
+            "--org",
+            "Example",
+            "--ou",
+            "Mail",
+        ])
+        .unwrap();
+        assert_eq!(full.dovecot_service, "mapi");
+        assert_eq!((full.org.as_str(), full.ou.as_str()), ("Example", "Mail"));
+        assert_eq!(
+            args(&["--port", "8080", "--external-host", "h"]),
+            Err("--dovecot-socket is required".into())
+        );
+        assert_eq!(
+            args(&["--port", "8080", "--dovecot-socket", "/s"]),
+            Err("--external-host is required".into())
+        );
+        for host in ["", "a/b", "a b", "a?b"] {
+            let a = args(&[
+                "--port",
+                "1",
+                "--dovecot-socket",
+                "/s",
+                "--external-host",
+                host,
+            ]);
+            assert!(a.is_err(), "{host:?}");
+        }
+        let base = [
+            "--port",
+            "1",
+            "--dovecot-socket",
+            "/s",
+            "--external-host",
+            "mail.example.invalid",
+        ];
         let with = |extra: &[&str]| args(&[&base[..], extra].concat());
         let a = with(&[
             "--notification-wait-seconds",
@@ -385,10 +498,6 @@ mod tests {
         assert_eq!(a.notification_wait_seconds, 5);
         assert_eq!(a.smb_conf, Some(PathBuf::from("/etc/samba/smb.conf")));
         assert!(with(&["--notification-wait-seconds", "0"]).is_err());
-        assert_eq!(
-            args(&["--port", "8080"]),
-            Err("--dovecot-socket is required".into())
-        );
         assert!(args(&["--port"]).is_err());
         assert!(args(&["--port", "8080", "x"]).is_err());
         assert!(args(&[
@@ -397,7 +506,9 @@ mod tests {
             "--port",
             "1",
             "--dovecot-service",
-            "a\tb"
+            "a\tb",
+            "--external-host",
+            "h"
         ])
         .is_err());
         assert!(args(&[]).is_err());
@@ -408,6 +519,8 @@ mod tests {
             "8080",
             "--dovecot-socket",
             "/s",
+            "--external-host",
+            "h",
         ]);
         assert_eq!(idle.unwrap().session_idle_seconds, 60);
         assert!(args(&[
@@ -415,6 +528,8 @@ mod tests {
             "8080",
             "--dovecot-socket",
             "/s",
+            "--external-host",
+            "h",
             "--session-idle-seconds",
             "0"
         ])
@@ -581,5 +696,58 @@ mod tests {
             });
             assert_eq!(rip, want);
         }
+    }
+
+    #[test]
+    fn test_glue_autodiscover() {
+        let body = include_str!("../../testsuite/modernization/mapihttp/autodiscover-request.xml");
+        let raw = format!(
+            "POST /AutoDiscover/AutoDiscover.xml HTTP/1.1\r\nHost: mail.example.invalid\r\n\
+             Connection: close\r\nContent-Type: text/xml\r\nX-MapiHttpCapability: 1\r\n\
+             X-AnchorMailbox: bob@example.invalid\r\n\
+             Authorization: Basic YWxpY2VAZXhhbXBsZS5pbnZhbGlkOnBhc3M=\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let out = run(async {
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(serve_conn(Arc::new(server()), conn, false));
+            client.write_all(raw.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        });
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
+        assert!(
+            out.contains("content-type: text/xml; charset=utf-8\r\n"),
+            "{out}"
+        );
+        assert!(!out.contains("x-responsecode"), "{out}");
+        let response =
+            include_str!("../../testsuite/modernization/mapihttp/autodiscover-response.xml");
+        assert!(out.ends_with(&format!("\r\n\r\n{response}")), "{out}");
+    }
+
+    #[test]
+    fn test_glue_autodiscover_body_not_read() {
+        // Bearer and wrong Basic are answered before the declared body arrives.
+        for (auth, calls) in [("Bearer eyJ0eXAi", 0), ("Basic dXNlcjpub3Bl", 1)] {
+            let (out, n) = head_only(&format!(
+                "POST /autodiscover/autodiscover.xml HTTP/1.1\r\nHost: mail.example.invalid\r\n\
+                 Authorization: {auth}\r\nContent-Type: text/xml\r\nContent-Length: 1000\r\n\r\n"
+            ));
+            assert!(out.starts_with("HTTP/1.1 401 "), "{out}");
+            assert!(
+                out.contains("www-authenticate: Basic realm=\"openchange\""),
+                "{out}"
+            );
+            assert_eq!(n, calls);
+        }
+        let (out, _) = head_only(&format!(
+            "GET /autodiscover/autodiscover.xml HTTP/1.1\r\nHost: mail.example.invalid\r\n\
+             Authorization: {BASIC}\r\n\r\n"
+        ));
+        assert!(out.starts_with("HTTP/1.1 405 "), "{out}");
+        assert!(out.contains("allow: POST\r\n"), "{out}");
     }
 }
