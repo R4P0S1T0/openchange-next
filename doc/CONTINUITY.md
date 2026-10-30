@@ -10,10 +10,12 @@ and nginx on one server, with no AD, LDAP or Samba daemon.
 
 **Next milestone: M1** — MAPI/HTTP, Autodiscover and Dovecot authentication.
 Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
-The maintainer approved its decisions on 2026-10-30. **Start with its Task 0**,
-a lab spike on the disposable VM (nginx with static Autodiscover and a capture
-listener) that checks real Outlook behavior before any C is written; its result
-decides whether Tasks 1–6 proceed as written.
+The maintainer approved its decisions on 2026-10-30. Task 0, the lab spike
+with real Outlook, is done with a go (results in the plan's Task 0 section,
+fixtures in `testsuite/modernization/mapihttp/`). **Continue with Task 1.**
+Bearer first: Outlook sends `Authorization: Bearer` before Basic on every
+request; the service must answer 401 with the Basic challenge without
+contacting Dovecot or logging a failed login (plan Review Focus item 0).
 The [dav calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)
 is deferred until after M1 (milestone M6) and has not started.
 
@@ -64,12 +66,18 @@ Decided by the maintainer:
   idle timeout of 1800 s is an implementation choice (the specification fixes
   no value).
 
+Answered in the lab (M1 Task 0, 2026-10-30): classic Microsoft 365 Outlook
+16.0.19127.20800 accepts Basic after a 401, sends `X-MapiHttpCapability: 1`,
+accepts the `mapiHttp` Autodiscover response and sends Connect. A client-side
+authenticating HTTP proxy must have the server host in its exceptions.
+
 Still open (answered in the lab):
 
-1. Do Outlook 2016/2019 and classic Microsoft 365 Outlook accept Basic
-   authentication against a non-Microsoft server, and do they send
-   `X-MapiHttpCapability`? (M1 Task 0)
-2. Does SOGo DAV accept Basic credentials for an account with TOTP enabled? (M6)
+1. Do Outlook 2016/2019 (and 2013 SP1 if licensed) behave the same? (M1 lab
+   acceptance)
+2. Does Outlook stop sending Bearer first once it holds a session cookie?
+   The specification does not say (M1 lab acceptance).
+3. Does SOGo DAV accept Basic credentials for an account with TOTP enabled? (M6)
 
 ## Reviewed implementation (named properties)
 
@@ -121,7 +129,8 @@ commits or a deployed server.
 remain binding. Inventory and an isolated build on a disposable VM are useful
 now. No mailbox content backend exists yet (IMAP for M3/M4 and DAV for M6 are
 planned), and the MAPI/HTTP transport, Dovecot authentication and Autodiscover
-(M1) are not implemented. No Dovecot, SMTP, SOGo, MariaDB/PostfixAdmin
+(M1) are not implemented; only the Task 0 lab spike has talked to a real
+Outlook. No Dovecot, SMTP, SOGo, MariaDB/PostfixAdmin
 directory or Outlook exchange has been validated.
 Do not infer a working mail server from harness or installed-module checks.
 
