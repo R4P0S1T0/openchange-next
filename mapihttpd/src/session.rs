@@ -14,7 +14,6 @@ pub type SessionId = u64;
 const COOKIE_NAME: &str = "MapiContext";
 
 struct Session {
-    user: String,
     cred_hash: [u8; 32],
     backend: SessionId,
     last_used: Instant,
@@ -33,7 +32,7 @@ pub struct SessionTable {
 pub struct SessionGuard<'a> {
     table: &'a SessionTable,
     cookie: String,
-    user: String,
+    backend: SessionId,
     holds_busy: bool,
 }
 
@@ -95,16 +94,9 @@ impl SessionTable {
     }
 
     /// Returns the Set-Cookie value of the new session.
-    pub fn create(
-        &self,
-        user: &str,
-        cred_hash: [u8; 32],
-        backend: SessionId,
-        now: Instant,
-    ) -> String {
+    pub fn create(&self, cred_hash: [u8; 32], backend: SessionId, now: Instant) -> String {
         let cookie = format!("{:032x}", u128::from_ne_bytes(random()));
         let session = Session {
-            user: user.to_owned(),
             cred_hash,
             backend,
             last_used: now,
@@ -135,7 +127,7 @@ impl SessionTable {
         Ok(SessionGuard {
             table: self,
             cookie: cookie.to_owned(),
-            user: s.user.clone(),
+            backend: s.backend,
             holds_busy: true,
         })
     }
@@ -157,7 +149,7 @@ impl SessionTable {
         Some(SessionGuard {
             table: self,
             cookie: cookie.to_owned(),
-            user: s.user.clone(),
+            backend: s.backend,
             holds_busy: false,
         })
     }
@@ -179,6 +171,11 @@ impl SessionTable {
         gone
     }
 
+    /// X-ExpirationInfo of a session whose idle clock was just reset.
+    pub fn idle_ms(&self) -> u32 {
+        u32::try_from(self.idle.as_millis()).unwrap_or(u32::MAX)
+    }
+
     #[cfg(test)]
     pub fn last_used(&self, cookie: &str) -> Option<Instant> {
         self.lock().get(cookie).map(|s| s.last_used)
@@ -190,17 +187,30 @@ fn set_cookie(cookie: &str) -> String {
 }
 
 impl SessionGuard<'_> {
-    pub fn user(&self) -> &str {
-        &self.user
-    }
-
     pub fn set_cookie(&self) -> String {
         set_cookie(&self.cookie)
     }
 
     /// X-ExpirationInfo: `begin`/`touch` just reset the idle clock, so the full idle time remains.
     pub fn expiration_ms(&self) -> u32 {
-        u32::try_from(self.table.idle.as_millis()).unwrap_or(u32::MAX)
+        self.table.idle_ms()
+    }
+
+    /// The backend session this Session Context maps to.
+    pub fn backend(&self) -> SessionId {
+        self.backend
+    }
+
+    /// Resets the idle clock, as at the end of a NotificationWait (3.2.5.5).
+    pub fn refresh(&self, now: Instant) {
+        if let Some(s) = self.table.lock().get_mut(&self.cookie) {
+            s.last_used = now;
+        }
+    }
+
+    /// Removes the session (Disconnect); returns its backend session unless already gone.
+    pub fn remove(self) -> Option<SessionId> {
+        self.table.remove(&self.cookie)
     }
 }
 
@@ -235,7 +245,7 @@ mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 7, now);
+        let sc = t.create(h, 7, now);
         let value = sc
             .strip_prefix("MapiContext=")
             .and_then(|r| r.strip_suffix("; Path=/mapi/; Secure; HttpOnly"))
@@ -247,7 +257,7 @@ mod tests {
         let g = t.begin(Some(cookie_of(&sc)), h, now).ok().unwrap();
         assert_eq!(g.expiration_ms(), 1_800_000);
         assert_eq!(g.set_cookie(), sc);
-        assert_ne!(t.create("user", h, 8, now), sc);
+        assert_ne!(t.create(h, 8, now), sc);
     }
 
     #[test]
@@ -266,7 +276,7 @@ mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 1, now);
+        let sc = t.create(h, 1, now);
         let code = |c: Option<&str>| t.begin(c, h, now).err();
         assert_eq!(code(None), Some(13));
         assert_eq!(code(Some("other=1")), Some(13));
@@ -292,7 +302,7 @@ mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 1, now);
+        let sc = t.create(h, 1, now);
         let g = t.begin(Some(cookie_of(&sc)), h, now).ok().unwrap();
         assert_eq!(t.begin(Some(cookie_of(&sc)), h, now).err(), Some(15));
         drop(g);
@@ -304,7 +314,7 @@ mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 42, now);
+        let sc = t.create(h, 42, now);
         let value = &cookie_of(&sc)["MapiContext=".len()..];
         assert_eq!(t.remove(value), Some(42));
         assert_eq!(t.remove(value), None);
@@ -317,7 +327,7 @@ mod tests {
         let now = Instant::now();
         let later = now + Duration::from_secs(60);
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 1, now);
+        let sc = t.create(h, 1, now);
         let value = &cookie_of(&sc)["MapiContext=".len()..];
         let other = t.credential_hash("other", &Password::from("pass"));
         assert!(t.touch(Some(cookie_of(&sc)), other, later).is_none());
@@ -338,22 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn test_user_stored() {
-        let t = table();
-        let now = Instant::now();
-        let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 1, now);
-        let g = t.begin(Some(cookie_of(&sc)), h, now).ok().unwrap();
-        assert_eq!(g.user(), "user");
-    }
-
-    #[test]
     fn test_idle_expiry() {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create("user", h, 9, now);
-        let keep = t.create("user", h, 10, now + Duration::from_secs(1000));
+        let sc = t.create(h, 9, now);
+        let keep = t.create(h, 10, now + Duration::from_secs(1000));
         let later = now + Duration::from_secs(1801);
         assert_eq!(t.begin(Some(cookie_of(&sc)), h, later).err(), Some(10));
         assert_eq!(t.expire(later), vec![9]);

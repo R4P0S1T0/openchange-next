@@ -234,7 +234,8 @@ mod tests {
         unsafe { linked::oc_emsmdb_disconnect(std::ptr::null_mut()) };
 
         // The same calls through the worker thread.
-        let backend = CBackend::start(conf).unwrap_or_else(|s| panic!("init {s:#x}"));
+        let backend = CBackend::start(conf.clone()).unwrap_or_else(|s| panic!("init {s:#x}"));
+        assert_eq!(CBackend::start(conf).err(), Some(EC_RPC_FAILED));
         run(async {
             assert_eq!(backend.connect(req).await, Err(failed));
             assert_eq!(

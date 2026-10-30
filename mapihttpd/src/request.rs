@@ -1,18 +1,32 @@
 //! MAPI/HTTP request validation, routing and reply layout (MS-OXCMAPIHTTP).
 
 use crate::auth::{parse_authorization, AuthResult, Authenticator, BasicCredentials};
+use crate::backend::Backend;
+use crate::emsmdb;
 use crate::session::{SessionGuard, SessionTable};
 use std::net::IpAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Sent as X-ServerApplication on every response (2.2.3.3.7).
 pub const SERVER_APPLICATION: &str = "Exchange/15.02.1544.004";
 /// Largest accepted request body; larger bodies get code 9.
 pub const MAX_BODY: usize = 16 * 1024 * 1024;
 
-pub struct Server<A: Authenticator> {
+pub struct Server<A: Authenticator, B: Backend> {
     pub auth: A,
     pub sessions: SessionTable,
+    pub backend: B,
+    /// How long NotificationWait waits for an event (3.2.2).
+    pub notification_wait: Duration,
+}
+
+/// Who `check_headers` let through.
+pub enum Admitted<'s> {
+    /// A request bound to a live Session Context (or PING keeping one alive).
+    Session(SessionGuard<'s>),
+    /// Credentials the authenticator accepted: its canonical user, and the hash of the
+    /// credentials as sent, which later requests on a new session must match.
+    User { user: String, cred_hash: [u8; 32] },
 }
 
 pub struct MapiRequest<'a> {
@@ -25,7 +39,6 @@ pub struct MapiRequest<'a> {
     pub authorization: Option<&'a str>,
     pub cookie: Option<&'a str>,
     pub real_ip: Option<IpAddr>,
-    #[allow(dead_code)] // read by the body-carrying request types (Task 4)
     pub body: &'a [u8],
 }
 
@@ -43,10 +56,13 @@ pub struct MapiReply {
 
 /// Header and body stages in sequence, as the glue runs them around its body read.
 #[cfg(test)]
-pub async fn handle<A: Authenticator>(srv: &Server<A>, req: MapiRequest<'_>) -> MapiReply {
+pub async fn handle<A: Authenticator, B: Backend>(
+    srv: &Server<A, B>,
+    req: MapiRequest<'_>,
+) -> MapiReply {
     let declared = u64::try_from(req.body.len()).ok();
     match check_headers(srv, &req, declared).await {
-        Ok(session) => handle_body(&req, session.as_ref()),
+        Ok(admitted) => handle_body(srv, &req, admitted).await,
         Err(rep) => rep,
     }
 }
@@ -54,11 +70,11 @@ pub async fn handle<A: Authenticator>(srv: &Server<A>, req: MapiRequest<'_>) -> 
 /// Everything decided before the body is read, in one fixed order (codes of 2.2.3.3.3).
 /// `declared_len` is the Content-Length; the glue still caps chunked bodies itself.
 /// Request types bound to a Session Context come back with its guard held.
-pub async fn check_headers<'s, A: Authenticator>(
-    srv: &'s Server<A>,
+pub async fn check_headers<'s, A: Authenticator, B: Backend>(
+    srv: &'s Server<A, B>,
     req: &MapiRequest<'_>,
     declared_len: Option<u64>,
-) -> Result<Option<SessionGuard<'s>>, MapiReply> {
+) -> Result<Admitted<'s>, MapiReply> {
     if req.method != "POST" {
         return Err(reply(req, 200, 2));
     }
@@ -92,7 +108,7 @@ pub async fn check_headers<'s, A: Authenticator>(
         // The session's credential hash stands in for the authenticator (decision 4).
         let hash = srv.sessions.credential_hash(&user, &password);
         return match srv.sessions.begin(req.cookie, hash, Instant::now()) {
-            Ok(guard) => Ok(Some(guard)),
+            Ok(guard) => Ok(Admitted::Session(guard)),
             Err(code) => Err(reply(req, 200, code)),
         };
     }
@@ -100,26 +116,45 @@ pub async fn check_headers<'s, A: Authenticator>(
     if request_type == "PING" {
         let hash = srv.sessions.credential_hash(&user, &password);
         if let Some(touched) = srv.sessions.touch(req.cookie, hash, Instant::now()) {
-            return Ok(Some(touched));
+            return Ok(Admitted::Session(touched));
         }
     }
     match srv.auth.authenticate(&user, &password, req.real_ip).await {
-        AuthResult::Ok { .. } => Ok(None),
+        AuthResult::Ok { user: canonical } => Ok(Admitted::User {
+            user: canonical,
+            cred_hash: srv.sessions.credential_hash(&user, &password),
+        }),
         AuthResult::BadCredentials => Err(reply(req, 401, 0)),
         AuthResult::TempFail => Err(reply(req, 503, 0)),
     }
 }
 
 /// Runs a request that passed `check_headers`, with its body read.
-pub fn handle_body(req: &MapiRequest<'_>, session: Option<&SessionGuard<'_>>) -> MapiReply {
-    let mut rep = match req.request_type {
-        Some("PING") => reply(req, 200, 0),
-        // Connect, Execute, Disconnect and NotificationWait bodies: Task 5.
+pub async fn handle_body<A: Authenticator, B: Backend>(
+    srv: &Server<A, B>,
+    req: &MapiRequest<'_>,
+    admitted: Admitted<'_>,
+) -> MapiReply {
+    // Taken before Disconnect consumes the guard: it still sends the cookie (3.2.5.4).
+    let session_headers = match &admitted {
+        Admitted::Session(s) => Some((s.set_cookie(), s.expiration_ms())),
+        Admitted::User { .. } => None,
+    };
+    let mut rep = match (req.request_type, admitted) {
+        (Some("PING"), _) => reply(req, 200, 0),
+        (Some("Connect"), Admitted::User { user, cred_hash }) => {
+            return emsmdb::connect(srv, req, user, cred_hash).await
+        }
+        (Some("Execute"), Admitted::Session(s)) => emsmdb::execute(srv, req, &s).await,
+        (Some("Disconnect"), Admitted::Session(s)) => emsmdb::disconnect(srv, req, s).await,
+        (Some("NotificationWait"), Admitted::Session(s)) => {
+            emsmdb::notification_wait(srv, req, &s).await
+        }
         _ => reply(req, 200, 5),
     };
-    if let Some(s) = session {
-        rep.set_cookie = Some(s.set_cookie());
-        rep.expiration_ms = s.expiration_ms();
+    if let Some((cookie, ms)) = session_headers {
+        rep.set_cookie = Some(cookie);
+        rep.expiration_ms = ms;
     }
     rep
 }
@@ -153,6 +188,7 @@ pub fn format_reply(rep: &MapiReply, elapsed_ms: u32, start: &str) -> Vec<u8> {
 pub(crate) mod tests {
     use super::*;
     use crate::auth::Password;
+    use crate::backend::FakeBackend;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -207,10 +243,14 @@ pub(crate) mod tests {
             .block_on(f)
     }
 
-    pub fn server() -> Server<FakeAuth> {
+    pub type TestServer = Server<FakeAuth, FakeBackend>;
+
+    pub fn server() -> TestServer {
         Server {
             auth: FakeAuth::default(),
             sessions: SessionTable::new(Duration::from_secs(1800)),
+            backend: FakeBackend::default(),
+            notification_wait: Duration::from_secs(300),
         }
     }
 
@@ -228,11 +268,11 @@ pub(crate) mod tests {
     }
 
     /// A session for `user:pass`; returns its Set-Cookie value.
-    pub fn connect(srv: &Server<FakeAuth>, now: Instant) -> String {
+    pub fn connect(srv: &TestServer, now: Instant) -> String {
         let h = srv
             .sessions
             .credential_hash("user", &Password::from("pass"));
-        srv.sessions.create("user", h, 1, now)
+        srv.sessions.create(h, 1, now)
     }
 
     fn cookie_of(set_cookie: &str) -> &str {
@@ -283,7 +323,7 @@ pub(crate) mod tests {
         let sc = connect(&srv, Instant::now());
         let req = execute(Some(cookie_of(&sc)));
         let held = run(check_headers(&srv, &req, Some(0))).ok().unwrap();
-        assert!(held.is_some());
+        assert!(matches!(held, Admitted::Session(_)));
         assert_eq!(
             code(&run(handle(&srv, execute(Some(cookie_of(&sc)))))),
             (200, 15)

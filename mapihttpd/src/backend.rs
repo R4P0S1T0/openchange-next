@@ -96,6 +96,23 @@ impl Backend for FakeBackend {
     }
 }
 
+/// Stands in for EMSMDB in builds without the C library: every Connect fails closed.
+#[cfg(not(feature = "c-backend"))]
+pub struct NoBackend;
+
+#[cfg(not(feature = "c-backend"))]
+impl Backend for NoBackend {
+    async fn connect(&self, _req: ConnectParams) -> Result<Connected, u32> {
+        Err(MAPI_E_LOGON_FAILED)
+    }
+
+    async fn execute(&self, _: SessionId, _: u32, _: Vec<u8>, _: usize) -> Result<Vec<u8>, u32> {
+        Err(EC_RPC_FAILED)
+    }
+
+    async fn disconnect(&self, _id: SessionId) {}
+}
+
 #[cfg(feature = "c-backend")]
 pub mod c {
     use super::{Backend, ConnectParams, Connected, EC_RPC_FAILED};
@@ -103,8 +120,12 @@ pub mod c {
     use crate::session::SessionId;
     use std::collections::HashMap;
     use std::ffi::CString;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    /// liboc_emsmdb keeps process-wide state: one worker per process.
+    static STARTED: AtomicBool = AtomicBool::new(false);
 
     enum Job {
         Connect(ConnectParams, oneshot::Sender<Result<Connected, u32>>),
@@ -124,8 +145,11 @@ pub mod c {
     }
 
     impl CBackend {
-        /// Starts the worker and runs `oc_emsmdb_init` on it.
+        /// Starts the worker and runs `oc_emsmdb_init` on it; only the first call may succeed.
         pub fn start(smb_conf: CString) -> Result<Self, u32> {
+            if STARTED.swap(true, Ordering::SeqCst) {
+                return Err(EC_RPC_FAILED);
+            }
             let (jobs, rx) = mpsc::channel();
             let (ready_tx, ready) = mpsc::channel();
             std::thread::Builder::new()

@@ -299,6 +299,8 @@ mod tests {
                     service: "openchange".into(),
                 },
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+                backend: crate::backend::FakeBackend::default(),
+                notification_wait: Duration::from_secs(300),
             };
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
             assert!(fake.await.unwrap().starts_with("AUTH\t1\tPLAIN\t"));
@@ -332,6 +334,8 @@ mod tests {
                     service: "openchange".into(),
                 },
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+                backend: crate::backend::FakeBackend::default(),
+                notification_wait: Duration::from_secs(300),
             };
             let t0 = tokio::time::Instant::now();
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
@@ -350,6 +354,8 @@ mod tests {
                 service: "openchange".into(),
             },
             sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+            backend: crate::backend::FakeBackend::default(),
+            notification_wait: Duration::from_secs(300),
         };
         let rep = run(handle(&srv, ping("/mapi/emsmdb/")));
         assert_eq!(rep.http_status, 503);

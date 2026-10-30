@@ -1,19 +1,19 @@
 //! openchange-mapihttpd: MAPI/HTTP service listening on 127.0.0.1 behind a TLS reverse proxy.
 
 mod auth;
-// Request handling uses the backend from Task 5; until then only the tests use it.
+// FakeBackend and its Call log serve the tests only.
 #[cfg_attr(not(test), allow(dead_code))]
 mod backend;
 mod dovecot;
+mod emsmdb;
 #[cfg(any(feature = "c-backend", test))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ffi;
 mod request;
-// Until Connect/Execute (Task 5), only the tests use every item.
-#[cfg_attr(not(test), allow(dead_code))]
 mod session;
 
 use auth::Authenticator;
+use backend::Backend;
 use bytes::Bytes;
 use dovecot::DovecotAuthenticator;
 use http::{Request, Response};
@@ -37,8 +37,11 @@ use tokio::net::TcpListener;
 const CHALLENGE: &str = "Basic realm=\"openchange\"";
 /// Connections that have not sent complete request headers by then are closed.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often idle Session Contexts are swept.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const USAGE: &str = "usage: openchange-mapihttpd --port PORT --dovecot-socket PATH \
-     [--dovecot-service NAME] [--session-idle-seconds SECONDS]";
+     [--dovecot-service NAME] [--session-idle-seconds SECONDS] \
+     [--notification-wait-seconds SECONDS] [--smb-conf PATH]";
 
 /// Builds the HTTP response; the only place reply headers and bodies are laid out.
 fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Response<Full<Bytes>> {
@@ -86,8 +89,8 @@ fn to_response(rep: &MapiReply, elapsed: Duration, start: SystemTime) -> Respons
 }
 
 /// `trust_real_ip`: the peer is the local reverse proxy, so its X-Real-IP is believed.
-async fn serve<A: Authenticator>(
-    srv: Arc<Server<A>>,
+async fn serve<A: Authenticator, B: Backend>(
+    srv: Arc<Server<A, B>>,
     trust_real_ip: bool,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -118,14 +121,14 @@ async fn serve<A: Authenticator>(
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
     let rep = match check_headers(&srv, &base, declared).await {
         Err(rep) => rep,
-        Ok(session) => match Limited::new(body, MAX_BODY).collect().await {
+        Ok(admitted) => match Limited::new(body, MAX_BODY).collect().await {
             Ok(collected) => {
                 let bytes = collected.to_bytes();
                 let req = MapiRequest {
                     body: &bytes,
                     ..base
                 };
-                handle_body(&req, session.as_ref())
+                handle_body(&srv, &req, admitted).await
             }
             Err(e) if e.is::<LengthLimitError>() => reply(&base, 200, 9),
             Err(e) => return Err(e),
@@ -134,9 +137,10 @@ async fn serve<A: Authenticator>(
     Ok(to_response(&rep, t0.elapsed(), start))
 }
 
-async fn serve_conn<A, IO>(srv: Arc<Server<A>>, io: IO, trust_real_ip: bool)
+async fn serve_conn<A, B, IO>(srv: Arc<Server<A, B>>, io: IO, trust_real_ip: bool)
 where
     A: Authenticator + 'static,
+    B: Backend + 'static,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let svc = service_fn(move |req| serve(srv.clone(), trust_real_ip, req));
@@ -154,10 +158,22 @@ struct Args {
     dovecot_socket: PathBuf,
     dovecot_service: String,
     session_idle_seconds: u64,
+    notification_wait_seconds: u64,
+    smb_conf: Option<PathBuf>,
+}
+
+/// A positive number of seconds.
+fn seconds(what: &str, value: &str) -> Result<u64, String> {
+    value
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
+        .ok_or(format!("bad {what}: {value}"))
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut port, mut socket, mut service, mut idle) = (None, None, "openchange".to_owned(), 1800);
+    let (mut wait, mut smb_conf) = (300, None);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -168,13 +184,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 return Err(format!("bad service name: {value:?}"))
             }
             "--dovecot-service" => service = value,
-            "--session-idle-seconds" => {
-                idle = value
-                    .parse()
-                    .ok()
-                    .filter(|&n| n > 0)
-                    .ok_or(format!("bad session idle seconds: {value}"))?
-            }
+            "--session-idle-seconds" => idle = seconds("session idle seconds", &value)?,
+            "--notification-wait-seconds" => wait = seconds("notification wait seconds", &value)?,
+            "--smb-conf" => smb_conf = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option: {flag}")),
         }
     }
@@ -183,7 +195,28 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         dovecot_socket: socket.ok_or("--dovecot-socket is required")?,
         dovecot_service: service,
         session_idle_seconds: idle,
+        notification_wait_seconds: wait,
+        smb_conf,
     })
+}
+
+/// liboc_emsmdb, initialised from `--smb-conf` before the runtime starts.
+#[cfg(feature = "c-backend")]
+fn start_backend(smb_conf: Option<PathBuf>) -> Result<backend::c::CBackend, String> {
+    use std::os::unix::ffi::OsStringExt;
+    let path = smb_conf.ok_or("--smb-conf is required")?;
+    let conf = std::ffi::CString::new(path.into_os_string().into_vec())
+        .map_err(|_| "--smb-conf contains a NUL byte".to_owned())?;
+    backend::c::CBackend::start(conf).map_err(|s| format!("oc_emsmdb_init failed: {s:#010x}"))
+}
+
+/// Without the C library every Connect fails closed.
+#[cfg(not(feature = "c-backend"))]
+fn start_backend(smb_conf: Option<PathBuf>) -> Result<backend::NoBackend, String> {
+    if smb_conf.is_some() {
+        eprintln!("openchange-mapihttpd: built without c-backend; --smb-conf ignored");
+    }
+    Ok(backend::NoBackend)
 }
 
 fn main() -> ExitCode {
@@ -195,6 +228,13 @@ fn main() -> ExitCode {
         }
     };
     let port = args.port;
+    let backend = match start_backend(args.smb_conf) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("openchange-mapihttpd: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -219,6 +259,16 @@ fn main() -> ExitCode {
                 service: args.dovecot_service,
             },
             sessions: SessionTable::new(Duration::from_secs(args.session_idle_seconds)),
+            backend,
+            notification_wait: Duration::from_secs(args.notification_wait_seconds),
+        });
+        let sweeper = srv.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+            loop {
+                tick.tick().await;
+                emsmdb::sweep(&sweeper, Instant::now()).await;
+            }
         });
         loop {
             match listener.accept().await {
@@ -310,6 +360,8 @@ mod tests {
                 dovecot_socket: "/run/dovecot/auth-client".into(),
                 dovecot_service: "openchange".into(),
                 session_idle_seconds: 1800,
+                notification_wait_seconds: 300,
+                smb_conf: None,
             })
         );
         let full = args(&[
@@ -321,6 +373,18 @@ mod tests {
             "1",
         ]);
         assert_eq!(full.unwrap().dovecot_service, "mapi");
+        let base = ["--port", "1", "--dovecot-socket", "/s"];
+        let with = |extra: &[&str]| args(&[&base[..], extra].concat());
+        let a = with(&[
+            "--notification-wait-seconds",
+            "5",
+            "--smb-conf",
+            "/etc/samba/smb.conf",
+        ]);
+        let a = a.unwrap();
+        assert_eq!(a.notification_wait_seconds, 5);
+        assert_eq!(a.smb_conf, Some(PathBuf::from("/etc/samba/smb.conf")));
+        assert!(with(&["--notification-wait-seconds", "0"]).is_err());
         assert_eq!(
             args(&["--port", "8080"]),
             Err("--dovecot-socket is required".into())
