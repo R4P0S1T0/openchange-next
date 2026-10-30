@@ -1,6 +1,72 @@
 # Development continuity — 2026-10-30
 
-## Reviewed implementation
+## Next step for the next agent
+
+The maintainer changed the project direction on 2026-10-30; read
+[project direction](MODERNIZATION.md#project-direction-2026-10-30) first.
+Target: Outlook 2013 SP1+ (2016/2019/2021/2024, classic Microsoft 365) over
+MAPI/HTTP only, against Postfix, Dovecot 2.4, SOGo 5.12, MariaDB/PostfixAdmin
+and nginx on one server, with no AD, LDAP or Samba daemon.
+
+**Next milestone: M1** — MAPI/HTTP, Autodiscover and Dovecot authentication.
+Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
+Its eight design decisions need maintainer approval before any code is written.
+The [dav calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)
+is deferred until after M1 (milestone M6) and has not started.
+
+Do not touch:
+
+- `.build/worktrees/task1-ldb-reverse` (do not reapply its diff to `main`, do not delete it);
+- `.superpowers/sdd/`, `.build/sql-lab-*`;
+- the untracked draft `docs/plans/2026-10-29-openchange-incremental-namedprops.md`;
+- any production server, existing AD/schema, or global machine configuration.
+
+Verification commands already used. Run them through the extracted toolchain
+wrapper, which sets `PATH`, `PKG_CONFIG_*`, `CPPFLAGS` and `LDFLAGS` for
+`/tmp/openchange-build-tools/root` (no system packages are installed):
+
+```sh
+python3 /tmp/openchange-build-tools/run.py make all
+python3 /tmp/openchange-build-tools/run.py make check-binary-properties \
+  check-property-blobs check-recipient-blobs check-propsdump \
+  check-libmapi-modernization check-ndr-modernization check-mapiadmin \
+  check-ocpf-lexer check-mapiproxy-registries check-mapiproxy-rpc \
+  check-asyncemsmdb check-nspi check-emsmdb check-mpm-pack check-mpm-cache \
+  check-namedprops check-mysql-utils
+```
+
+New targets (`check-mapihttp`, `check-mapistore-dav`) must also run with
+`CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'`. SQL tests use
+only an explicit disposable endpoint. Push only after asking the maintainer.
+
+## Open questions (2026-10-30)
+
+1. **M1 acceptance vs SamDB.** `emsmdbp_init` fails without SamDB
+   (`mapiproxy/servers/default/emsmdb/emsmdbp.c:44`, `:86`) and RopLogon queries
+   it (`oxcstor.c:71`). Either M1's lab acceptance stops at a well-formed Connect
+   response and profile creation moves to M2, or M2's directory seam moves into
+   M1 (M1 plan, decision 5).
+2. **HTTP server choice.** Recommended: own daemon with libmicrohttpd on
+   127.0.0.1 (M1 plan, decision 1); FastCGI rejected.
+3. **SOGo trusted proxy on DAV routes.** Whether SOGo 5.12 honours
+   `SOGoTrustProxyAuthentication` on `/SOGo/dav` was not verified. Open SOGo
+   issue [#5987](https://bugs.sogo.nu/view.php?id=5987) (5.10.0) reports
+   credentials not being checked on DAV/ActiveSync in that mode; test on the lab VM.
+4. **Autodiscover without `X-MapiHttpCapability`.** The plan returns an error;
+   confirm on each Outlook build that the header is sent (MS-OXDSCLI 3.2.5.1).
+5. **Outlook and Basic authentication.** Recent classic Microsoft 365 builds may
+   prefer modern authentication; the Basic prompt flow against a non-Microsoft
+   server is unverified.
+6. **Interop-TestSuites.** The repository is active (not archived, last push
+   2025-06-25) and contains `MS-OXCMAPIHTTP`, but its documented system under
+   test is Exchange 2007–2016; running it against this server is unverified.
+7. **"New Outlook" for Windows** is out of scope; risk that target users are
+   migrated away from classic Outlook.
+8. **Session idle timeout.** The specification fixes no value; the plan uses
+   1800 s as an implementation choice.
+
+
+## Reviewed implementation (named properties)
 
 Commit `5cab4bdb29bff508cd38fc491ac0f1f1865bfc9c` on `main` contains the completed
 five-task named-property increment. It was pushed to
@@ -48,9 +114,10 @@ commits or a deployed server.
 
 [Server readiness](TEST_SERVER_READINESS.md) and the [lab phases](TEST_LAB_PLAN.md)
 remain binding. Inventory and an isolated build on a disposable VM are useful
-now. A mailbox content backend still needs selection and qualification, and
-modern Outlook transport/authentication/Autodiscover need implementation and
-integration. No AD, Samba RPC, SMTP, SOGo or Outlook exchange has been validated.
+now. No mailbox content backend exists yet (IMAP for M3/M4 and DAV for M6 are
+planned), and the MAPI/HTTP transport, Dovecot authentication and Autodiscover
+(M1) are not implemented. No Dovecot, SMTP, SOGo, MariaDB/PostfixAdmin
+directory or Outlook exchange has been validated.
 Do not infer a working mail server from harness or installed-module checks.
 
 Retained technical limits: SQL version metadata does not prove physical
@@ -78,4 +145,5 @@ The user authorized continued work and local commits/pushes to this fork to
 preserve progress. This does not authorize production deployment, destructive
 cleanup, existing-domain/schema changes or global machine configuration.
 Before new implementation, inspect current Git state and relevant instructions,
-choose a bounded item from the remaining blockers, and preserve existing work.
+start with milestone M1 once its plan's decisions are approved, and preserve
+existing work.
