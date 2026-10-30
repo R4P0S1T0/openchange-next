@@ -4,6 +4,9 @@
 #[cfg_attr(not(test), allow(dead_code))]
 mod auth;
 mod request;
+// Until Connect/Execute (Task 5), only the tests use every item.
+#[cfg_attr(not(test), allow(dead_code))]
+mod session;
 
 use auth::{AuthResult, Authenticator, Password};
 use bytes::Bytes;
@@ -16,6 +19,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use request::{
     check_headers, format_reply, handle_body, reply, MapiReply, MapiRequest, Server, MAX_BODY,
 };
+use session::SessionTable;
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,7 +30,7 @@ use tokio::net::TcpListener;
 const CHALLENGE: &str = "Basic realm=\"openchange\"";
 /// Connections that have not sent complete request headers by then are closed.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-const USAGE: &str = "usage: openchange-mapihttpd --port PORT";
+const USAGE: &str = "usage: openchange-mapihttpd --port PORT [--session-idle-seconds SECONDS]";
 
 /// Placeholder until the Dovecot authenticator lands: nobody gets in.
 struct RejectAll;
@@ -89,6 +93,13 @@ async fn serve<A: Authenticator>(
     let (start, t0) = (SystemTime::now(), Instant::now());
     let (parts, body) = req.into_parts();
     let h = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok());
+    // Clients may split cookies over several Cookie fields (MS-OXCMAPIHTTP 4.2).
+    let cookies = parts
+        .headers
+        .get_all("Cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok());
+    let cookies = cookies.collect::<Vec<_>>().join("; ");
     let base = MapiRequest {
         method: parts.method.as_str(),
         path: parts.uri.path(),
@@ -97,20 +108,21 @@ async fn serve<A: Authenticator>(
         client_info: h("X-ClientInfo"),
         content_type: h("Content-Type"),
         authorization: h("Authorization"),
-        cookie: h("Cookie"),
+        cookie: (!cookies.is_empty()).then_some(cookies.as_str()),
         real_ip: h("X-Real-IP").and_then(|v| v.parse().ok()),
         body: &[],
     };
     let declared = h("Content-Length").and_then(|v| v.parse::<u64>().ok());
     let rep = match check_headers(&srv, &base, declared).await {
         Err(rep) => rep,
-        Ok(()) => match Limited::new(body, MAX_BODY).collect().await {
+        Ok(session) => match Limited::new(body, MAX_BODY).collect().await {
             Ok(collected) => {
                 let bytes = collected.to_bytes();
-                handle_body(&MapiRequest {
+                let req = MapiRequest {
                     body: &bytes,
                     ..base
-                })
+                };
+                handle_body(&req, session.as_ref())
             }
             Err(e) if e.is::<LengthLimitError>() => reply(&base, 200, 9),
             Err(e) => return Err(e),
@@ -133,15 +145,22 @@ where
         .await;
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Option<u16> {
-    match (args.next().as_deref(), args.next(), args.next()) {
-        (Some("--port"), Some(port), None) => port.parse().ok(),
-        _ => None,
+/// Returns the port and the session idle time in seconds.
+fn parse_args(mut args: impl Iterator<Item = String>) -> Option<(u16, u64)> {
+    let (mut port, mut idle) = (None, 1800);
+    while let Some(flag) = args.next() {
+        let value = args.next()?;
+        match flag.as_str() {
+            "--port" => port = Some(value.parse().ok()?),
+            "--session-idle-seconds" => idle = value.parse().ok().filter(|&n| n > 0)?,
+            _ => return None,
+        }
     }
+    Some((port?, idle))
 }
 
 fn main() -> ExitCode {
-    let Some(port) = parse_args(std::env::args().skip(1)) else {
+    let Some((port, idle)) = parse_args(std::env::args().skip(1)) else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
@@ -163,7 +182,10 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let srv = Arc::new(Server { auth: RejectAll });
+        let srv = Arc::new(Server {
+            auth: RejectAll,
+            sessions: SessionTable::new(Duration::from_secs(idle)),
+        });
         loop {
             match listener.accept().await {
                 Ok((sock, _)) => {
@@ -182,7 +204,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use request::handle;
-    use request::tests::{call, ping, run, FakeAuth, BASIC, CLIENT_INFO};
+    use request::tests::{call, connect, execute, ping, run, server, BASIC, CLIENT_INFO};
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -209,9 +231,7 @@ mod tests {
 
     #[test]
     fn test_bearer_challenged() {
-        let srv = Server {
-            auth: FakeAuth::default(),
-        };
+        let srv = server();
         let rep = run(handle(
             &srv,
             MapiRequest {
@@ -243,10 +263,17 @@ mod tests {
     #[test]
     fn test_parse_args() {
         let args = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
-        assert_eq!(args(&["--port", "8080"]), Some(8080));
+        assert_eq!(args(&["--port", "8080"]), Some((8080, 1800)));
         assert_eq!(args(&["--port"]), None);
         assert_eq!(args(&["--port", "8080", "x"]), None);
         assert_eq!(args(&[]), None);
+        let both = ["--session-idle-seconds", "60", "--port", "8080"];
+        assert_eq!(args(&both), Some((8080, 60)));
+        assert_eq!(
+            args(&["--port", "8080", "--session-idle-seconds", "0"]),
+            None
+        );
+        assert_eq!(args(&["--session-idle-seconds", "60"]), None);
     }
 
     /// Sends request headers only (the declared body is never written) and returns the
@@ -254,11 +281,9 @@ mod tests {
     /// body instead of answering.
     fn head_only(headers: &str) -> (String, usize) {
         run(async {
-            let (mut client, server) = tokio::io::duplex(64 * 1024);
-            let srv = Arc::new(Server {
-                auth: FakeAuth::default(),
-            });
-            tokio::spawn(serve_conn(srv.clone(), server));
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            let srv = Arc::new(server());
+            tokio::spawn(serve_conn(srv.clone(), conn));
             client.write_all(headers.as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let mut buf = [0u8; 4096];
@@ -314,6 +339,39 @@ mod tests {
     }
 
     #[test]
+    fn test_session_reply_headers() {
+        let srv = server();
+        let sc = connect(&srv, Instant::now());
+        let rep = run(handle(&srv, execute(Some(sc.split(';').next().unwrap()))));
+        let r = respond(&rep);
+        assert_eq!(header(&r, "Set-Cookie"), Some(sc));
+        assert_eq!(header(&r, "X-ExpirationInfo").as_deref(), Some("1800000"));
+    }
+
+    #[test]
+    fn test_glue_split_cookie_fields() {
+        let srv = Arc::new(server());
+        let sc = connect(&srv, Instant::now());
+        let raw = format!(
+            "POST /mapi/emsmdb/ HTTP/1.1\r\nHost: mail.example.invalid\r\nConnection: close\r\n\
+             Content-Length: 0\r\nContent-Type: application/mapi-http\r\n\
+             X-RequestType: Execute\r\nX-RequestId: {{A}}:1\r\nAuthorization: {BASIC}\r\n\
+             Cookie: sid=1\r\nCookie: {}\r\n\r\n",
+            sc.split(';').next().unwrap()
+        );
+        let out = run(async {
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(serve_conn(srv.clone(), conn));
+            client.write_all(raw.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        });
+        assert!(!out.contains("x-responsecode: 13\r\n"), "{out}");
+        assert!(out.contains(&format!("set-cookie: {sc}\r\n")), "{out}");
+    }
+
+    #[test]
     fn test_glue_outlook_headers() {
         // Headers of the Connect entry in testsuite/modernization/mapihttp/headers.json, sent as PING.
         let raw = format!(
@@ -341,11 +399,9 @@ mod tests {
              \r\n"
         );
         let out = run(async {
-            let (mut client, server) = tokio::io::duplex(64 * 1024);
-            let srv = Arc::new(Server {
-                auth: FakeAuth::default(),
-            });
-            tokio::spawn(serve_conn(srv, server));
+            let (mut client, conn) = tokio::io::duplex(64 * 1024);
+            let srv = Arc::new(server());
+            tokio::spawn(serve_conn(srv, conn));
             client.write_all(raw.as_bytes()).await.unwrap();
             let mut out = String::new();
             client.read_to_string(&mut out).await.unwrap();

@@ -1,7 +1,9 @@
 //! MAPI/HTTP request validation, routing and reply layout (MS-OXCMAPIHTTP).
 
 use crate::auth::{parse_authorization, AuthResult, Authenticator, BasicCredentials};
+use crate::session::{SessionGuard, SessionTable};
 use std::net::IpAddr;
+use std::time::Instant;
 
 /// Sent as X-ServerApplication on every response (2.2.3.3.7).
 pub const SERVER_APPLICATION: &str = "Exchange/15.02.1544.004";
@@ -10,6 +12,7 @@ pub const MAX_BODY: usize = 16 * 1024 * 1024;
 
 pub struct Server<A: Authenticator> {
     pub auth: A,
+    pub sessions: SessionTable,
 }
 
 pub struct MapiRequest<'a> {
@@ -20,7 +23,6 @@ pub struct MapiRequest<'a> {
     pub client_info: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub authorization: Option<&'a str>,
-    #[allow(dead_code)] // read by the session cookie check (Task 2)
     pub cookie: Option<&'a str>,
     pub real_ip: Option<IpAddr>,
     #[allow(dead_code)] // read by the body-carrying request types (Task 4)
@@ -44,18 +46,19 @@ pub struct MapiReply {
 pub async fn handle<A: Authenticator>(srv: &Server<A>, req: MapiRequest<'_>) -> MapiReply {
     let declared = u64::try_from(req.body.len()).ok();
     match check_headers(srv, &req, declared).await {
-        Ok(()) => handle_body(&req),
+        Ok(session) => handle_body(&req, session.as_ref()),
         Err(rep) => rep,
     }
 }
 
 /// Everything decided before the body is read, in one fixed order (codes of 2.2.3.3.3).
 /// `declared_len` is the Content-Length; the glue still caps chunked bodies itself.
-pub async fn check_headers<A: Authenticator>(
-    srv: &Server<A>,
+/// Request types bound to a Session Context come back with its guard held.
+pub async fn check_headers<'s, A: Authenticator>(
+    srv: &'s Server<A>,
     req: &MapiRequest<'_>,
     declared_len: Option<u64>,
-) -> Result<(), MapiReply> {
+) -> Result<Option<SessionGuard<'s>>, MapiReply> {
     if req.method != "POST" {
         return Err(reply(req, 200, 2));
     }
@@ -71,10 +74,13 @@ pub async fn check_headers<A: Authenticator>(
     if !ctype.to_ascii_lowercase().contains("application/mapi-http") {
         return Err(reply(req, 200, 4));
     }
-    // Only PING so far; the other request types arrive with their endpoints.
-    if request_type != "PING" {
-        return Err(reply(req, 200, 5));
-    }
+    // NSPI request types arrive with that endpoint.
+    let needs_session = match request_type {
+        "PING" => false,
+        "Connect" if is_path("/mapi/emsmdb/") => false,
+        "Execute" | "Disconnect" | "NotificationWait" if is_path("/mapi/emsmdb/") => true,
+        _ => return Err(reply(req, 200, 5)),
+    };
     // Bearer and other schemes are challenged without reaching the authenticator.
     let BasicCredentials::Basic { user, password } = parse_authorization(req.authorization) else {
         return Err(reply(req, 401, 0));
@@ -82,19 +88,33 @@ pub async fn check_headers<A: Authenticator>(
     if declared_len.is_some_and(|n| n > MAX_BODY as u64) {
         return Err(reply(req, 200, 9));
     }
+    if needs_session {
+        // The session's credential hash stands in for the authenticator (decision 4).
+        let hash = srv.sessions.credential_hash(&user, &password);
+        return match srv.sessions.begin(req.cookie, hash, Instant::now()) {
+            Ok(guard) => Ok(Some(guard)),
+            Err(code) => Err(reply(req, 200, code)),
+        };
+    }
     match srv.auth.authenticate(&user, &password, req.real_ip).await {
-        AuthResult::Ok { .. } => Ok(()),
+        AuthResult::Ok { .. } => Ok(None),
         AuthResult::BadCredentials => Err(reply(req, 401, 0)),
         AuthResult::TempFail => Err(reply(req, 503, 0)),
     }
 }
 
 /// Runs a request that passed `check_headers`, with its body read.
-pub fn handle_body(req: &MapiRequest<'_>) -> MapiReply {
-    match req.request_type {
+pub fn handle_body(req: &MapiRequest<'_>, session: Option<&SessionGuard<'_>>) -> MapiReply {
+    let mut rep = match req.request_type {
         Some("PING") => reply(req, 200, 0),
+        // Connect, Execute, Disconnect and NotificationWait bodies: Task 5.
         _ => reply(req, 200, 5),
+    };
+    if let Some(s) = session {
+        rep.set_cookie = Some(s.set_cookie());
+        rep.expiration_ms = s.expiration_ms();
     }
+    rep
 }
 
 /// A reply echoing the request's identifying headers with an empty body.
@@ -127,6 +147,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::auth::Password;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Accepts only `user:pass` and counts calls.
     #[derive(Default)]
@@ -176,13 +197,118 @@ pub(crate) mod tests {
             .block_on(f)
     }
 
+    pub fn server() -> Server<FakeAuth> {
+        Server {
+            auth: FakeAuth::default(),
+            sessions: SessionTable::new(Duration::from_secs(1800)),
+        }
+    }
+
     pub fn call(req: MapiRequest<'_>) -> MapiReply {
-        run(handle(
-            &Server {
-                auth: FakeAuth::default(),
-            },
-            req,
-        ))
+        run(handle(&server(), req))
+    }
+
+    /// An Execute request carrying `cookie`.
+    pub fn execute(cookie: Option<&str>) -> MapiRequest<'_> {
+        MapiRequest {
+            request_type: Some("Execute"),
+            cookie,
+            ..ping("/mapi/emsmdb/")
+        }
+    }
+
+    /// A session for `user:pass`; returns its Set-Cookie value.
+    pub fn connect(srv: &Server<FakeAuth>, now: Instant) -> String {
+        let h = srv
+            .sessions
+            .credential_hash("user", &Password::from("pass"));
+        srv.sessions.create("user", h, 1, now)
+    }
+
+    fn cookie_of(set_cookie: &str) -> &str {
+        set_cookie.split(';').next().unwrap()
+    }
+
+    fn code(rep: &MapiReply) -> (u16, u32) {
+        (rep.http_status, rep.response_code)
+    }
+
+    #[test]
+    fn test_execute_without_cookie() {
+        assert_eq!(code(&call(execute(None))), (200, 13));
+        for t in ["Disconnect", "NotificationWait"] {
+            let req = MapiRequest {
+                request_type: Some(t),
+                ..execute(None)
+            };
+            assert_eq!(code(&call(req)), (200, 13), "{t}");
+        }
+    }
+
+    #[test]
+    fn test_cookie_garbage() {
+        assert_eq!(code(&call(execute(Some("MapiContext=zz")))), (200, 6));
+    }
+
+    #[test]
+    fn test_cookie_other_user() {
+        let srv = server();
+        let sc = connect(&srv, Instant::now());
+        let other = MapiRequest {
+            authorization: Some("Basic b3RoZXI6cGFzcw=="), // other:pass
+            ..execute(Some(cookie_of(&sc)))
+        };
+        assert_eq!(code(&run(handle(&srv, other))), (200, 10));
+        // The owner's session is unaffected, and its hash spares the authenticator.
+        let rep = run(handle(&srv, execute(Some(cookie_of(&sc)))));
+        assert_ne!(rep.response_code, 10);
+        assert_eq!(rep.set_cookie.as_deref(), Some(sc.as_str()));
+        assert_eq!(rep.expiration_ms, 1_800_000);
+        assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_busy_session() {
+        let srv = server();
+        let sc = connect(&srv, Instant::now());
+        let req = execute(Some(cookie_of(&sc)));
+        let held = run(check_headers(&srv, &req, Some(0))).ok().unwrap();
+        assert!(held.is_some());
+        assert_eq!(
+            code(&run(handle(&srv, execute(Some(cookie_of(&sc)))))),
+            (200, 15)
+        );
+        drop(held);
+        assert_ne!(
+            run(handle(&srv, execute(Some(cookie_of(&sc))))).response_code,
+            15
+        );
+    }
+
+    #[test]
+    fn test_bearer_with_live_cookie() {
+        let srv = server();
+        let then = Instant::now();
+        let sc = connect(&srv, then);
+        let value = &cookie_of(&sc)["MapiContext=".len()..];
+        for authorization in [Some("Bearer eyJ0eXAi"), None, Some("Basic !!!")] {
+            let req = MapiRequest {
+                authorization,
+                ..execute(Some(cookie_of(&sc)))
+            };
+            assert_eq!(run(handle(&srv, req)).http_status, 401);
+        }
+        assert_eq!(srv.sessions.last_used(value), Some(then));
+        assert_eq!(srv.auth.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_session_types_emsmdb_only() {
+        let req = MapiRequest {
+            path: "/mapi/nspi/",
+            ..execute(None)
+        };
+        assert_eq!(code(&call(req)), (200, 5));
     }
 
     #[test]
