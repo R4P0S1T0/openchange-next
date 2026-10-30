@@ -1,5 +1,24 @@
 # Development continuity — 2026-10-30
 
+## Paused by the maintainer — resume next week
+
+The maintainer explicitly paused work on 2026-10-30 after reaching the weekly
+usage limit. Resume only when the maintainer returns; do not start more work
+or trigger further CI during this pause.
+
+- Published `origin/main`: `29a07ea1a0acdcccb1ad3d4844a865e430e7045f`.
+- PR #2 is merged and closed; `m1-rust` remains at `de5387f6`.
+- All ten pre-merge push/PR checks passed. The merged result also passed
+  83 Rust tests without c-backend and 84 with it. The separate main-push CI
+  was not inspected before pausing; check its result when resuming.
+- Security updates are authorized and vendored: bytes 1.11.1, quick-xml 0.41.0,
+  Debian 13 / Rust 1.85 retained. Audit: zero vulnerabilities, two documented
+  informational warnings; no suppressions.
+- Do not redo Tasks 1–7. Next is M1 lab acceptance with real Dovecot/nginx/
+  Outlook on a disposable VM, followed by M2's directory/identity work.
+  Real Connect remains deliberately fail-closed until M2.
+- Preserve existing worktrees, ignored evidence and the untracked draft plan.
+
 ## Next step for the next agent
 
 The maintainer changed the project direction on 2026-10-30; read
