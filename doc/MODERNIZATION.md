@@ -1,5 +1,99 @@
 # OpenChange modernization
 
+## Project direction (2026-10-30)
+
+Maintainer decision on 2026-10-30. This section sets the target; the dated
+sections below remain the validation history and are not changed by it.
+
+### Goal
+
+Outlook for Windows (desktop) connects "as Exchange" to a common open-source
+mail stack, with **no Active Directory and no LDAP**, all on one server.
+Supported clients are Outlook 2013 SP1 and later (2013, 2016, 2019, 2021, 2024
+and classic Microsoft 365 Outlook), **over MAPI/HTTP only**. Microsoft lists
+"Outlook 2013 SP1 and all later versions of Outlook" as MAPI/HTTP capable
+([MAPI over HTTP in Exchange Server](https://learn.microsoft.com/en-us/exchange/clients/mapi-over-http/mapi-over-http)).
+Outlook 2010 is not supported. Mobile devices are out of scope; SOGo's
+ActiveSync already serves them.
+
+### Architecture
+
+```text
+ Outlook 2013 SP1+ (Windows)
+        |  HTTPS 443: /autodiscover/autodiscover.xml, /mapi/emsmdb, /mapi/nspi
+        v
+ nginx (TLS termination, request size/time limits)
+        |  HTTP on 127.0.0.1 only
+        v
+ openchange-next MAPI/HTTP service ---- Dovecot auth socket (Basic credentials)
+   | Autodiscover (POX)
+   | EMSMDB: Connect/Execute/Disconnect/NotificationWait -> existing ROP handlers
+   | NSPI: Bind/Unbind/GetProps/QueryRows/... -> existing NSPI logic
+   | mapistore backends
+   |    +-- imap: Dovecot IMAP on localhost, master user, CONDSTORE/QRESYNC
+   |    +-- dav:  SOGo CalDAV/CardDAV on localhost (trusted proxy auth, to verify)
+   | MAPI state: MariaDB (indexing_mysql, namedprops_mysql, openchangedb)
+   | directory/GAL: MariaDB PostfixAdmin schema (mailbox, alias, domain), read-only
+   v
+ Postfix (submission 587) for sending
+```
+
+Samba is used only as a **library** (NDR/PIDL, talloc, tevent). No Samba
+daemon runs and no AD is provisioned.
+
+### Dependencies and what is used from each
+
+| Component | Used for | Not used for |
+| --- | --- | --- |
+| nginx | TLS on 443, reverse proxy to 127.0.0.1, size/time limits | Authentication decisions |
+| Dovecot 2.4 | Auth protocol socket for Basic credentials; IMAP mailbox content via master user (`user*master`) with CONDSTORE/QRESYNC | Storing MAPI state |
+| Postfix | Submission on 587 for outgoing mail (M4) | Delivery logic inside openchange-next |
+| SOGo 5.12 | CalDAV/CardDAV content for calendar and contacts (M6) | Mobile (stays on SOGo ActiveSync); any SOGo-specific code path |
+| MariaDB | PostfixAdmin `mailbox`/`alias`/`domain` read-only; openchange state through the existing `indexing_mysql` and `namedprops_mysql` | Writing PostfixAdmin tables |
+| Samba 4.22 libraries | NDR/PIDL generated code, talloc, tevent | samba daemon, SamDB, AD schema, NTLM/Kerberos |
+
+### Scope
+
+In scope: MAPI/HTTP (MS-OXCMAPIHTTP) mailbox and address-book endpoints,
+Autodiscover POX with the `mapiHttp` Protocol element (MS-OXDSCLI), Basic
+authentication over TLS verified by Dovecot, reuse of the ROP processing in
+`mapiproxy/servers/default/emsmdb` and the NSPI logic, the PostfixAdmin
+directory, IMAP and DAV mapistore backends.
+
+Out of scope: RPC/TCP and RPC/HTTP (Outlook Anywhere) as client targets; NTLM,
+Kerberos and SamDB; mobile clients; the Windows "new Outlook" (not evaluated
+here; recorded as a risk because it may replace classic Outlook for target
+users); Outlook 2010 (not supported).
+
+Normative sources are Microsoft's open MS-OX* specifications. Gromox/grommunio
+(AGPL) may be read as a behavior reference only; no code is copied from it.
+
+Acceptance uses a real Outlook on a Windows VM with the edition, version and
+build recorded: at least one Outlook 2016 or 2019 and one classic Microsoft 365
+Outlook; Outlook 2013 SP1 when a license is available. Microsoft's
+[OfficeDev/Interop-TestSuites](https://github.com/OfficeDev/Interop-TestSuites)
+is a secondary check: on 2026-10-30 the repository was not archived (MIT,
+last push 2025-06-25) and `ExchangeMAPI/Source` contains `MS-OXCMAPIHTTP`,
+`MS-OXNSPI`, `MS-OXCROPS` and related suites. Its documented system under test
+is Exchange 2007–2016, so running it against this server is unverified.
+
+Development and tests run on a disposable VM that mirrors the target server,
+never on a production server.
+
+### Roadmap
+
+| Milestone | Work | Acceptance |
+| --- | --- | --- |
+| M1 | MAPI/HTTP service, Autodiscover, authentication through Dovecot | Outlook creates the profile and completes Connect/Execute against the lab server ([plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)) |
+| M2 | PostfixAdmin directory: provisioning/openchangedb without SamDB or AD schema (`python/openchange/provision.py` imports `samba.samdb.SamDB` and extends the schema today); NSPI GAL from MariaDB | Profile created and the GAL lists the users |
+| M3 | Read-only IMAP mapistore backend (folders, contents tables, messages) | Outlook in online mode reads the Inbox |
+| M4 | Writes: send through submission 587, move, delete, flags | Recorded send/move/delete/flag results per client version |
+| M5 | ICS/FastTransfer (cached mode). **Largest risk** | Cached-mode initial sync and incremental changes complete |
+| M6 | dav backend read/write for calendar and contacts, plus free/busy ([read-only calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)) | Calendar and contacts read/write from Outlook |
+| M7 | Debian packaging, one configuration file, example nginx block, community installation guide | Install, start and remove on a fresh VM from the guide alone |
+
+Open questions are tracked in [development continuity](CONTINUITY.md).
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
