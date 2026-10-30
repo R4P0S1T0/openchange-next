@@ -31,7 +31,7 @@ ActiveSync already serves them.
    | NSPI: Bind/Unbind/GetProps/QueryRows/... -> existing NSPI logic
    | mapistore backends
    |    +-- imap: Dovecot IMAP on localhost, master user, CONDSTORE/QRESYNC
-   |    +-- dav:  SOGo CalDAV/CardDAV on localhost (trusted proxy auth, to verify)
+   |    +-- dav:  SOGo CalDAV/CardDAV on localhost (user's Basic credentials, memory only)
    | MAPI state: MariaDB (indexing_mysql, namedprops_mysql, openchangedb)
    | directory/GAL: MariaDB PostfixAdmin schema (mailbox, alias, domain), read-only
    v
@@ -48,7 +48,7 @@ daemon runs and no AD is provisioned.
 | nginx | TLS on 443, reverse proxy to 127.0.0.1, size/time limits | Authentication decisions |
 | Dovecot 2.4 | Auth protocol socket for Basic credentials; IMAP mailbox content via master user (`user*master`) with CONDSTORE/QRESYNC | Storing MAPI state |
 | Postfix | Submission on 587 for outgoing mail (M4) | Delivery logic inside openchange-next |
-| SOGo 5.12 | CalDAV/CardDAV content for calendar and contacts (M6) | Mobile (stays on SOGo ActiveSync); any SOGo-specific code path |
+| SOGo 5.12 | CalDAV/CardDAV content for calendar and contacts (M6), authenticated with the user's own Basic credentials held in session memory only | Mobile (stays on SOGo ActiveSync); any SOGo-specific code path; `SOGoTrustProxyAuthentication` or any other SOGo configuration change |
 | MariaDB | PostfixAdmin `mailbox`/`alias`/`domain` read-only; openchange state through the existing `indexing_mysql` and `namedprops_mysql` | Writing PostfixAdmin tables |
 | Samba 4.22 libraries | NDR/PIDL generated code, talloc, tevent | samba daemon, SamDB, AD schema, NTLM/Kerberos |
 
@@ -72,7 +72,7 @@ Acceptance uses a real Outlook on a Windows VM with the edition, version and
 build recorded: at least one Outlook 2016 or 2019 and one classic Microsoft 365
 Outlook; Outlook 2013 SP1 when a license is available. Microsoft's
 [OfficeDev/Interop-TestSuites](https://github.com/OfficeDev/Interop-TestSuites)
-is a secondary check: on 2026-10-30 the repository was not archived (MIT,
+is an optional secondary check after M2: on 2026-10-30 the repository was not archived (MIT,
 last push 2025-06-25) and `ExchangeMAPI/Source` contains `MS-OXCMAPIHTTP`,
 `MS-OXNSPI`, `MS-OXCROPS` and related suites. Its documented system under test
 is Exchange 2007–2016, so running it against this server is unverified.
@@ -84,8 +84,8 @@ never on a production server.
 
 | Milestone | Work | Acceptance |
 | --- | --- | --- |
-| M1 | MAPI/HTTP service, Autodiscover, authentication through Dovecot | Outlook creates the profile and completes Connect/Execute against the lab server ([plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)) |
-| M2 | PostfixAdmin directory: provisioning/openchangedb without SamDB or AD schema (`python/openchange/provision.py` imports `samba.samdb.SamDB` and extends the schema today); NSPI GAL from MariaDB | Profile created and the GAL lists the users |
+| M1 | Lab spike with real Outlook first, then MAPI/HTTP service, Autodiscover, authentication through Dovecot | Autodiscover with `mapiHttp`, Basic verified by Dovecot, and a well-formed Connect response against the lab server; a real Outlook Connect captured, sanitized and used as a test fixture ([plan](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)) |
+| M2 | PostfixAdmin directory: provisioning/openchangedb without SamDB or AD schema (`python/openchange/provision.py` imports `samba.samdb.SamDB` and extends the schema today); NSPI GAL from MariaDB | Outlook creates the profile (moved from M1 on 2026-10-30) and the GAL lists the users |
 | M3 | Read-only IMAP mapistore backend (folders, contents tables, messages) | Outlook in online mode reads the Inbox |
 | M4 | Writes: send through submission 587, move, delete, flags | Recorded send/move/delete/flag results per client version |
 | M5 | ICS/FastTransfer (cached mode). **Largest risk** | Cached-mode initial sync and incremental changes complete |
