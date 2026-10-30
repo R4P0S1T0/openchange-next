@@ -10,7 +10,10 @@ and nginx on one server, with no AD, LDAP or Samba daemon.
 
 **Next milestone: M1** — MAPI/HTTP, Autodiscover and Dovecot authentication.
 Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
-Its eight design decisions need maintainer approval before any code is written.
+The maintainer approved its decisions on 2026-10-30. **Start with its Task 0**,
+a lab spike on the disposable VM (nginx with static Autodiscover and a capture
+listener) that checks real Outlook behavior before any C is written; its result
+decides whether Tasks 1–6 proceed as written.
 The [dav calendar plan](../docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md)
 is deferred until after M1 (milestone M6) and has not started.
 
@@ -39,32 +42,34 @@ New targets (`check-mapihttp`, `check-mapistore-dav`) must also run with
 `CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'`. SQL tests use
 only an explicit disposable endpoint. Push only after asking the maintainer.
 
-## Open questions (2026-10-30)
+## Decisions and open questions (2026-10-30)
 
-1. **M1 acceptance vs SamDB.** `emsmdbp_init` fails without SamDB
-   (`mapiproxy/servers/default/emsmdb/emsmdbp.c:44`, `:86`) and RopLogon queries
-   it (`oxcstor.c:71`). Either M1's lab acceptance stops at a well-formed Connect
-   response and profile creation moves to M2, or M2's directory seam moves into
-   M1 (M1 plan, decision 5).
-2. **HTTP server choice.** Recommended: own daemon with libmicrohttpd on
-   127.0.0.1 (M1 plan, decision 1); FastCGI rejected.
-3. **SOGo trusted proxy on DAV routes.** Whether SOGo 5.12 honours
-   `SOGoTrustProxyAuthentication` on `/SOGo/dav` was not verified. Open SOGo
-   issue [#5987](https://bugs.sogo.nu/view.php?id=5987) (5.10.0) reports
-   credentials not being checked on DAV/ActiveSync in that mode; test on the lab VM.
-4. **Autodiscover without `X-MapiHttpCapability`.** The plan returns an error;
-   confirm on each Outlook build that the header is sent (MS-OXDSCLI 3.2.5.1).
-5. **Outlook and Basic authentication.** Recent classic Microsoft 365 builds may
-   prefer modern authentication; the Basic prompt flow against a non-Microsoft
-   server is unverified.
-6. **Interop-TestSuites.** The repository is active (not archived, last push
-   2025-06-25) and contains `MS-OXCMAPIHTTP`, but its documented system under
-   test is Exchange 2007–2016; running it against this server is unverified.
-7. **"New Outlook" for Windows** is out of scope; risk that target users are
-   migrated away from classic Outlook.
-8. **Session idle timeout.** The specification fixes no value; the plan uses
-   1800 s as an implementation choice.
+Decided by the maintainer:
 
+- M1 acceptance is Autodiscover + Dovecot authentication + a well-formed
+  Connect response, including a real Outlook Connect captured in the lab and
+  used (sanitized) as a test fixture. Outlook profile creation moves to M2,
+  because `emsmdbp_init` and RopLogon need SamDB today
+  (`mapiproxy/servers/default/emsmdb/emsmdbp.c:44`, `:86`; `oxcstor.c:71`).
+- HTTP server: own daemon with libmicrohttpd on 127.0.0.1.
+- SOGo DAV: no `SOGoTrustProxyAuthentication` (open SOGo issue
+  [#5987](https://bugs.sogo.nu/view.php?id=5987)) and no SOGo configuration
+  change. The DAV backend forwards the user's Basic credentials, held in session
+  memory only, never on disk or in logs.
+- Autodiscover without `X-MapiHttpCapability` returns an error.
+- Interop-TestSuites is optional, after M2. The repository is active (not
+  archived, last push 2025-06-25) and contains `MS-OXCMAPIHTTP`; its documented
+  system under test is Exchange 2007–2016.
+- The Windows "new Outlook" stays out of scope as a recorded risk; the session
+  idle timeout of 1800 s is an implementation choice (the specification fixes
+  no value).
+
+Still open (answered in the lab):
+
+1. Do Outlook 2016/2019 and classic Microsoft 365 Outlook accept Basic
+   authentication against a non-Microsoft server, and do they send
+   `X-MapiHttpCapability`? (M1 Task 0)
+2. Does SOGo DAV accept Basic credentials for an account with TOTP enabled? (M6)
 
 ## Reviewed implementation (named properties)
 
