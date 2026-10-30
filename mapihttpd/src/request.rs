@@ -1,6 +1,7 @@
 //! MAPI/HTTP request validation, routing and reply layout (MS-OXCMAPIHTTP).
 
-use crate::auth::{parse_authorization, AuthResult, Authenticator, BasicCredentials};
+use crate::auth::{parse_authorization, AuthResult, Authenticator, BasicCredentials, Password};
+use crate::autodiscover;
 use crate::session::{SessionGuard, SessionTable};
 use std::net::IpAddr;
 use std::time::Instant;
@@ -13,6 +14,7 @@ pub const MAX_BODY: usize = 16 * 1024 * 1024;
 pub struct Server<A: Authenticator> {
     pub auth: A,
     pub sessions: SessionTable,
+    pub autodiscover: autodiscover::Settings,
 }
 
 pub struct MapiRequest<'a> {
@@ -39,6 +41,8 @@ pub struct MapiReply {
     pub body: Vec<u8>,
     pub set_cookie: Option<String>,
     pub expiration_ms: u32,
+    /// An Autodiscover document: sent as is, without the MAPI/HTTP layout.
+    pub xml: bool,
 }
 
 /// Header and body stages in sequence, as the glue runs them around its body read.
@@ -81,10 +85,7 @@ pub async fn check_headers<'s, A: Authenticator>(
         "Execute" | "Disconnect" | "NotificationWait" if is_path("/mapi/emsmdb/") => true,
         _ => return Err(reply(req, 200, 5)),
     };
-    // Bearer and other schemes are challenged without reaching the authenticator.
-    let BasicCredentials::Basic { user, password } = parse_authorization(req.authorization) else {
-        return Err(reply(req, 401, 0));
-    };
+    let (user, password) = basic_credentials(req)?;
     if declared_len.is_some_and(|n| n > MAX_BODY as u64) {
         return Err(reply(req, 200, 9));
     }
@@ -103,8 +104,27 @@ pub async fn check_headers<'s, A: Authenticator>(
             return Ok(Some(touched));
         }
     }
-    match srv.auth.authenticate(&user, &password, req.real_ip).await {
-        AuthResult::Ok { .. } => Ok(None),
+    authenticate(srv, req, &user, &password).await.map(|_| None)
+}
+
+/// Bearer and other schemes are challenged without reaching the authenticator.
+#[allow(clippy::result_large_err)] // the reply check_headers returns
+pub fn basic_credentials(req: &MapiRequest<'_>) -> Result<(String, Password), MapiReply> {
+    match parse_authorization(req.authorization) {
+        BasicCredentials::Basic { user, password } => Ok((user, password)),
+        _ => Err(reply(req, 401, 0)),
+    }
+}
+
+/// Checks the credentials with the authenticator; returns its canonical user name.
+pub async fn authenticate<A: Authenticator>(
+    srv: &Server<A>,
+    req: &MapiRequest<'_>,
+    user: &str,
+    password: &Password,
+) -> Result<String, MapiReply> {
+    match srv.auth.authenticate(user, password, req.real_ip).await {
+        AuthResult::Ok { user } => Ok(user),
         AuthResult::BadCredentials => Err(reply(req, 401, 0)),
         AuthResult::TempFail => Err(reply(req, 503, 0)),
     }
@@ -135,6 +155,7 @@ pub fn reply(req: &MapiRequest<'_>, http_status: u16, response_code: u32) -> Map
         body: Vec::new(),
         set_cookie: None,
         expiration_ms: 0,
+        xml: false,
     }
 }
 
@@ -152,12 +173,12 @@ pub fn format_reply(rep: &MapiReply, elapsed_ms: u32, start: &str) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::auth::Password;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    /// Accepts only `user:pass`, counts calls and records the last `rip`.
+    /// Accepts any user but `temp` with password `pass`, canonicalized to lower case;
+    /// counts calls and records the last `rip`.
     #[derive(Default)]
     pub struct FakeAuth {
         pub calls: AtomicUsize,
@@ -168,12 +189,12 @@ pub(crate) mod tests {
         async fn authenticate(&self, user: &str, pw: &Password, rip: Option<IpAddr>) -> AuthResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.rip.lock().unwrap() = rip;
-            if user == "user" && pw.expose() == "pass" {
-                AuthResult::Ok {
-                    user: user.to_owned(),
-                }
-            } else if user == "temp" {
+            if user == "temp" {
                 AuthResult::TempFail
+            } else if pw.expose() == "pass" {
+                AuthResult::Ok {
+                    user: user.to_ascii_lowercase(),
+                }
             } else {
                 AuthResult::BadCredentials
             }
@@ -211,6 +232,15 @@ pub(crate) mod tests {
         Server {
             auth: FakeAuth::default(),
             sessions: SessionTable::new(Duration::from_secs(1800)),
+            autodiscover: settings(),
+        }
+    }
+
+    pub fn settings() -> autodiscover::Settings {
+        autodiscover::Settings {
+            external_host: "mail.example.invalid".into(),
+            org: "First Organization".into(),
+            ou: "Exchange Administrative Group (FYDIBOHF23SPDLT)".into(),
         }
     }
 

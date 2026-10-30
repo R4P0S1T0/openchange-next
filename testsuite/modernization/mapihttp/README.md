@@ -21,6 +21,8 @@ Results of the spike itself are recorded in that plan under Task 0.
 | `connect-m365-16.0.19127.20800.bin` | 303 bytes, Connect request body to `/mapi/emsmdb/` (MS-OXCMAPIHTTP 2.2.4.1.1) |
 | `nspi-bind-m365-16.0.19127.20800.bin` | 45 bytes, Bind request body to `/mapi/nspi/` (MS-OXCMAPIHTTP 2.2.5.1.1) |
 | `headers.json` | Request metadata of 4 requests: Autodiscover with Bearer → 401, Autodiscover with Basic → 200, Bind, Connect |
+| `autodiscover-request.xml` | Not a capture: MS-OXDSCLI 4.1 request for `alice@example.invalid` (Task 6 tests) |
+| `autodiscover-response.xml` | Not a capture: the expected answer to it, in the layout Outlook accepted (Task 0 finding 4), for `--external-host mail.example.invalid` and the default `--org`/`--ou` |
 
 SHA-256:
 
