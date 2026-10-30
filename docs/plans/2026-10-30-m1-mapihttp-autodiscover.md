@@ -43,8 +43,8 @@ Code (this repository):
 
 ## Design decisions
 
-Maintainer decisions of 2026-10-30 are marked **Approved**. Task 0 can still
-change decisions 3, 4 and 7 if the lab shows Outlook behaving differently.
+Maintainer decisions of 2026-10-30 are marked **Approved**. Task 0 (done,
+go) confirmed decisions 3, 4 and 7 and added the Bearer rule to decision 4.
 
 1. **Where the HTTP server lives — Approved: own small daemon on 127.0.0.1 using libmicrohttpd.**
    - Own daemon + libmicrohttpd (recommended): mature HTTP/1.1 parser and chunked output, suspend/resume for 5-minute NotificationWait (MS-OXCMAPIHTTP 3.2.2) without tying up a worker, Debian package `libmicrohttpd-dev`. Run in single-threaded mode because `emsmdbp`/mapistore state is not documented as thread-safe. `shortcut: one thread serializes all sessions, upgrade to a worker pool once backends are audited for thread safety`.
@@ -52,7 +52,7 @@ change decisions 3, 4 and 7 if the lab shows Outlook behaving differently.
    - Hand-written HTTP parser: smallest dependency footprint but security-sensitive. Rejected.
 2. **Non-chunked responses in M1.** Every handled request is answered once with `PROCESSING\r\nDONE\r\n` + additional headers + body, which 3.2.5.2 allows when the response is immediately available. X-PendingPeriod is still sent (3.2.5.2). NotificationWait is the exception: it is held, then answered. `shortcut: no PENDING keep-alives during long ROP batches, upgrade when IMAP-backed Execute can exceed the client's pending period`.
 3. **Session cookie.** One cookie `MapiContext=<32 hex chars from getrandom()>` with `Path=/mapi/; Secure; HttpOnly` (name is implementation-specific per 3.2.5.1). The session stores the username and a SHA-256 of `user:password` keyed with a per-process random key; a request whose Basic credentials hash differently gets code 10 (3.2.5.1). Idle timeout configurable `mapihttp:session_idle_seconds`, default 1800 (implementation choice; the specification fixes no value). No sequence cookie in M1; concurrency is enforced with a per-session busy flag → code 15.
-4. **Authentication: Basic → Dovecot AUTH PLAIN.** Credentials are checked against Dovecot only on Connect and when the credential hash changes, not on every request. `service=` is configurable (`mapihttp:dovecot_service`, default `openchange`), so a Dovecot passdb can scope it. `rip`/`lip` come from `X-Real-IP` only when the TCP peer is 127.0.0.1. Missing/invalid credentials → HTTP 401 with `WWW-Authenticate: Basic realm="openchange"`. Dovecot `FAIL ... code=temp_fail` → HTTP 503, never 401. M1 keeps only the credential hash. M6's DAV backend will forward the user's Basic credentials to SOGo (maintainer decision: no `SOGoTrustProxyAuthentication`), so from M6 the password is held in session memory only, never on disk or in logs; that change belongs to the M6 plan.
+4. **Authentication: Basic → Dovecot AUTH PLAIN.** Credentials are checked against Dovecot only on Connect and when the credential hash changes, not on every request. `service=` is configurable (`mapihttp:dovecot_service`, default `openchange`), so a Dovecot passdb can scope it. `rip`/`lip` come from `X-Real-IP` only when the TCP peer is 127.0.0.1. Missing/invalid credentials and any non-Basic scheme (Outlook sends `Bearer` first on every request, Task 0 finding 1) → HTTP 401 with `WWW-Authenticate: Basic realm="openchange"`; a non-Basic scheme never reaches Dovecot. Dovecot `FAIL ... code=temp_fail` → HTTP 503, never 401. M1 keeps only the credential hash. M6's DAV backend will forward the user's Basic credentials to SOGo (maintainer decision: no `SOGoTrustProxyAuthentication`), so from M6 the password is held in session memory only, never on disk or in logs; that change belongs to the M6 plan.
 5. **SamDB gate — Approved.** M1 adds a seam: `struct mapihttp_backend { connect; execute; disconnect; }`. Production `connect` calls the extracted EMSMDB code; tests use a fake. The real Connect still fails without SamDB until M2 replaces the directory lookups. **M1 lab acceptance:** Autodiscover returns `mapiHttp` to Outlook, Basic credentials are verified by Dovecot, and the Connect request reaches the service and gets a well-formed MAPI/HTTP response. **Outlook profile creation is M2's acceptance.** M1's acceptance also requires a real Outlook Connect request captured in Task 0, sanitized, and used as a test fixture (Task 4).
 6. **Address book endpoint (`/mapi/nspi`).** M1 routes it and answers PING (2.2.6); other request types return X-ResponseCode 5. NSPI request types (2.2.5.x) move to M2 because `emsabp` is SamDB-only. Outlook profile creation needs NSPI, which is consistent with decision 5.
 7. **Autodiscover without `X-MapiHttpCapability` — Approved.** The service has no EXCH/EXPR (RPC) settings to return. It answers with an MS-OXDSCLI 4.5-style Error response. Task 0 records whether each Outlook build sends the header.
@@ -74,6 +74,7 @@ change decisions 3, 4 and 7 if the lab shows Outlook behaving differently.
 
 ## Review Focus
 
+0. **Bearer first (Task 0 finding 1):** Outlook sends `Authorization: Bearer` before Basic on every request. It must get HTTP 401 with `WWW-Authenticate: Basic realm="openchange"`, without contacting Dovecot, without touching a session and without a failed-login log line that fail2ban or Dovecot's penalty would count. A Bearer request carrying a valid session cookie is still 401, never served from the session. Tests in Tasks 1 and 5.
 1. **Session hijack by cookie reuse with other credentials:** same cookie, different Basic user → code 10, session untouched (3.2.5.1). Test in Task 2.
 2. **Concurrent requests on one session** (Outlook retries during a slow Execute) → second request gets 15 and the first completes (3.2.5.1). Test in Task 2.
 3. **Dovecot temporary failure** (SQL down) must not look like a wrong password: 503, no session created, no lockout. Test in Task 3.
@@ -82,24 +83,80 @@ change decisions 3, 4 and 7 if the lab shows Outlook behaving differently.
 
 ---
 
-### Task 0: Lab spike — observe real Outlook before writing C
+### Task 0: Lab spike — observe real Outlook before writing C — **Done 2026-10-30: GO**
 
-Lab-only; no repository code changes except the sanitized fixtures and notes. **Its result decides whether Tasks 1–6 proceed as written.**
+Run by the maintainer on a disposable Debian VM: nginx with TLS (public
+certificate) in front of a Python standard-library listener on 127.0.0.1 that
+answered Autodiscover with a static `mapiHttp` response and `/mapi/` with HTTP
+200, `X-ResponseCode: 1` and an empty body. The results are recorded here
+instead of a separate `doc/MAPIHTTP_SPIKE.md`. Fixtures, provenance and the
+decoded bodies: [`testsuite/modernization/mapihttp/`](../../testsuite/modernization/mapihttp/README.md).
 
-**Files:**
-- Create: `testsuite/modernization/mapihttp/README.md` (capture provenance: Outlook edition/version/build, Windows build, date, sanitization applied), `testsuite/modernization/mapihttp/connect-<edition>-<build>.bin` (sanitized Connect request body), `doc/MAPIHTTP_SPIKE.md` (results matrix)
+| Question | Classic Microsoft 365 Outlook 16.0.19127.20800, Windows 10.0 build 26100 |
+|---|---|
+| Reaches lab Autodiscover? | Yes: POST `https://<mail domain>/autodiscover/autodiscover.xml`, `text/xml`, 361 bytes, AcceptableResponseSchema `outlook/responseschema/2006a`. Whether it tried Microsoft 365 endpoints first is not visible from the server. |
+| Basic accepted? | Yes. Standard "Windows Security" prompt, then Autodiscover 200 and the Exchange account was created ("restart Outlook"). |
+| `X-MapiHttpCapability`? | Sent, value `1`. |
+| Connect to `/mapi/emsmdb/`? | Yes, after restart: Bind (45 bytes) to `/mapi/nspi/`, Connect (303 bytes) to `/mapi/emsmdb/`, both with `?MailboxId=`. With `X-ResponseCode: 1` and no body Outlook retried in a loop (24 Connect, 6 Bind) and showed a logon error, as expected. |
 
-**Setup on the disposable VM (configuration lives on the VM, not in the repository):**
-- nginx with a private test CA certificate trusted by the Windows VM for `mail.example.invalid` and `autodiscover.example.invalid` (names resolved through the Windows VM's hosts file). `auth_basic` with an htpasswd file for one test account; no Dovecot needed yet.
-- `location = /autodiscover/autodiscover.xml`: POST answered by `return 200` with a static MS-OXDSCLI 4.4-style response for the test account (`Protocol Type="mapiHttp" Version="1"`, MailStore/AddressBook `ExternalUrl` on `https://mail.example.invalid/mapi/...`).
-- `location /mapi/`: `auth_basic`, then `proxy_pass` to a capture listener on 127.0.0.1 (a short Python standard-library script) that stores the request line, headers and body per request and answers HTTP 200 with `X-ResponseCode: 1`. Listener and nginx `log_format` record `Authorization` and `Cookie` only as `[present]`/`[absent]`.
-- `log_format` for Autodiscover records `$http_x_mapihttpcapability`, `$http_x_anchormailbox`, `$http_user_agent`, `$http_x_clientcanhandle`.
+Not covered: Outlook 2016/2019 and 2013 SP1 were not available; they move to
+the lab acceptance below. Go/no-go: **go**. Decisions 3, 4 and 7 stand;
+decision 4 gains the Bearer rule (finding 1).
 
-- [ ] **Step 1:** Record the Windows build and each Outlook edition/version/build: at least one Outlook 2016 or 2019 and one classic Microsoft 365 Outlook; 2013 SP1 if licensed.
-- [ ] **Step 2:** For each client, create a new profile for the test account and record: whether Outlook reaches the lab Autodiscover URL or tries Microsoft 365 endpoints first; whether it shows a Basic credentials prompt and accepts it; whether it sends `X-MapiHttpCapability` and with which value; whether it POSTs `X-RequestType: Connect` to `/mapi/emsmdb/`.
-- [ ] **Step 3:** Sanitize one Connect body per client: replace user, machine and host names and IP addresses in `UserDn` and the auxiliary buffer (MS-OXCMAPIHTTP 2.2.4.1.1) with placeholders of the same byte length so all size fields stay valid; record each replaced field in the fixture README. Grep the result for the real test hostnames, account names and lab addresses → no matches.
-- [ ] **Step 4:** Write `doc/MAPIHTTP_SPIKE.md`: one row per client with the answers from Step 2, plus a go/no-go: proceed with Tasks 1–6 as written, or list the decisions (3, 4, 7) that must change and stop for maintainer review.
-- [ ] **Step 5: Commit** `test(mapihttp): add sanitized Outlook Connect captures and spike results`.
+Findings that change Tasks 1–6:
+
+1. **Bearer first, on every request.** Autodiscover, Bind and Connect each
+   arrived first with `Authorization: Bearer ...` (modern authentication);
+   only after `401` with `WWW-Authenticate: Basic realm=...` did Outlook
+   resend with Basic. MS-OXCMAPIHTTP 1.7 lists only Basic, NTLM and Negotiate;
+   Bearer is not defined there. 2.2.2 requires every request to be
+   authenticated, and 3.2.5.1 only says the session context stores and checks
+   the authentication context, so **nothing in the specification lets the
+   session cookie replace per-request authentication or stop the Bearer→401
+   round trip**; whether Outlook drops Bearer once it holds a session cookie
+   is measured in the lab acceptance. Required behavior: any non-Basic scheme
+   → HTTP 401 with the Basic challenge, Dovecot not contacted, no session
+   touched, logged at debug level only, never as a failed login (fail2ban
+   watches failed logins).
+2. **Session cookie after Connect** (decision 3) stays required so Execute
+   does not need a Dovecot round trip; Basic credentials are still sent and
+   compared by hash. Outlook also sent a `Cookie` header to Autodiscover;
+   unknown cookies are ignored.
+3. **Headers seen on every request** and what the service does with them:
+
+   | Header | Specification | Service |
+   |---|---|---|
+   | `X-RequestId` `{GUID}:n` | MS-OXCMAPIHTTP 2.2.3.3.2 | echo (already planned) |
+   | `X-ClientInfo` `{GUID}:n` | 2.2.3.3.4: server MUST return it unchanged | echo on every `/mapi/` response |
+   | `X-ClientApplication` `Outlook/16.0.19127.20800` | 2.2.3.3.6, informational | debug log only |
+   | `X-ServerApplication` (response) | 2.2.3.3.7: on every response, format `Exchange/15.xx.xxxx.xxx` | constant `Exchange/15.02.1544.004`, the value the spike used |
+   | `Content-Type: application/mapi-http`, `Accept` | 2.2.2.1, 2.2.3.2.2 | validate Content-Type (already planned) |
+   | `X-AnchorMailbox` = e-mail | MS-OXDSCLI 2.2.2.2 | Autodiscover: must match the authenticated user (Task 5); `/mapi/`: ignored |
+   | `X-MapiHttpCapability: 1` | MS-OXDSCLI 2.2.2.1 | Autodiscover only (Task 5) |
+   | `X-User-Identity`, `X-MS-Negotiate: Server`, `X-Accept: application/json`, `X-MS-CookieUri-Requested: t`, `X-FeatureVersion: 1`, `X-AutoDiscoverArchiveAsSmtp: True`, `Accept-Auth`, `Client-Request-Id`, `Depth: 0` | not defined in MS-OXCMAPIHTTP or MS-OXDSCLI (searched both) | ignored, not echoed, never an error |
+
+4. **Accepted Autodiscover response** (the reference for Task 5): `User` with
+   `DisplayName`, `LegacyDN`, `AutoDiscoverSMTPAddress`, `DeploymentId`;
+   `Account` with `AccountType` `email`, `Action` `settings`,
+   `MicrosoftOnline` `False` and `Protocol Type="mapiHttp" Version="1"`, whose
+   `MailStore` and `AddressBook` each carry `InternalUrl` and `ExternalUrl`
+   `https://<host>/mapi/{emsmdb,nspi}/?MailboxId=<guid>@<host>` (same form as
+   MS-OXDSCLI 4.4). The spike's mailbox GUID was a name-based UUID of the
+   address; any value stable per mailbox works.
+5. **Auxiliary buffer** of the real Connect contains block types 0x18, 0x4A
+   and 0x52, which `exchange.idl` does not define (`exchange.idl:4306-4329`).
+   The Connect codec walks `AUX_HEADER` blocks by `Size` with bounds checks
+   and treats their payloads as opaque.
+6. **Client-side HTTP proxy:** an authenticating proxy (407) on the client
+   network kept every request from arriving. Installation documentation must
+   say the MAPI/HTTP and Autodiscover host belongs in the proxy/PAC
+   exceptions (Task 6).
+
+- [x] **Step 1:** Windows and Outlook builds recorded (table above); 2016/2019 and 2013 SP1 pending in the lab acceptance.
+- [x] **Step 2:** Autodiscover, Basic, `X-MapiHttpCapability` and Connect answered (table above).
+- [x] **Step 3:** Connect and Bind bodies sanitized with same-length replacement and checked by hand; provenance in the fixture README.
+- [x] **Step 4:** Results and go/no-go recorded in this section.
+- [x] **Step 5: Commit** `test(mapihttp): add sanitized Outlook Connect and Bind captures`.
 
 ### Task 1: Build plumbing, daemon skeleton, request validation, PING
 
@@ -122,6 +179,9 @@ Lab-only; no repository code changes except the sanitized fixtures and notes. **
   - `test_bad_request_type`: `X-RequestType: Bind` on `/mapi/emsmdb/` → 5.
   - `test_ping`: authenticated `PING` on both endpoints → code 0, empty body, X-RequestType echoed.
   - `test_anonymous`: no `Authorization` → HTTP 401 with Basic challenge.
+  - `test_bearer_challenged`: `Authorization: Bearer eyJ0eXAi` → HTTP 401, `WWW-Authenticate: Basic realm="openchange"`, the fake authenticator's call counter stays 0; same with a `MapiContext` cookie of a live session → 401 and the session's `last_used` unchanged (Task 2 adds the cookie half).
+  - `test_response_headers`: `X-ClientInfo: {0589012E-9A4E-4666-9EE1-3C5BD8DDF18B}:558760020` echoed unchanged; `X-ServerApplication` equals `Exchange/15.02.1544.004`.
+  - `test_outlook_headers_ignored`: a PING carrying every header from `testsuite/modernization/mapihttp/headers.json` (the Connect entry, Authorization replaced by the fake's Basic value) → code 0.
   - `test_too_large`: body_len 16 MiB + 1 → 9.
   - `test_reply_layout`: `mapihttp_format_reply` output starts with `"PROCESSING\r\nDONE\r\nX-ResponseCode: 0\r\n"` and the body follows the first `"\r\n\r\n"`.
 - [ ] **Step 2:** `make check-mapihttp` → FAIL.
@@ -177,7 +237,9 @@ Lab-only; no repository code changes except the sanitized fixtures and notes. **
   - Body codecs (little-endian, NDR primitives with `LIBNDR_FLAG_NOALIGN`): Connect request/success/failure (2.2.4.1.1–2.2.4.1.3), Execute (2.2.4.2.1–2.2.4.2.3), Disconnect (2.2.4.3.x), NotificationWait (2.2.4.4.x; returns `EventPending` 0 after `mapihttp:notification_wait_seconds`, default 300 per 3.2.2).
   - Production backend: `connect` = `emsmdbp_init` + the user-DN checks of `emsmdb_connect_context` with the username from Task 3 instead of a `dcesrv_call_state`. Under the current code it fails without SamDB (decision 5).
 - [ ] **Step 1: Failing tests** (fake backend records arguments):
-  - `test_connect_real_capture`: every `testsuite/modernization/mapihttp/connect-*.bin` from Task 0 parses; UserDn equals the placeholder recorded in that fixture's README; AuxiliaryBufferSize matches the bytes present; the response body is well formed.
+  - `test_connect_real_capture`: every `testsuite/modernization/mapihttp/connect-*.bin` from Task 0 parses; for `connect-m365-16.0.19127.20800.bin`: UserDn `/o=Lab/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=spike`, Flags 0, DefaultCodePage 1252, LcidSort and LcidString 0x0416, AuxiliaryBufferSize 202 equal to the bytes present, six auxiliary blocks walked (sizes 50, 24, 28, 52, 32, 8); with the fake backend failing as the SamDB-less production one does, the reply is HTTP 200 with a well-formed Connect failure body (2.2.4.1.3) and the echoed X-ClientInfo.
+  - `test_connect_capture_truncated`: the same file cut at every length from 0 to 302 → code 12 or a failure body, never a read past the buffer (run under ASan in Task 6).
+  - `test_bind_real_capture`: `nspi-bind-m365-16.0.19127.20800.bin` POSTed as `Bind` to `/mapi/nspi/` → X-ResponseCode 5 with a well-formed reply (decision 6).
   - `test_connect_body`: UserDn `"/o=example/ou=first/cn=Recipients/cn=alice"`, Flags 0, LcidString 0x409 → backend receives them; success body round-trips DnPrefix and DisplayName.
   - `test_execute_roundtrip`: RopBuffer bytes forwarded unchanged; returned rgbOut placed in RopBuffer; StatusCode 0.
   - `test_execute_truncated`: RopBufferSize 100 with 20 bytes present → code 12, backend not called.
@@ -196,22 +258,22 @@ Lab-only; no repository code changes except the sanitized fixtures and notes. **
 **Interfaces:**
 - Produces: `void autodiscover_handle(struct mapihttp_server *, TALLOC_CTX *, const struct mapihttp_request *, const char *x_mapihttp_capability, struct mapihttp_reply *)` routed for POST `/autodiscover/autodiscover.xml` (MS-OXDSCLI 3.2.5); same Basic/Dovecot authentication; the authenticated user must equal the requested `EMailAddress` (no lookups for other users).
 - Configuration: `mapihttp:external_host` (e.g. `mail.example.invalid`), used to build `https://<host>/mapi/emsmdb/?MailboxId=<mailbox>` and `/mapi/nspi/?MailboxId=<mailbox>` like MS-OXDSCLI 4.4.
-- [ ] **Step 1: Failing tests:** `test_autodiscover_mapihttp` (header `X-MapiHttpCapability: 1`, request for `alice@example.invalid` → response namespace `http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006`, `Protocol Type="mapiHttp" Version="1"`, MailStore and AddressBook each with `ExternalUrl`, no `EXCH`/`EXPR`), `test_autodiscover_capability_2` (value 2 → still Version 1, the highest supported ≤ 2), `test_autodiscover_capability_invalid` (`0`, `abc` → treated as absent per 3.2.5.1 → Error response), `test_autodiscover_other_user` (authenticated bob asks for alice → Error, no data about alice), `test_autodiscover_malformed_xml` and `test_autodiscover_entity_expansion` (DOCTYPE with entities → rejected), `test_autodiscover_get` → 405 or Error (POST only).
+- [ ] **Step 1: Failing tests:** `test_autodiscover_mapihttp` (header `X-MapiHttpCapability: 1`, request for `alice@example.invalid` → response namespace `http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006`, `User` with `DisplayName`, `LegacyDN`, `AutoDiscoverSMTPAddress` `alice@example.invalid` and `DeploymentId`, `MicrosoftOnline` `False`, `Protocol Type="mapiHttp" Version="1"`, MailStore and AddressBook each with `InternalUrl` and `ExternalUrl` containing `?MailboxId=`, the same MailboxId on a second request, no `EXCH`/`EXPR`; layout of Task 0 finding 4), `test_autodiscover_bearer` (`Authorization: Bearer x` → 401 with the Basic challenge, authenticator not called), `test_autodiscover_capability_2` (value 2 → still Version 1, the highest supported ≤ 2), `test_autodiscover_capability_invalid` (`0`, `abc` → treated as absent per 3.2.5.1 → Error response), `test_autodiscover_other_user` (authenticated bob asks for alice → Error, no data about alice), `test_autodiscover_malformed_xml` and `test_autodiscover_entity_expansion` (DOCTYPE with entities → rejected), `test_autodiscover_get` → 405 or Error (POST only).
 - [ ] **Step 2:** run → FAIL. **Step 3:** implement with expat (`XML_SetEntityDeclHandler` stops parsing). **Step 4:** run → PASS.
 - [ ] **Step 5: Commit** `feat(mapihttp): answer Autodiscover with MAPI/HTTP settings`.
 
 ### Task 6: Sanitizers, nginx example, documentation, regression
 
 **Files:**
-- Create: `doc/MAPIHTTP.md` (configuration keys, nginx example block with `server_name mail.example.invalid`, `location /mapi/` and `= /autodiscover/autodiscover.xml` → `proxy_pass http://127.0.0.1:<port>`, `proxy_buffering off`, `proxy_read_timeout 330s`, `client_max_body_size 16m`, `proxy_set_header X-Real-IP $remote_addr`)
+- Create: `doc/MAPIHTTP.md` (configuration keys, nginx example block with `server_name mail.example.invalid`, `location /mapi/` and `= /autodiscover/autodiscover.xml` → `proxy_pass http://127.0.0.1:<port>`, `proxy_buffering off`, `proxy_read_timeout 330s`, `client_max_body_size 16m`, `proxy_set_header X-Real-IP $remote_addr`; a client-side note that the MAPI/HTTP and Autodiscover host must be in the proxy/PAC exceptions, Task 0 finding 6)
 - Modify: `doc/MODERNIZATION.md` (dated M1 section: done/validated/not validated), `doc/CONTINUITY.md`, `testsuite/README.md`
 
 - [ ] **Step 1:** `make -W testsuite/modernization/mapihttp_smoke.c check-mapihttp CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'` → PASS; rebuild plain.
 - [ ] **Step 2:** `make all` and the 17 targets from `doc/CONTINUITY.md`, plus `check-mapihttp` → PASS; plain configure proves the default build is unaffected.
-- [ ] **Step 3:** Document explicitly **not validated**: real Dovecot, nginx, TLS, any Outlook version, Interop-TestSuites, NSPI request types, chunked/PENDING responses, Connect success without SamDB (M2), Outlook's Basic-auth behavior with Microsoft 365 builds.
+- [ ] **Step 3:** Document explicitly **not validated**: real Dovecot, nginx, TLS, any Outlook version, Interop-TestSuites, NSPI request types, chunked/PENDING responses, Connect success without SamDB (M2), Outlook 2016/2019/2013 SP1 behavior (Task 0 saw only Microsoft 365 16.0.19127.20800).
 - [ ] **Step 4: Commit** `docs: record MAPI/HTTP service validation and limits`.
 - [ ] **Step 5:** Report and wait for approval before any push.
 
 ## Lab acceptance (after Tasks 1–6, on the disposable VM)
 
-Record Windows build and each Outlook edition/version/build. On at least one Outlook 2016 or 2019 and one classic Microsoft 365 Outlook (2013 SP1 if licensed), with the real Dovecot behind nginx: Autodiscover request and response with `mapiHttp`; Basic prompt accepted and verified by Dovecot; Connect reaches the service and receives a well-formed MAPI/HTTP response (logged without credentials); `check-mapihttp` passes with the Task 0 captures as fixtures. Profile creation is not expected before M2 (decision 5).
+Record Windows build and each Outlook edition/version/build. On at least one Outlook 2016 or 2019 and one classic Microsoft 365 Outlook (2013 SP1 if licensed), with the real Dovecot behind nginx: Autodiscover request and response with `mapiHttp`; Basic prompt accepted and verified by Dovecot; Connect reaches the service and receives a well-formed MAPI/HTTP response (logged without credentials); `check-mapihttp` passes with the Task 0 captures as fixtures. Profile creation is not expected before M2 (decision 5). Also record, from the nginx log, how many 401 responses precede each Execute once a session cookie exists (Task 0 finding 1), and add one sanitized Connect capture per newly tested Outlook build to the fixtures.
