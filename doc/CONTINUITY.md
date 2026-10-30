@@ -10,9 +10,12 @@ and nginx on one server, with no AD, LDAP or Samba daemon.
 
 **Next milestone: M1** — MAPI/HTTP, Autodiscover and Dovecot authentication.
 Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md).
-The maintainer approved its decisions on 2026-10-30. Task 0, the lab spike
-with real Outlook, is done with a go (results in the plan's Task 0 section,
-fixtures in `testsuite/modernization/mapihttp/`). **Continue with Task 1.**
+Task 0, the lab spike with real Outlook, is done with a go (results in the
+plan's Task 0 section, fixtures in `testsuite/modernization/mapihttp/`).
+The plan was revised on 2026-10-30 (revision 2) for a Rust service; **wait for
+the maintainer's approval of revision 2 before starting Task 1.** Revision 1's
+unfinished C Task 1 is kept for reference only on branch `m1-mapihttp`
+(commit `139ee83a`); do not merge or continue it.
 Bearer first: Outlook sends `Authorization: Bearer` before Basic on every
 request; the service must answer 401 with the Basic challenge without
 contacting Dovecot or logging a failed login (plan Review Focus item 0).
@@ -40,20 +43,32 @@ python3 /tmp/openchange-build-tools/run.py make check-binary-properties \
   check-namedprops check-mysql-utils
 ```
 
-New targets (`check-mapihttp`, `check-mapistore-dav`) must also run with
-`CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'`. SQL tests use
+New C targets (`check-oc-emsmdb`, `check-mapistore-dav`) must also run with
+`CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'`; Rust code
+must pass `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` and
+`cargo audit`. Rust is not installed system-wide here: Debian 13 `rustc`,
+`cargo`, `rust-clippy` and `rustfmt` are extracted into the toolchain root
+(M1 Task 1, Step 0), as libmicrohttpd 1.0.1 already was for revision 1. SQL tests use
 only an explicit disposable endpoint. Push only after asking the maintainer.
 
 ## Decisions and open questions (2026-10-30)
 
 Decided by the maintainer:
 
+- Language policy: new code is written in Rust; the existing C core
+  (libmapi, emsmdb, nspi, mapistore) stays in C and keeps being fixed.
+  Migrate C code only gradually and only with a clear gain, as a separately
+  planned change. Rust reaches C only through narrow C APIs (bytes, strings,
+  integers, opaque handles; talloc stays in C); no `unsafe` outside the FFI
+  module; crates are vendored.
+
 - M1 acceptance is Autodiscover + Dovecot authentication + a well-formed
   Connect response, including a real Outlook Connect captured in the lab and
   used (sanitized) as a test fixture. Outlook profile creation moves to M2,
   because `emsmdbp_init` and RopLogon need SamDB today
   (`mapiproxy/servers/default/emsmdb/emsmdbp.c:44`, `:86`; `oxcstor.c:71`).
-- HTTP server: own daemon with libmicrohttpd on 127.0.0.1.
+- HTTP server: own daemon on 127.0.0.1, in Rust (hyper/tokio) since plan
+  revision 2; libmicrohttpd (revision 1) is dropped.
 - SOGo DAV: no `SOGoTrustProxyAuthentication` (open SOGo issue
   [#5987](https://bugs.sogo.nu/view.php?id=5987)) and no SOGo configuration
   change. The DAV backend forwards the user's Basic credentials, held in session
