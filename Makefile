@@ -57,6 +57,7 @@ all: 		$(OC_IDL)		\
 		$(OC_LIBS)		\
 		$(OC_TOOLS)		\
 		$(OC_SERVER)		\
+		$(OC_MAPIHTTP)		\
 		$(PYOPENCHANGEALL)	\
 		$(OC_TESTSUITE)		\
 		$(COVERAGE_INIT)	\
@@ -1819,6 +1820,26 @@ bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/ems
 bin/emsmdb-backend: testsuite/modernization/emsmdb_backend_smoke.c mapiproxy/servers/default/emsmdb/emsmdbp.c mapiproxy/libmapiproxy/mapi_handles.c mapiproxy/servers/default/emsmdb/oxcstor.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=tdb_open -Wl,--wrap=tdb_close -Wl,--wrap=tdb_store mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS)
+
+.PHONY: mapihttp
+mapihttp: bin/openchange-mapihttpd
+
+mapihttp-clean::
+	rm -f bin/openchange-mapihttpd bin/mapihttp
+
+clean:: mapihttp-clean
+
+bin/openchange-mapihttpd: mapiproxy/servers/mapihttp/mapihttpd.c mapiproxy/servers/mapihttp/mapihttp_request.c mapiproxy/servers/mapihttp/mapihttp.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(MHD_CFLAGS) -o $@ $< mapiproxy/servers/mapihttp/mapihttp_request.c $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(MHD_LIBS)
+
+.PHONY: check-mapihttp
+check-mapihttp: libmapi bin/mapihttp
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/mapihttp
+
+bin/mapihttp: testsuite/modernization/mapihttp_smoke.c mapiproxy/servers/mapihttp/mapihttp_request.c mapiproxy/servers/mapihttp/mapihttp.h libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< mapiproxy/servers/mapihttp/mapihttp_request.c $(LDFLAGS) -Wl,--wrap=oc_log libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
 
 .PHONY: check-mpm-pack
 check-mpm-pack: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/modules/mpm_pack.$(SHLIBEXT) bin/mpm-pack

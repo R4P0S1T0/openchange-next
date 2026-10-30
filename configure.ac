@@ -847,6 +847,27 @@ if test x$PYTHON != x; then
 fi
 OC_RULE_ADD(mapiproxy, SERVER)
 
+dnl ##########################################################################
+dnl MAPI/HTTP service (optional)
+dnl ##########################################################################
+AC_ARG_ENABLE(mapihttp, AS_HELP_STRING([--enable-mapihttp],
+			[build the MAPI/HTTP service (default is NO)]),
+			enable_mapihttp="$enableval",
+			enable_mapihttp=no)
+OC_MAPIHTTP=
+if test x"$enable_mapihttp" = x"yes"; then
+	PKG_CHECK_MODULES([MHD], [libmicrohttpd], [],
+			  [AC_MSG_ERROR([--enable-mapihttp requires libmicrohttpd])])
+	PKG_CHECK_MODULES([EXPAT], [expat], [],
+			  [AC_MSG_ERROR([--enable-mapihttp requires expat])])
+	OC_MAPIHTTP=mapihttp
+fi
+AC_SUBST(OC_MAPIHTTP)
+AC_SUBST(MHD_CFLAGS)
+AC_SUBST(MHD_LIBS)
+AC_SUBST(EXPAT_CFLAGS)
+AC_SUBST(EXPAT_LIBS)
+
 AC_ARG_WITH(modulesdir, 
 [AS_HELP_STRING([--with-modulesdir], [Modules path to use])],
 [modulesdir="$withval"; ],
@@ -999,6 +1020,7 @@ OpenChange Configuration (Please review)
 
 	   * OpenChange Server:
 	     - mapiproxy:		$enable_mapiproxy
+	     - mapihttp:		$enable_mapihttp
 
 	   * OpenChange mapistore backends:
 	     - backends dependencies goes here
