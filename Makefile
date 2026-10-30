@@ -58,6 +58,7 @@ all: 		$(OC_IDL)		\
 		$(OC_TOOLS)		\
 		$(OC_SERVER)		\
 		$(OC_MAPIHTTP)		\
+		$(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)) \
 		$(PYOPENCHANGEALL)	\
 		$(OC_TESTSUITE)		\
 		$(COVERAGE_INIT)	\
@@ -1157,29 +1158,38 @@ mapiproxy/servers/exchange_nsp.$(SHLIBEXT):	mapiproxy/servers/default/nspi/dcesr
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(TDB_LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
+# The EMSMDB provider without the DCE/RPC entry points; shared with liboc_emsmdb.
+EMSMDB_PROVIDER_OBJS =	mapiproxy/servers/default/emsmdb/emsmdbp.po			\
+			mapiproxy/servers/default/emsmdb/emsmdbp_object.po		\
+			mapiproxy/servers/default/emsmdb/emsmdbp_provisioning.po	\
+			mapiproxy/servers/default/emsmdb/emsmdbp_provisioning_names.po	\
+			mapiproxy/servers/default/emsmdb/oxcstor.po			\
+			mapiproxy/servers/default/emsmdb/oxcprpt.po			\
+			mapiproxy/servers/default/emsmdb/oxcfold.po			\
+			mapiproxy/servers/default/emsmdb/oxcfxics.po			\
+			mapiproxy/servers/default/emsmdb/oxctabl.po			\
+			mapiproxy/servers/default/emsmdb/oxcmsg.po			\
+			mapiproxy/servers/default/emsmdb/oxcnotif.po			\
+			mapiproxy/servers/default/emsmdb/oxomsg.po			\
+			mapiproxy/servers/default/emsmdb/oxosfld.po			\
+			mapiproxy/servers/default/emsmdb/oxorule.po			\
+			mapiproxy/servers/default/emsmdb/oxcperm.po			\
+			mapiproxy/servers/default/emsmdb/emsmdb_execute.po
+EMSMDB_PROVIDER_LIBS =	mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
+			mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
+
 mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.po	\
-						mapiproxy/servers/default/emsmdb/emsmdbp.po			\
-						mapiproxy/servers/default/emsmdb/emsmdbp_object.po		\
-						mapiproxy/servers/default/emsmdb/emsmdbp_provisioning.po	\
-						mapiproxy/servers/default/emsmdb/emsmdbp_provisioning_names.po	\
-						mapiproxy/servers/default/emsmdb/oxcstor.po			\
-						mapiproxy/servers/default/emsmdb/oxcprpt.po			\
-						mapiproxy/servers/default/emsmdb/oxcfold.po			\
-						mapiproxy/servers/default/emsmdb/oxcfxics.po			\
-						mapiproxy/servers/default/emsmdb/oxctabl.po			\
-						mapiproxy/servers/default/emsmdb/oxcmsg.po			\
-						mapiproxy/servers/default/emsmdb/oxcnotif.po			\
-						mapiproxy/servers/default/emsmdb/oxomsg.po			\
-						mapiproxy/servers/default/emsmdb/oxosfld.po			\
-						mapiproxy/servers/default/emsmdb/oxorule.po			\
-						mapiproxy/servers/default/emsmdb/oxcperm.po			\
-						mapiproxy/servers/default/emsmdb/emsmdb_execute.po \
-		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
+						mapiproxy/servers/default/emsmdb/emsmdbp_verify.po		\
+						$(EMSMDB_PROVIDER_OBJS) $(EMSMDB_PROVIDER_LIBS)
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
 						mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)		\
 						mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION)
+
+# EMSMDB for the MAPI/HTTP daemon (oc_emsmdb.h); only built with --enable-mapihttp.
+mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/oc_emsmdb.po $(EMSMDB_PROVIDER_OBJS) $(EMSMDB_PROVIDER_LIBS)
+	@echo "Linking $@"
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,liboc_emsmdb.$(SHLIBEXT) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS)
 
 mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT):	mapiproxy/servers/default/rfr/dcesrv_exchange_ds_rfr.po \
 		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
@@ -1818,9 +1828,30 @@ bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/ems
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=talloc_strdup mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
 
-bin/emsmdb-backend: testsuite/modernization/emsmdb_backend_smoke.c mapiproxy/servers/default/emsmdb/emsmdbp.c mapiproxy/libmapiproxy/mapi_handles.c mapiproxy/servers/default/emsmdb/oxcstor.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+bin/emsmdb-backend: testsuite/modernization/emsmdb_backend_smoke.c mapiproxy/servers/default/emsmdb/emsmdbp.c mapiproxy/servers/default/emsmdb/emsmdbp_verify.c mapiproxy/libmapiproxy/mapi_handles.c mapiproxy/servers/default/emsmdb/oxcstor.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=tdb_open -Wl,--wrap=tdb_close -Wl,--wrap=tdb_store mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(TDB_LIBS)
+
+OC_EMSMDB_TEST = bin/oc-emsmdb-test
+
+# liboc_emsmdb must not need a DCE/RPC call; only libmapiproxy may pull libdcerpc-server.
+.PHONY: check-oc-emsmdb
+check-oc-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
+	! nm -D --undefined-only mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) | grep dcesrv_
+	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
+
+bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -Wl,--wrap=emsmdbp_init mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) $(EMSMDB_PROVIDER_LIBS) $(LIBS) $(SAMBASERVER_LIBS)
+
+# SamDB points at a missing directory, so connect fails before any directory lookup.
+$(OC_EMSMDB_TEST)/smb.conf:
+	mkdir -p $(OC_EMSMDB_TEST)/private
+	printf '[global]\n\trealm = example.invalid\n\tprivate dir = %s\n\tmapiproxy:openchangedb = ldb://\n\tdcerpc_mapiproxy:samdb_url = tdb://%s/missing/sam.ldb\n' \
+		'$(CURDIR)/$(OC_EMSMDB_TEST)/private' '$(CURDIR)/$(OC_EMSMDB_TEST)' > $@
+
+clean::
+	rm -rf $(OC_EMSMDB_TEST)
 
 bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs)
 	$(CARGO) build --offline --locked --release
