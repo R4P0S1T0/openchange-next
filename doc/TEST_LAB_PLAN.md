@@ -13,6 +13,12 @@ with **no Active Directory, LDAP or Samba daemon**. Samba is installed only as
 build/runtime libraries. All of it runs on a disposable VM, never on the
 production server.
 
+The first lab activity that needs no OpenChange build is the
+[M1 Task 0 spike](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md#task-0-lab-spike--observe-real-outlook-before-writing-c):
+nginx with a static Autodiscover response and a capture listener, a Windows VM
+with Outlook 2016/2019 and classic Microsoft 365 Outlook, and one test account.
+Captures never record passwords, `Authorization` values or cookies.
+
 ## Phases and evidence
 
 | Phase | Work | Completion evidence | Current decision |
