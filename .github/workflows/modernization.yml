@@ -141,7 +141,7 @@ jobs:
       # Installed outside the checkout so the vendored-source override does not apply.
       - name: Audit the locked dependencies
         run: |
-          cd / && cargo install cargo-audit --locked --version 0.21.2
+          cd / && cargo install cargo-audit --locked --version 0.22.1
           cd "$GITHUB_WORKSPACE" && "$HOME/.cargo/bin/cargo-audit" audit
 
   tooling:

@@ -16,8 +16,19 @@ in [MAPIHTTP.md](MAPIHTTP.md) and the dated M1 section in
 Plan: [`docs/plans/2026-10-30-m1-mapihttp-autodiscover.md`](../docs/plans/2026-10-30-m1-mapihttp-autodiscover.md)
 (revision 2, approved; the earlier approval wait is obsolete).
 
-Next: obtain maintainer approval before pushing or merging to `main`, run the
-updated CI, then perform the plan's lab acceptance against real Dovecot/nginx
+The maintainer authorized pushing and merging after green CI. `m1-rust` was
+pushed at `6762d705`; main remains unchanged. CI run
+[41111907637](https://github.com/R4P0S1T0/openchange-next/actions/runs/41111907637)
+passed native-library, tooling 3.11/3.13 and python-runtime; Rust failed.
+Local reproduction found cargo-audit 0.21.2 cannot parse CVSS 4.0; the workflow
+now uses 0.22.1 (built successfully with Rust 1.85.1).
+
+The working auditor reports three blocking advisories in bytes 1.9.0 and
+quick-xml 0.36.1. Patched versions require bytes >=1.11.1 and quick-xml >=0.41.0,
+above the approved Debian 13 ceiling. A maintainer decision on that constraint
+is pending; no audit suppressions were added. Keep main unchanged until the
+findings are resolved and CI is green. See MAPIHTTP.md for the audit IDs.
+After integration, perform the plan's lab acceptance against real Dovecot/nginx
 and Outlook on a disposable VM. C Connect deliberately fails closed until M2
 implements Dovecot-user/PostfixAdmin-mailbox/LegacyDN identity verification.
 Profile creation remains M2 acceptance. Dovecot's canonical user must be a full

@@ -188,6 +188,37 @@ and follow the plan's lab acceptance separately.
 
 ## Review decisions and deferred minor findings (2026-10-30)
 
+### Audit gate after the first push
+
+The maintainer authorized a push and a merge only after green CI. Commit
+`6762d705` was pushed; its native-library and three Python jobs passed, while
+the Rust job failed. Local cargo-audit 0.21.2 reproduced an inability to parse
+CVSS 4.0 in the current advisory database. The workflow now uses 0.22.1,
+successfully built with Rust 1.85.1. Against database commit
+`2295466c4e9df26647fd67d8fa1c705ac2fc7f81`, it reports:
+
+| Advisory | Locked crate | Patched version |
+| --- | --- | --- |
+| RUSTSEC-2026-0007 | bytes 1.9.0 | >=1.11.1 |
+| RUSTSEC-2026-0194 | quick-xml 0.36.1 | >=0.41.0 |
+| RUSTSEC-2026-0195 | quick-xml 0.36.1 | >=0.41.0 |
+
+These exceed the approved Debian 13 version ceiling. A maintainer decision is
+pending; no advisories are suppressed and main is unchanged. The quick-xml
+notices concern attribute iteration and namespace resolution; the current
+Autodiscover parser uses plain Reader without either API. The bytes notice
+concerns overflowing reserve sizes in release builds. Package-version audit
+findings do not by themselves prove a remotely reachable exploit in this
+service, and the current gate remains red.
+
+Informational warnings also report unmaintained adler 1.0.2 (only in the unused
+backtrace dependency chain) and unsound Tokio AsyncFd constructors
+(RUSTSEC-2026-0386). This service does not call those constructors; its TCP and
+UNIX sockets use Tokio's higher-level network types. These warnings still
+need explicit disposition before a clean security report can be claimed.
+
+### Earlier code review
+
 The Task 5/6 review and a separate whole-branch review found no Critical
 issues. NotificationWait exclusion, the daemon's library prerequisites/search
 path, C-backend CI coverage and Debian version ceilings were fixed. The

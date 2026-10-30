@@ -150,10 +150,17 @@ The updated native CI job checks the enabled daemon and C boundary after its
 default-off build, including sanitizer and plain rebuilds. This workflow has
 not been run remotely for these commits.
 
-`cargo audit` could not run locally because cargo-audit is not installed
-(`no such command: audit`); no local advisory verdict is claimed. The CI audit
-remains a pending check after an authorized push. Existing upstream C compiler
-warnings remain; the Rust checks are warning-free.
+Audit follow-up after the authorized push: CI run 41111907637 passed
+native-library, tooling 3.11/3.13 and python-runtime, but the Rust job failed.
+Local cargo-audit 0.21.2 reproduced a CVSS 4.0 database parse error. The workflow
+now installs cargo-audit 0.22.1, verified to build with Rust 1.85.1 and read the
+current database. Its audit reports three blocking advisories: bytes
+RUSTSEC-2026-0007 and quick-xml RUSTSEC-2026-0194/0195. The patched versions
+(bytes >=1.11.1, quick-xml >=0.41.0) exceed the approved Debian 13 ceiling;
+the maintainer has been asked to decide that constraint. No suppressions or
+merge to main were made. Additional informational warnings cover unused adler
+and Tokio's AsyncFd API; see MAPIHTTP.md. Existing upstream C compiler warnings
+remain; the Rust compiler/Clippy checks are warning-free.
 
 Not validated against this Rust service: real Dovecot (including canonical
 full-email user output), nginx, TLS, any Outlook version, Interop-TestSuites,
