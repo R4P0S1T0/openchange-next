@@ -41,7 +41,7 @@ QUERY = ("SELECT m.username, m.name, (m.active = 1 AND d.active = 1) "
 def nickname(email):
     """mailNickname: readable local part plus a stable per-address hash."""
     email = email.lower()
-    local = re.sub(r"[^a-z0-9._-]", "_", email.split("@", 1)[0])
+    local = re.sub(rb"[^a-z0-9._-]", b"_", email.split("@", 1)[0].encode("utf-8")).decode("ascii")
     return "%s-%s" % (local, hashlib.sha256(email.encode("utf-8")).hexdigest()[:8])
 
 

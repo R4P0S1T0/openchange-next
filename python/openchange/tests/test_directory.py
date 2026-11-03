@@ -75,6 +75,8 @@ class DirectoryTests(unittest.TestCase):
     def test_nickname_vector(self):
         self.assertEqual(directory.nickname("teste@lab.fitasonline.com.br"), "teste-ec0903c6")
         self.assertTrue(directory.nickname("A.B+x@Example.invalid").startswith("a.b_x-"))
+        # Every UTF-8 byte outside [a-z0-9._-] becomes "_", like mapihttpd's Autodiscover.
+        self.assertTrue(directory.nickname("jo\u00e3o@example.invalid").startswith("jo__o-"))
 
     def test_legacy_dn(self):
         self.assertEqual(directory.legacy_dn(ORG, OU, "alice@example.invalid"),

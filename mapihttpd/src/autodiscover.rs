@@ -56,7 +56,7 @@ pub fn handle_body<A: Authenticator, B: Backend>(
         "/o={}/ou={}/cn=Recipients/cn={}",
         s.org,
         s.ou,
-        user.split('@').next().unwrap_or(user)
+        nickname(user)
     );
     // A LegacyDN takes precedence over EMailAddress (3.2.5).
     let own = match requested(req.body) {
@@ -205,6 +205,24 @@ fn requested(body: &[u8]) -> Option<(Option<String>, Option<String>)> {
     };
     let (dn, address) = (normalize(dn)?, normalize(address)?);
     (dn.is_some() || address.is_some()).then_some((dn, address))
+}
+
+/// Directory mailNickname (openchange_directory_sync): the lower-cased local part with bytes
+/// outside `[a-z0-9._-]` as `_`, then `-` and the first 8 hex digits of SHA-256 of the address.
+fn nickname(address: &str) -> String {
+    let address = address.to_lowercase();
+    let local: String = address
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => b as char,
+            _ => '_',
+        })
+        .collect();
+    let h = Sha256::digest(address.as_bytes());
+    format!("{local}-{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3])
 }
 
 /// RFC 9562 version 8 UUID from SHA-256 of the lower-cased address: stable per mailbox.
@@ -408,11 +426,19 @@ mod tests {
             error_code(&ask(&srv, post(bob_dn.as_bytes()), Some("1"))),
             "500"
         );
-        let alice_dn = dn("ALICE");
+        let alice_dn = dn("ALICE-78D66DBF");
         assert_eq!(
             text(&ask(&srv, post(alice_dn.as_bytes()), Some("1"))),
             RESPONSE
         );
+    }
+
+    #[test]
+    fn test_nickname_vector() {
+        // Same literal as python/openchange/tests/test_directory.py (directory mailNickname).
+        assert_eq!(nickname("teste@lab.fitasonline.com.br"), "teste-ec0903c6");
+        assert!(nickname("A.B+x@Example.invalid").starts_with("a.b_x-"));
+        assert!(nickname("jo\u{e3}o@example.invalid").starts_with("jo__o-"));
     }
 
     #[test]
