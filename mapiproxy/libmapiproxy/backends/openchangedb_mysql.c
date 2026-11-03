@@ -1876,7 +1876,7 @@ static enum MAPISTATUS create_mailbox(struct openchangedb_context *self,
 	OPENCHANGE_RETVAL_IF(!l, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
 
 	value = talloc_asprintf(mem_ctx,
-		"(LAST_INSERT_ID(), 'PidTagDisplayName', '%s')", display_name);
+		"(LAST_INSERT_ID(), 'PidTagDisplayName', '%s')", _sql(mem_ctx, display_name));
 	OPENCHANGE_RETVAL_IF(!value, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
 	l = str_list_add(l, value);
 	OPENCHANGE_RETVAL_IF(!l, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
@@ -2361,7 +2361,7 @@ static bool set_locale(struct openchangedb_context *self, const char *username,
 	TALLOC_CTX		*mem_ctx;
 	MYSQL			*conn;
 	char			*sql;
-	const char		*locale, *current_locale;
+	const char		*locale, *current_locale, *escaped_username;
 	enum MYSQLRESULT	ret;
 
 	conn = self->data;
@@ -2375,10 +2375,13 @@ static bool set_locale(struct openchangedb_context *self, const char *username,
 	}
 	mem_ctx = talloc_named(NULL, 0, "set_locale");
 	if (!mem_ctx) return false;
+	escaped_username = _sql(mem_ctx, username);
+	if (!escaped_username) { talloc_free(mem_ctx); return false; }
 
 	sql = talloc_asprintf(mem_ctx,
-		"SELECT locale FROM mailboxes WHERE name = '%s'", username);
-	if (!sql) return false;
+		/* A new mailbox has no locale yet (NULL): read it as '' so it gets set. */
+		"SELECT COALESCE(locale, '') FROM mailboxes WHERE name = '%s'", escaped_username);
+	if (!sql) { talloc_free(mem_ctx); return false; }
 	ret = select_first_string(mem_ctx, conn, sql, &current_locale);
 	if (ret != MYSQL_SUCCESS) {
 		OC_DEBUG(0, "Error getting locale of mailbox %s\n", username);
@@ -2392,8 +2395,8 @@ static bool set_locale(struct openchangedb_context *self, const char *username,
 
 	sql = talloc_asprintf(mem_ctx,
 		"UPDATE mailboxes SET locale='%s' WHERE name = '%s'",
-		locale, username);
-	if (!sql) return false;
+		locale, escaped_username);
+	if (!sql) { talloc_free(mem_ctx); return false; }
 	ret = execute_query(conn, sql);
 	if (ret != MYSQL_SUCCESS) {
 		OC_DEBUG(0, "Error updating locale %s of mailbox %s\n", locale, username);
