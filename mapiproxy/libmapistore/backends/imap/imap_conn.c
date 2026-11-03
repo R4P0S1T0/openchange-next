@@ -119,6 +119,7 @@ _PUBLIC_ struct imap_settings *imap_settings_load(TALLOC_CTX *mem_ctx, struct lo
 		return NULL;
 	}
 	s->port = port;
+	s->max_message_size = lpcfg_parm_ulong(lp_ctx, NULL, "mapistore", "imap_max_message_size", 32 * 1024 * 1024);
 	if (!s->tunnel) {
 		password_file = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "imap_master_password_file");
 		if (!password_file) {

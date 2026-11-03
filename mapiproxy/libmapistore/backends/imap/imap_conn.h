@@ -31,6 +31,7 @@ struct imap_settings {
 	const char	*master_user;	 /* imap_master_user, default "openchange" */
 	char		*master_password; /* read from imap_master_password_file; never logged */
 	const char	*tunnel;	 /* imap_tunnel: PREAUTH IMAP on stdio, $USER = mailbox */
+	uint32_t	max_message_size; /* imap_max_message_size: bodies larger than this are not fetched */
 };
 
 /* LIST attributes (RFC 3501, RFC 6154) the backend uses. */

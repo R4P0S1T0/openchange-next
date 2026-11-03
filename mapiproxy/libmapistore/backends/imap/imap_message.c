@@ -221,7 +221,32 @@ static void read_flags(struct imap_message_row *row, const struct mailimap_msg_a
 	}
 }
 
-static void read_envelope(TALLOC_CTX *mem_ctx, struct imap_message_row *row, const struct mailimap_envelope *env)
+static void add_recipients(TALLOC_CTX *mem_ctx, struct imap_message_row *row, clist *list, enum ulRecipClass type)
+{
+	clistiter *it;
+
+	for (it = list ? clist_begin(list) : NULL; it; it = clist_next(it)) {
+		const struct mailimap_address *a = clist_content(it);
+		struct imap_recipient *r;
+		char *address = address_text(mem_ctx, a, false);
+
+		if (!address) {
+			continue; /* group syntax markers carry no mailbox */
+		}
+		r = talloc_realloc(mem_ctx, row->recipients, struct imap_recipient, row->recipient_count + 1);
+		if (!r) {
+			return;
+		}
+		row->recipients = r;
+		r[row->recipient_count].type = type;
+		r[row->recipient_count].address = address;
+		r[row->recipient_count].name = address_text(mem_ctx, a, true);
+		row->recipient_count++;
+	}
+}
+
+static void read_envelope(TALLOC_CTX *mem_ctx, struct imap_message_row *row, const struct mailimap_envelope *env,
+			  bool want_recipients)
 {
 	const struct mailimap_address *from = NULL;
 
@@ -238,9 +263,15 @@ static void read_envelope(TALLOC_CTX *mem_ctx, struct imap_message_row *row, con
 	row->from_address = address_text(mem_ctx, from, false);
 	row->display_to = display_list(mem_ctx, env->env_to ? env->env_to->to_list : NULL);
 	row->display_cc = display_list(mem_ctx, env->env_cc ? env->env_cc->cc_list : NULL);
+	if (want_recipients) {
+		add_recipients(mem_ctx, row, env->env_to ? env->env_to->to_list : NULL, MAPI_TO);
+		add_recipients(mem_ctx, row, env->env_cc ? env->env_cc->cc_list : NULL, MAPI_CC);
+		add_recipients(mem_ctx, row, env->env_bcc ? env->env_bcc->bcc_list : NULL, MAPI_BCC);
+	}
 }
 
-static void read_static(TALLOC_CTX *mem_ctx, struct imap_message_row *row, const struct mailimap_msg_att_static *st)
+static void read_static(TALLOC_CTX *mem_ctx, struct imap_message_row *row, const struct mailimap_msg_att_static *st,
+			bool want_recipients)
 {
 	const struct mailimap_date_time *d;
 
@@ -258,7 +289,7 @@ static void read_static(TALLOC_CTX *mem_ctx, struct imap_message_row *row, const
 		}
 		break;
 	case MAILIMAP_MSG_ATT_ENVELOPE:
-		read_envelope(mem_ctx, row, st->att_data.att_env);
+		read_envelope(mem_ctx, row, st->att_data.att_env, want_recipients);
 		break;
 	case MAILIMAP_MSG_ATT_BODYSTRUCTURE:
 		row->has_attachments = has_attachment(st->att_data.att_bodystructure, 0);
@@ -275,30 +306,24 @@ _PUBLIC_ char *imap_message_uri(TALLOC_CTX *mem_ctx, struct imap_folder *f, uint
 	return folder_uri ? talloc_asprintf_append_buffer(folder_uri, "%u_%u", uidvalidity, uid) : NULL;
 }
 
-/* UID FETCH 1:* of the envelope, flags, size, dates and structure; one row per message. */
-_PUBLIC_ enum mapistore_error imap_message_table_load(struct imap_table *t)
+/* UID FETCH `set` of the envelope, flags, size, dates and structure: one row per message, each
+   with its message ID from imap://<user>/<folder>/<uidvalidity>_<uid>. */
+static enum mapistore_error fetch_rows(TALLOC_CTX *mem_ctx, struct imap_folder *f, uint32_t uidvalidity,
+				       struct mailimap_set *set, bool want_recipients,
+				       struct imap_message_row **rowsp, uint32_t *countp)
 {
-	struct imap_folder		*f = t->folder;
 	struct imap_conn		*conn = imap_context_conn(f->ctx);
 	struct mailimap_fetch_type	*ft;
-	struct mailimap_set		*set;
-	struct imap_status		st;
+	struct imap_message_row		*rows;
 	clist				*result = NULL;
 	clistiter			*it;
 	uint32_t			n = 0;
 	int				r;
 
-	if (!conn || imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
-		return MAPISTORE_ERR_NOT_FOUND;
-	}
-	t->uidvalidity = st.uidvalidity;
-	t->row_count = 0;
-	if (st.messages == 0) {
-		return MAPISTORE_SUCCESS;
-	}
+	*rowsp = NULL;
+	*countp = 0;
 	ft = mailimap_fetch_type_new_fetch_att_list_empty();
-	set = mailimap_set_new_interval(1, 0);
-	if (!ft || !set ||
+	if (!conn || !ft ||
 	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_uid()) != MAILIMAP_NO_ERROR ||
 	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_flags()) != MAILIMAP_NO_ERROR ||
 	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_rfc822_size()) != MAILIMAP_NO_ERROR ||
@@ -306,23 +331,21 @@ _PUBLIC_ enum mapistore_error imap_message_table_load(struct imap_table *t)
 	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_envelope()) != MAILIMAP_NO_ERROR ||
 	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_bodystructure()) != MAILIMAP_NO_ERROR) {
 		if (ft) mailimap_fetch_type_free(ft);
-		if (set) mailimap_set_free(set);
-		return MAPISTORE_ERR_NO_MEMORY;
+		return conn ? MAPISTORE_ERR_NO_MEMORY : MAPISTORE_ERR_CONN_REFUSED;
 	}
 	r = mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result);
 	mailimap_fetch_type_free(ft);
-	mailimap_set_free(set);
 	if (r != MAILIMAP_NO_ERROR) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
-	t->rows = talloc_zero_array(t, struct imap_message_row, clist_count(result) ? clist_count(result) : 1);
-	if (!t->rows) {
+	rows = talloc_zero_array(mem_ctx, struct imap_message_row, clist_count(result) ? clist_count(result) : 1);
+	if (!rows) {
 		mailimap_fetch_list_free(result);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
 	for (it = clist_begin(result); it && n < MAX_TABLE_ROWS; it = clist_next(it)) {
 		const struct mailimap_msg_att *att = clist_content(it);
-		struct imap_message_row *row = &t->rows[n];
+		struct imap_message_row *row = &rows[n];
 		clistiter *ai;
 		char *uri;
 
@@ -332,23 +355,50 @@ _PUBLIC_ enum mapistore_error imap_message_table_load(struct imap_table *t)
 			if (item->att_type == MAILIMAP_MSG_ATT_ITEM_DYNAMIC) {
 				read_flags(row, item->att_data.att_dyn);
 			} else if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC && item->att_data.att_static) {
-				read_static(t->rows, row, item->att_data.att_static);
+				read_static(rows, row, item->att_data.att_static, want_recipients);
 			}
 		}
 		if (row->uid == 0) {
 			continue;
 		}
-		uri = imap_message_uri(t, f, t->uidvalidity, row->uid);
+		uri = imap_message_uri(rows, f, uidvalidity, row->uid);
 		if (!uri || imap_fmid_for_uri(f->ctx, uri, &row->mid) != MAPISTORE_SUCCESS) {
 			mailimap_fetch_list_free(result);
+			talloc_free(rows);
 			return MAPISTORE_ERR_NO_MEMORY;
 		}
 		talloc_free(uri);
 		n++;
 	}
 	mailimap_fetch_list_free(result);
-	t->row_count = n;
+	*rowsp = rows;
+	*countp = n;
 	return MAPISTORE_SUCCESS;
+}
+
+_PUBLIC_ enum mapistore_error imap_message_table_load(struct imap_table *t)
+{
+	struct imap_folder	*f = t->folder;
+	struct imap_conn	*conn = imap_context_conn(f->ctx);
+	struct mailimap_set	*set;
+	struct imap_status	st;
+	enum mapistore_error	ret;
+
+	if (!conn || imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	t->uidvalidity = st.uidvalidity;
+	t->row_count = 0;
+	if (st.messages == 0) {
+		return MAPISTORE_SUCCESS;
+	}
+	set = mailimap_set_new_interval(1, 0);
+	if (!set) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	ret = fetch_rows(t, f, t->uidvalidity, set, false, &t->rows, &t->row_count);
+	mailimap_set_free(set);
+	return ret;
 }
 
 static struct FILETIME *filetime(TALLOC_CTX *mem_ctx, time_t t)
@@ -455,19 +505,519 @@ _PUBLIC_ enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX 
 	return MAPISTORE_SUCCESS;
 }
 
+
+/* Nested MIME parts followed; deeper ones are ignored. */
+#define MAX_MIME_DEPTH 16
+/* Attachments kept per message. */
+#define MAX_ATTACHMENTS 256
+
+/* A part's bytes after its Content-Transfer-Encoding, as UTF-8 text when `text` is set. */
+static char *part_content(TALLOC_CTX *mem_ctx, struct mailmime *mime, const struct mailmime_single_fields *sf,
+			  bool text, size_t *lenp)
+{
+	struct mailmime_data	*d = mime->mm_type == MAILMIME_SINGLE ? mime->mm_data.mm_single : mime->mm_body;
+	char			*decoded = NULL, *converted = NULL, *out;
+	size_t			idx = 0, len = 0;
+	int			encoding = sf->fld_encoding ? sf->fld_encoding->enc_type : MAILMIME_MECHANISM_8BIT;
+
+	if (!d || d->dt_type != MAILMIME_DATA_TEXT || !d->dt_data.dt_text.dt_data) {
+		return NULL;
+	}
+	if (mime->mm_type != MAILMIME_SINGLE) {
+		encoding = MAILMIME_MECHANISM_8BIT; /* a forwarded message is kept as it was */
+	}
+	if (mailmime_part_parse(d->dt_data.dt_text.dt_data, d->dt_data.dt_text.dt_length, &idx, encoding,
+				&decoded, &len) != MAILIMF_NO_ERROR || !decoded) {
+		return NULL;
+	}
+	if (!text) {
+		out = talloc_memdup(mem_ctx, decoded, len ? len : 1);
+		mailmime_decoded_part_free(decoded);
+		*lenp = len;
+		return out;
+	}
+	/* Unknown or broken charsets fall back to the raw bytes, cleaned as UTF-8. */
+	if (sf->fld_content_charset && strcasecmp(sf->fld_content_charset, "utf-8") != 0 &&
+	    charconv("utf-8", sf->fld_content_charset, decoded, len, &converted) == MAIL_CHARCONV_NO_ERROR && converted) {
+		out = imap_utf8_clean(mem_ctx, converted, strlen(converted));
+		charconv_buffer_free(converted);
+	} else {
+		out = imap_utf8_clean(mem_ctx, decoded, len);
+	}
+	mailmime_decoded_part_free(decoded);
+	*lenp = out ? strlen(out) : 0;
+	return out;
+}
+
+static bool is_subtype(const struct mailmime_content *ct, const char *subtype)
+{
+	return ct && ct->ct_subtype && strcasecmp(ct->ct_subtype, subtype) == 0;
+}
+
+static bool is_text(const struct mailmime_content *ct)
+{
+	return ct && ct->ct_type && ct->ct_type->tp_type == MAILMIME_TYPE_DISCRETE_TYPE &&
+		ct->ct_type->tp_data.tp_discrete_type->dt_type == MAILMIME_DISCRETE_TYPE_TEXT;
+}
+
+static void add_attachment(struct imap_message *m, struct mailmime *mime, const struct mailmime_single_fields *sf)
+{
+	struct imap_attachment	*a;
+	const struct mailmime_content *ct = mime->mm_content_type;
+	const char		*name = sf->fld_disposition_filename ? sf->fld_disposition_filename : sf->fld_content_name;
+	size_t			len = 0;
+	uint8_t			*data;
+
+	if (m->attachment_count >= MAX_ATTACHMENTS) {
+		return;
+	}
+	data = (uint8_t *) part_content(m, mime, sf, false, &len);
+	if (!data || len > UINT32_MAX) {
+		return;
+	}
+	a = talloc_realloc(m, m->attachments, struct imap_attachment, m->attachment_count + 1);
+	if (!a) {
+		return;
+	}
+	m->attachments = a;
+	a = &a[m->attachment_count];
+	memset(a, 0, sizeof *a);
+	a->type = IMAP_OBJ_ATTACHMENT;
+	a->number = m->attachment_count;
+	a->data = data;
+	a->size = len;
+	a->filename = name ? imap_decode_header(m, name)
+		: talloc_strdup(m, mime->mm_type == MAILMIME_MESSAGE ? "message.eml" : "attachment");
+	a->mime_type = talloc_asprintf(m, "%s/%s",
+				       mime->mm_type == MAILMIME_MESSAGE ? "message" :
+				       !ct || !ct->ct_type ? "application" :
+				       ct->ct_type->tp_type == MAILMIME_TYPE_COMPOSITE_TYPE ? "message" :
+				       ct->ct_type->tp_data.tp_discrete_type->dt_type == MAILMIME_DISCRETE_TYPE_TEXT ? "text" :
+				       ct->ct_type->tp_data.tp_discrete_type->dt_type == MAILMIME_DISCRETE_TYPE_IMAGE ? "image" :
+				       ct->ct_type->tp_data.tp_discrete_type->dt_type == MAILMIME_DISCRETE_TYPE_AUDIO ? "audio" :
+				       ct->ct_type->tp_data.tp_discrete_type->dt_type == MAILMIME_DISCRETE_TYPE_VIDEO ? "video" :
+				       "application",
+				       mime->mm_type == MAILMIME_MESSAGE ? "rfc822" :
+				       ct && ct->ct_subtype ? ct->ct_subtype : "octet-stream");
+	a->content_id = sf->fld_id ? imap_utf8_clean(m, sf->fld_id, strlen(sf->fld_id)) : NULL;
+	if (a->filename && a->mime_type) {
+		m->attachment_count++;
+	}
+}
+
+/* The first text/plain and text/html parts (not attachments) become the body; the rest attachments. */
+static void walk_mime(struct imap_message *m, struct mailmime *mime, int depth)
+{
+	struct mailmime_single_fields	sf;
+	clistiter			*it;
+	bool				attachment;
+	size_t				len;
+
+	if (!mime || depth > MAX_MIME_DEPTH) {
+		return;
+	}
+	memset(&sf, 0, sizeof sf);
+	mailmime_single_fields_init(&sf, mime->mm_mime_fields, mime->mm_content_type);
+	attachment = sf.fld_disposition && sf.fld_disposition->dsp_type &&
+		sf.fld_disposition->dsp_type->dsp_type == MAILMIME_DISPOSITION_TYPE_ATTACHMENT;
+	switch (mime->mm_type) {
+	case MAILMIME_MULTIPLE:
+		for (it = mime->mm_data.mm_multipart.mm_mp_list ? clist_begin(mime->mm_data.mm_multipart.mm_mp_list) : NULL;
+		     it; it = clist_next(it)) {
+			walk_mime(m, clist_content(it), depth + 1);
+		}
+		break;
+	case MAILMIME_MESSAGE:
+		if (depth == 0) {
+			walk_mime(m, mime->mm_data.mm_message.mm_msg_mime, depth + 1);
+		} else {
+			add_attachment(m, mime, &sf);
+		}
+		break;
+	case MAILMIME_SINGLE:
+		if (!attachment && !mime->mm_content_type) {
+			if (!m->body) m->body = part_content(m, mime, &sf, true, &len);
+		} else if (!attachment && is_text(mime->mm_content_type) && is_subtype(mime->mm_content_type, "html") && !m->html) {
+			m->html = part_content(m, mime, &sf, true, &len);
+		} else if (!attachment && is_text(mime->mm_content_type) && !is_subtype(mime->mm_content_type, "html") && !m->body) {
+			m->body = part_content(m, mime, &sf, true, &len);
+		} else {
+			add_attachment(m, mime, &sf);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+/* Plain text of an HTML body: tags dropped, the common entities decoded. */
+static char *html_to_text(TALLOC_CTX *mem_ctx, const char *html)
+{
+	static const struct { const char *entity; char c; } entities[] = {
+		{ "&amp;", '&' }, { "&lt;", '<' }, { "&gt;", '>' }, { "&quot;", '"' }, { "&#39;", '\'' }, { "&nbsp;", ' ' },
+	};
+	char	*out = talloc_array(mem_ctx, char, strlen(html) + 1);
+	size_t	n = 0, k;
+	bool	in_tag = false;
+
+	if (!out) {
+		return NULL;
+	}
+	while (*html) {
+		if (in_tag) {
+			in_tag = *html++ != '>';
+			continue;
+		}
+		if (*html == '<') {
+			in_tag = true;
+			html++;
+			continue;
+		}
+		for (k = 0; k < sizeof entities / sizeof entities[0]; k++) {
+			if (strncmp(html, entities[k].entity, strlen(entities[k].entity)) == 0) {
+				break;
+			}
+		}
+		if (k < sizeof entities / sizeof entities[0]) {
+			out[n++] = entities[k].c;
+			html += strlen(entities[k].entity);
+		} else {
+			out[n++] = *html++;
+		}
+	}
+	out[n] = '\0';
+	return out;
+}
+
+/* BODY.PEEK[] of one UID (read-only: \Seen is not set). */
+static char *fetch_body(TALLOC_CTX *mem_ctx, struct imap_conn *conn, uint32_t uid, size_t *lenp)
+{
+	struct mailimap_fetch_type	*ft = mailimap_fetch_type_new_fetch_att_list_empty();
+	struct mailimap_section		*section = mailimap_section_new(NULL);
+	struct mailimap_set		*set = mailimap_set_new_single(uid);
+	clist				*result = NULL;
+	clistiter			*it, *ai;
+	char				*out = NULL;
+
+	if (!ft || !section || !set ||
+	    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_body_peek_section(section)) != MAILIMAP_NO_ERROR) {
+		if (ft) mailimap_fetch_type_free(ft);
+		else if (section) mailimap_section_free(section);
+		if (set) mailimap_set_free(set);
+		return NULL;
+	}
+	if (mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result) == MAILIMAP_NO_ERROR) {
+		for (it = clist_begin(result); it && !out; it = clist_next(it)) {
+			const struct mailimap_msg_att *att = clist_content(it);
+
+			for (ai = att->att_list ? clist_begin(att->att_list) : NULL; ai && !out; ai = clist_next(ai)) {
+				const struct mailimap_msg_att_item *item = clist_content(ai);
+				const struct mailimap_msg_att_body_section *bs;
+
+				if (item->att_type != MAILIMAP_MSG_ATT_ITEM_STATIC || !item->att_data.att_static ||
+				    item->att_data.att_static->att_type != MAILIMAP_MSG_ATT_BODY_SECTION) {
+					continue;
+				}
+				bs = item->att_data.att_static->att_data.att_body_section;
+				if (bs && bs->sec_body_part) {
+					out = talloc_memdup(mem_ctx, bs->sec_body_part, bs->sec_length + 1);
+					if (out) {
+						out[bs->sec_length] = '\0';
+						*lenp = bs->sec_length;
+					}
+				}
+			}
+		}
+		mailimap_fetch_list_free(result);
+	}
+	mailimap_fetch_type_free(ft);
+	mailimap_set_free(set);
+	return out;
+}
+
+/* The header block, up to the first empty line. */
+static char *header_block(TALLOC_CTX *mem_ctx, const char *raw, size_t len)
+{
+	const char *end = NULL;
+	size_t i;
+
+	for (i = 0; i + 3 < len && !end; i++) {
+		if (memcmp(raw + i, "\r\n\r\n", 4) == 0) {
+			end = raw + i + 2;
+		}
+	}
+	return imap_utf8_clean(mem_ctx, raw, end ? (size_t) (end - raw) : len);
+}
+
+/* Opens `mid` of folder `f`: only an ID of this folder, of the mailbox's current UIDVALIDITY,
+   of a message that still exists, opens. */
 _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
 						       void **message)
 {
-	return MAPISTORE_ERR_NOT_FOUND;
+	struct imap_folder		*f = folder;
+	const struct imap_settings	*settings = imap_backend_settings();
+	struct imap_conn		*conn;
+	struct imap_message		*m;
+	struct imap_message_row		*rows;
+	struct mailimap_set		*set;
+	struct imap_status		st;
+	struct mailmime			*mime = NULL;
+	char				*uri, *folder_uri, *raw, *end;
+	bool				soft_deleted = false;
+	unsigned long			uidvalidity, uid;
+	uint32_t			count;
+	size_t				len = 0, idx = 0;
+	enum mapistore_error		ret;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER || !message || !settings) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	*message = NULL;
+	folder_uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
+	if (!folder_uri || f->ctx->ictx->get_uri(f->ctx->ictx, f->ctx->username, mem_ctx, mid, &uri, &soft_deleted)
+	    != MAPISTORE_SUCCESS || soft_deleted || strncmp(uri, folder_uri, strlen(folder_uri)) != 0) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = uri + strlen(folder_uri);
+	uidvalidity = strtoul(raw, &end, 10);
+	if (end == raw || *end != '_') {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = end + 1;
+	uid = strtoul(raw, &end, 10);
+	if (end == raw || *end || uid == 0 || uid > UINT32_MAX || uidvalidity > UINT32_MAX) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn || imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS || st.uidvalidity != uidvalidity) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	set = mailimap_set_new_single((uint32_t) uid);
+	if (!set) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	m = talloc_zero(mem_ctx, struct imap_message);
+	ret = m ? fetch_rows(m, f, st.uidvalidity, set, true, &rows, &count) : MAPISTORE_ERR_NO_MEMORY;
+	mailimap_set_free(set);
+	if (ret != MAPISTORE_SUCCESS || count != 1 || rows[0].uid != uid) {
+		talloc_free(m);
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	m->type = IMAP_OBJ_MESSAGE;
+	m->folder = f;
+	m->row = rows[0];
+	if (m->row.size > settings->max_message_size) {
+		m->body = talloc_asprintf(m, "[This message is too large to display here (%u bytes); open it in webmail.]\r\n",
+					  m->row.size);
+	} else if ((raw = fetch_body(m, conn, (uint32_t) uid, &len)) != NULL) {
+		m->headers = header_block(m, raw, len);
+		if (mailmime_parse(raw, len, &idx, &mime) == MAILIMF_NO_ERROR && mime) {
+			walk_mime(m, mime, 0);
+			mailmime_free(mime);
+		}
+		talloc_free(raw);
+	}
+	if (!m->body && m->html) {
+		m->body = html_to_text(m, m->html);
+	}
+	if (!m->body) {
+		m->body = talloc_strdup(m, "");
+	}
+	*message = m;
+	return MAPISTORE_SUCCESS;
 }
 
-_PUBLIC_ enum mapistore_error imap_message_properties(void *message, TALLOC_CTX *mem_ctx, uint16_t count,
+static struct Binary_r *binary(TALLOC_CTX *mem_ctx, const void *data, size_t len)
+{
+	struct Binary_r *b = talloc(mem_ctx, struct Binary_r);
+
+	if (!b) {
+		return NULL;
+	}
+	b->cb = len;
+	b->lpb = len ? talloc_memdup(b, data, len) : NULL;
+	return (len && !b->lpb) ? NULL : b;
+}
+
+_PUBLIC_ enum mapistore_error imap_message_properties(void *object, TALLOC_CTX *mem_ctx, uint16_t count,
 						      enum MAPITAGS *tags, struct mapistore_property_data *data)
 {
-	return MAPISTORE_ERR_NOT_FOUND;
+	struct imap_message	*m = object;
+	uint16_t		i;
+
+	for (i = 0; i < count; i++) {
+		void *v;
+
+		switch (tags[i]) {
+		case PidTagBody:
+			v = talloc_strdup(mem_ctx, m->body);
+			break;
+		case PidTagHtml:
+			v = m->html ? binary(mem_ctx, m->html, strlen(m->html)) : NULL;
+			break;
+		case PidTagNativeBody:
+			v = imap_long(mem_ctx, m->html ? 3 : 1); /* HTML : plain text */
+			break;
+		case PidTagInternetCodepage:
+			v = imap_long(mem_ctx, 65001); /* bodies are UTF-8 */
+			break;
+		case PidTagTransportMessageHeaders:
+			v = m->headers ? talloc_strdup(mem_ctx, m->headers) : NULL;
+			break;
+		case PidTagHasAttachments:
+			v = imap_bool(mem_ctx, m->attachment_count > 0);
+			break;
+		default:
+			v = imap_row_value(mem_ctx, &m->row, m->folder, tags[i]);
+			break;
+		}
+		data[i].data = v;
+		data[i].error = v ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NOT_FOUND;
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+/* Recipient columns: SMTP recipients only, so emsmdb never searches the directory by name. */
+static const enum MAPITAGS recipient_columns[] = {
+	PidTagDisplayName, PidTagEmailAddress, PidTagAddressType, PidTagSmtpAddress, PidTagRecipientDisplayName,
+};
+#define N_RECIPIENT_COLUMNS (sizeof recipient_columns / sizeof recipient_columns[0])
+
+_PUBLIC_ enum mapistore_error imap_message_get_data(void *object, TALLOC_CTX *mem_ctx, struct mapistore_message **msgp)
+{
+	struct imap_message		*m = object;
+	struct mapistore_message	*msg;
+	uint32_t			i;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE || !msgp) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	msg = talloc_zero(mem_ctx, struct mapistore_message);
+	if (!msg) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	msg->subject_prefix = talloc_strdup(msg, "");
+	msg->normalized_subject = talloc_strdup(msg, m->row.subject ? m->row.subject : "");
+	msg->columns = talloc_zero(msg, struct SPropTagArray);
+	msg->recipients = talloc_zero_array(msg, struct mapistore_message_recipient,
+					    m->row.recipient_count ? m->row.recipient_count : 1);
+	if (!msg->subject_prefix || !msg->normalized_subject || !msg->columns || !msg->recipients) {
+		talloc_free(msg);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	msg->columns->cValues = N_RECIPIENT_COLUMNS;
+	msg->columns->aulPropTag = talloc_memdup(msg->columns, recipient_columns, sizeof recipient_columns);
+	for (i = 0; i < m->row.recipient_count; i++) {
+		const struct imap_recipient *r = &m->row.recipients[i];
+		void **d = talloc_zero_array(msg->recipients, void *, N_RECIPIENT_COLUMNS);
+
+		if (!d) {
+			talloc_free(msg);
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		d[0] = talloc_strdup(d, r->name);
+		d[1] = talloc_strdup(d, r->address);
+		d[2] = talloc_strdup(d, "SMTP");
+		d[3] = talloc_strdup(d, r->address);
+		d[4] = talloc_strdup(d, r->name);
+		msg->recipients[i].type = r->type;
+		msg->recipients[i].username = NULL;
+		msg->recipients[i].data = d;
+	}
+	msg->recipients_count = m->row.recipient_count;
+	*msgp = msg;
+	return MAPISTORE_SUCCESS;
+}
+
+_PUBLIC_ enum mapistore_error imap_attachment_properties(struct imap_attachment *a, TALLOC_CTX *mem_ctx, uint16_t count,
+							 enum MAPITAGS *tags, struct mapistore_property_data *data)
+{
+	const char	*dot = a->filename ? strrchr(a->filename, '.') : NULL;
+	uint16_t	i;
+
+	for (i = 0; i < count; i++) {
+		void *v;
+
+		switch (tags[i]) {
+		case PidTagAttachNumber:	v = imap_long(mem_ctx, a->number); break;
+		case PidTagAttachMethod:	v = imap_long(mem_ctx, 1); break; /* afByValue */
+		case PidTagAttachSize:		v = imap_long(mem_ctx, a->size); break;
+		case PidTagRenderingPosition:	v = imap_long(mem_ctx, 0xFFFFFFFF); break;
+		case PidTagAttachFlags:		v = imap_long(mem_ctx, 0); break;
+		case PidTagAttachmentHidden:	v = imap_bool(mem_ctx, false); break;
+		case PidTagAttachLongFilename:
+		case PidTagAttachFilename:
+		case PidTagDisplayName:		v = talloc_strdup(mem_ctx, a->filename); break;
+		case PidTagAttachExtension:	v = dot ? talloc_strdup(mem_ctx, dot) : NULL; break;
+		case PidTagAttachMimeTag:	v = talloc_strdup(mem_ctx, a->mime_type); break;
+		case PidTagAttachContentId:	v = a->content_id ? talloc_strdup(mem_ctx, a->content_id) : NULL; break;
+		case PidTagAttachDataBinary:	v = binary(mem_ctx, a->data, a->size); break;
+		default:			v = NULL; break;
+		}
+		data[i].data = v;
+		data[i].error = v ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NOT_FOUND;
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+_PUBLIC_ enum mapistore_error imap_message_get_attachment_table(void *object, TALLOC_CTX *mem_ctx, void **tablep,
+								uint32_t *row_count)
+{
+	struct imap_message	*m = object;
+	struct imap_table	*t;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE || !tablep || !row_count) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	t = talloc_zero(mem_ctx, struct imap_table);
+	if (!t) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	t->type = IMAP_OBJ_TABLE;
+	t->folder = m->folder;
+	t->message = m;
+	t->table_type = MAPISTORE_ATTACHMENT_TABLE;
+	t->row_count = m->attachment_count;
+	*tablep = t;
+	*row_count = t->row_count;
+	return MAPISTORE_SUCCESS;
+}
+
+_PUBLIC_ enum mapistore_error imap_message_open_attachment(void *object, TALLOC_CTX *mem_ctx, uint32_t number,
+							   void **attachment)
+{
+	struct imap_message *m = object;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE || !attachment) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (number >= m->attachment_count) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	*attachment = &m->attachments[number];
+	return MAPISTORE_SUCCESS;
+}
+
+/* M3 is read-only: the read state Outlook sets stays in its own cache (STORE comes with M4). */
+static enum mapistore_error set_read_flag(void *message, uint8_t flag)
+{
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error open_attachment(void *message, TALLOC_CTX *mem_ctx, uint32_t number, void **attachment)
+{
+	return imap_message_open_attachment(message, mem_ctx, number, attachment);
+}
+
+static enum mapistore_error get_attachment_table(void *message, TALLOC_CTX *mem_ctx, void **table, uint32_t *count)
+{
+	return imap_message_get_attachment_table(message, mem_ctx, table, count);
 }
 
 _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 {
-	(void) backend;
+	backend->message.get_message_data = imap_message_get_data;
+	backend->message.set_read_flag = set_read_flag;
+	backend->message.open_attachment = open_attachment;
+	backend->message.get_attachment_table = get_attachment_table;
 }

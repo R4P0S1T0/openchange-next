@@ -488,6 +488,8 @@ _PUBLIC_ enum mapistore_error imap_table_get_row(void *object, TALLOC_CTX *mem_c
 		return ret;
 	case MAPISTORE_MESSAGE_TABLE:
 		return imap_message_row(t, mem_ctx, row, *data);
+	case MAPISTORE_ATTACHMENT_TABLE:
+		return imap_attachment_properties(&t->message->attachments[row], mem_ctx, t->column_count, t->columns, *data);
 	default:
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
@@ -595,6 +597,8 @@ _PUBLIC_ enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_
 		return imap_folder_properties(object, mem_ctx, count, tags, data);
 	case IMAP_OBJ_MESSAGE:
 		return imap_message_properties(object, mem_ctx, count, tags, data);
+	case IMAP_OBJ_ATTACHMENT:
+		return imap_attachment_properties(object, mem_ctx, count, tags, data);
 	default:
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}

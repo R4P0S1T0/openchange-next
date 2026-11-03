@@ -85,6 +85,19 @@ static const char attachment_message[] =
     "AAECAwQ=\r\n"
     "--b1--\r\n";
 
+/* Odd MIME the backend must still open: no closing boundary, an unknown charset, a forwarded
+   message, raw 8-bit bytes in the subject. */
+static const char odd_messages[][600] = {
+    "From: x@example.invalid\r\nSubject: Unclosed\r\nMIME-Version: 1.0\r\n"
+    "Content-Type: multipart/mixed; boundary=\"zz\"\r\n\r\n--zz\r\nContent-Type: text/plain\r\n\r\nPart one\r\n",
+    "From: x@example.invalid\r\nSubject: Charset\r\nMIME-Version: 1.0\r\n"
+    "Content-Type: text/plain; charset=x-no-such-charset\r\n\r\nCaf\xe9 bytes\r\n",
+    "From: x@example.invalid\r\nSubject: Forward\r\nMIME-Version: 1.0\r\n"
+    "Content-Type: multipart/mixed; boundary=\"f\"\r\n\r\n--f\r\nContent-Type: text/plain\r\n\r\nSee below\r\n"
+    "--f\r\nContent-Type: message/rfc822\r\n\r\nFrom: y@example.invalid\r\nSubject: Inner\r\n\r\nInner body\r\n--f--\r\n",
+    "From: x@example.invalid\r\nSubject: Raw \xff\xfe bytes\r\n\r\nBody\r\n",
+};
+
 static int write_file(const char *path, const char *text, mode_t mode)
 {
     FILE *f = fopen(path, "w");
@@ -122,6 +135,7 @@ static int setup_fixture(const char *imap_binary)
     tunnel.host = "127.0.0.1";
     tunnel.port = 143;
     tunnel.master_user = "openchange";
+    tunnel.max_message_size = 32 * 1024 * 1024;
     tunnel.tunnel = talloc_asprintf(root, "%s -c %s", imap_binary, conf);
     CHECK(tunnel.tunnel != NULL);
     return 0;
@@ -150,6 +164,13 @@ static int populate(void)
         mailimap_flag_list_free(seen);
     }
     if (append(imap, "Projects", attachment_message)) return 1;
+    CHECK(mailimap_create(imap, "Odd") == MAILIMAP_NO_ERROR);
+    {
+        size_t i;
+        for (i = 0; i < sizeof odd_messages / sizeof odd_messages[0]; i++) {
+            if (append(imap, "Odd", odd_messages[i])) return 1;
+        }
+    }
     talloc_free(conn);
     return 0;
 }
@@ -507,6 +528,170 @@ static int test_uidvalidity_change_new_mids(void)
     return 0;
 }
 
+/* The message ID of row `row` of `mailbox`'s message table. */
+static uint64_t row_mid(const char *mailbox, uint32_t row, void **folderp)
+{
+    void *table;
+    struct mapistore_property_data *r;
+    uint32_t count;
+    *folderp = context_for(mailbox);
+    if (!*folderp || imap_folder_open_table(*folderp, root, MAPISTORE_MESSAGE_TABLE, 9, &table, &count) != MAPISTORE_SUCCESS ||
+        imap_table_set_columns(table, N_MESSAGE_COLUMNS, message_columns) != MAPISTORE_SUCCESS ||
+        imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, row, &r) != MAPISTORE_SUCCESS || r[10].error) {
+        return 0;
+    }
+    return *(uint64_t *) r[10].data;
+}
+
+static enum MAPITAGS body_tags[] = { PidTagBody, PidTagHtml, PidTagNativeBody, PidTagSubject, PidTagInternetCodepage,
+    PidTagMessageFlags };
+
+static int open_message(const char *mailbox, uint32_t row, void **msgp, struct mapistore_property_data *data)
+{
+    void *folder;
+    uint64_t mid = row_mid(mailbox, row, &folder);
+    CHECK(mid != 0);
+    CHECK(imap_folder_open_message(folder, root, mid, false, msgp) == MAPISTORE_SUCCESS && *msgp);
+    CHECK(imap_properties_get(*msgp, root, 6, body_tags, data) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static int recipient(struct mapistore_message *m, uint32_t i, const char *column_name, uint32_t tag, const char **value)
+{
+    uint32_t c;
+    for (c = 0; c < m->columns->cValues; c++) {
+        if (m->columns->aulPropTag[c] == tag) {
+            *value = m->recipients[i].data[c];
+            return 0;
+        }
+    }
+    fprintf(stderr, "no recipient column %s\n", column_name);
+    return 1;
+}
+
+static int test_open_plain_message_body(void)
+{
+    void *msg;
+    struct mapistore_property_data d[6];
+    struct mapistore_message *m;
+    const char *v;
+    if (open_message("INBOX", 0, &msg, d)) return 1;
+    CHECK(d[0].error == 0 && strcmp(d[0].data, "Hello from the fixture.\r\n") == 0);
+    CHECK(d[1].error == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(d[2].error == 0 && *(uint32_t *) d[2].data == 1); /* plain text */
+    CHECK(d[3].error == 0 && strcmp(d[3].data, "Plain hello") == 0);
+    CHECK(imap_message_get_data(msg, root, &m) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(m->normalized_subject, "Plain hello") == 0 && m->recipients_count == 1);
+    CHECK(m->recipients[0].type == MAPI_TO && m->recipients[0].username == NULL); /* SMTP, no directory lookup */
+    if (recipient(m, 0, "PidTagDisplayName", PidTagDisplayName, &v)) return 1;
+    CHECK(v && strcmp(v, "Alice") == 0);
+    if (recipient(m, 0, "PidTagEmailAddress", PidTagEmailAddress, &v)) return 1;
+    CHECK(v && strcmp(v, "alice@example.invalid") == 0);
+    if (recipient(m, 0, "PidTagAddressType", PidTagAddressType, &v)) return 1;
+    CHECK(v && strcmp(v, "SMTP") == 0);
+    return 0;
+}
+
+static int test_charset_and_recipients(void)
+{
+    void *msg;
+    struct mapistore_property_data d[6];
+    struct mapistore_message *m;
+    if (open_message("Projects", 0, &msg, d)) return 1;
+    CHECK(d[0].error == 0 && strcmp(d[0].data, "Ol\xc3\xa1, tudo bem?\r\n") == 0); /* QP + ISO-8859-1 */
+    CHECK(imap_message_get_data(msg, root, &m) == MAPISTORE_SUCCESS && m->recipients_count == 3);
+    CHECK(m->recipients[0].type == MAPI_TO && m->recipients[1].type == MAPI_TO && m->recipients[2].type == MAPI_CC);
+    return 0;
+}
+
+static int test_open_html_message_and_attachment(void)
+{
+    void *msg, *table, *att;
+    struct mapistore_property_data d[6], *r, a[2];
+    const struct Binary_r *bin;
+    enum MAPITAGS att_columns[] = { PidTagAttachNumber, PidTagAttachLongFilename, PidTagAttachSize,
+        PidTagAttachMimeTag, PidTagAttachMethod };
+    enum MAPITAGS att_data[] = { PidTagAttachDataBinary, PidTagAttachLongFilename };
+    uint32_t count = 0;
+    if (open_message("Projects", 1, &msg, d)) return 1;
+    bin = d[1].data;
+    CHECK(d[1].error == 0 && bin->cb == strlen("<p>See <b>attached</b>.</p>\r\n"));
+    CHECK(memcmp(bin->lpb, "<p>See <b>attached</b>.</p>", 27) == 0);
+    CHECK(d[0].error == 0 && strcmp(d[0].data, "See attached.\r\n") == 0); /* text from the HTML */
+    CHECK(*(uint32_t *) d[2].data == 3 && *(uint32_t *) d[4].data == 65001); /* HTML, UTF-8 */
+    CHECK(imap_message_get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count == 1);
+    CHECK(imap_table_set_columns(table, 5, att_columns) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(*(uint32_t *) r[0].data == 0 && strcmp(r[1].data, "report.bin") == 0 && *(uint32_t *) r[2].data == 5);
+    CHECK(strcmp(r[3].data, "application/octet-stream") == 0 && *(uint32_t *) r[4].data == 1); /* by value */
+    CHECK(imap_message_open_attachment(msg, root, 0, &att) == MAPISTORE_SUCCESS);
+    CHECK(imap_properties_get(att, root, 2, att_data, a) == MAPISTORE_SUCCESS && a[0].error == 0);
+    bin = a[0].data;
+    CHECK(bin->cb == 5 && memcmp(bin->lpb, "\0\1\2\3\4", 5) == 0);
+    CHECK(imap_message_open_attachment(msg, root, 1, &att) == MAPISTORE_ERR_NOT_FOUND);
+    return 0;
+}
+
+static int test_malformed_mime_opens(void)
+{
+    void *msg, *table;
+    struct mapistore_property_data d[6];
+    uint32_t i, count;
+    for (i = 0; i < sizeof odd_messages / sizeof odd_messages[0]; i++) {
+        if (open_message("Odd", i, &msg, d)) return 1;
+        CHECK(d[0].error == 0 && d[0].data && d[3].error == 0); /* some body text, a subject */
+        CHECK(imap_message_get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS);
+        if (i == 2) CHECK(count == 1); /* the forwarded message */
+    }
+    CHECK(open_message("Odd", 3, &msg, d) == 0 && strcmp(d[3].data, "Raw \xef\xbf\xbd\xef\xbf\xbd bytes") == 0);
+    return 0;
+}
+
+/* Deleted in webmail (\Deleted + EXPUNGE) while Outlook keeps the ID: NOT_FOUND, not another message. */
+static int test_expunged_mid_not_found(void)
+{
+    struct imap_conn *conn = imap_conn_open(root, &tunnel, "alice@example.invalid");
+    mailimap *imap = imap_conn_session(conn);
+    struct mailimap_flag_list *deleted;
+    struct mailimap_store_att_flags *store;
+    struct mailimap_set *set;
+    void *folder, *msg = NULL;
+    uint64_t gone;
+    CHECK(conn != NULL);
+    CHECK(mailimap_create(imap, "Gone") == MAILIMAP_NO_ERROR);
+    if (append(imap, "Gone", plain_message) || append(imap, "Gone", second_message)) return 1;
+    gone = row_mid("Gone", 0, &folder);
+    CHECK(gone != 0);
+    CHECK(mailimap_select(imap, "Gone") == MAILIMAP_NO_ERROR);
+    deleted = mailimap_flag_list_new_empty();
+    CHECK(deleted && mailimap_flag_list_add(deleted, mailimap_flag_new_deleted()) == MAILIMAP_NO_ERROR);
+    store = mailimap_store_att_flags_new_add_flags_silent(deleted);
+    set = mailimap_set_new_single(1);
+    CHECK(store && set && mailimap_store(imap, set, store) == MAILIMAP_NO_ERROR);
+    mailimap_set_free(set);
+    mailimap_store_att_flags_free(store);
+    CHECK(mailimap_expunge(imap) == MAILIMAP_NO_ERROR);
+    CHECK(imap_folder_open_message(folder, root, gone, false, &msg) == MAPISTORE_ERR_NOT_FOUND && msg == NULL);
+    CHECK(mailimap_delete(imap, "Gone") == MAILIMAP_NO_ERROR);
+    talloc_free(conn);
+    return 0;
+}
+
+static int test_oversize_message_notice(void)
+{
+    struct imap_settings small = tunnel;
+    void *msg, *table;
+    struct mapistore_property_data d[6];
+    uint32_t count = 9;
+    small.max_message_size = 100;
+    imap_backend_set_settings(&small);
+    if (open_message("Projects", 1, &msg, d)) return 1;
+    CHECK(d[0].error == 0 && strstr(d[0].data, "too large") != NULL && d[1].error == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(imap_message_get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count == 0);
+    imap_backend_set_settings(&tunnel);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -533,7 +718,9 @@ int main(int argc, char **argv)
         (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_uri_user_must_match() ||
         test_hierarchy_table_rows() || test_folder_properties() || test_create_root_folder_not_found() ||
         test_imap_down_is_an_error() || test_message_table_columns() || test_message_ids_stable() ||
-        test_uidvalidity_change_new_mids() || test_backend_registers()) {
+        test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
+        test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
+        test_oversize_message_notice() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

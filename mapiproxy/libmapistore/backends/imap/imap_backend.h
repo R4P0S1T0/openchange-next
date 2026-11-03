@@ -43,6 +43,23 @@ enum imap_object_type {
 	IMAP_OBJ_FOLDER = 0x494D4631,
 	IMAP_OBJ_TABLE,
 	IMAP_OBJ_MESSAGE,
+	IMAP_OBJ_ATTACHMENT,
+};
+
+struct imap_recipient {
+	enum ulRecipClass	type;		/* MAPI_TO, MAPI_CC, MAPI_BCC */
+	char			*name;		/* display name, or the address when unnamed */
+	char			*address;
+};
+
+struct imap_attachment {
+	uint32_t	type;			/* IMAP_OBJ_ATTACHMENT */
+	uint32_t	number;
+	char		*filename;
+	char		*mime_type;
+	char		*content_id;
+	uint8_t		*data;
+	uint32_t	size;
 };
 
 struct imap_folder;
@@ -61,6 +78,19 @@ struct imap_message_row {
 	char		*display_cc;
 	char		*message_id;
 	uint64_t	mid;
+	struct imap_recipient	*recipients;	/* filled when a message is opened */
+	uint32_t		recipient_count;
+};
+
+struct imap_message {
+	uint32_t		type;		/* IMAP_OBJ_MESSAGE */
+	struct imap_folder	*folder;
+	struct imap_message_row	row;
+	char			*body;		/* UTF-8 text (from the HTML part when there is no text part) */
+	char			*html;		/* UTF-8 */
+	char			*headers;	/* transport headers, UTF-8 */
+	struct imap_attachment	*attachments;
+	uint32_t		attachment_count;
 };
 
 struct imap_context {
@@ -85,6 +115,7 @@ struct imap_table {
 	enum MAPITAGS			*columns;
 	uint32_t			row_count;
 	char				**children;	/* folder table */
+	struct imap_message		*message;	/* attachment table */
 	struct imap_message_row		*rows;		/* message table */
 	uint32_t			uidvalidity;	/* of the mailbox when the rows were read */
 };
@@ -147,5 +178,12 @@ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx,
 					      void **message);
 enum mapistore_error imap_message_properties(void *message, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,
 					     struct mapistore_property_data *data);
+enum mapistore_error imap_attachment_properties(struct imap_attachment *a, TALLOC_CTX *mem_ctx, uint16_t count,
+						enum MAPITAGS *tags, struct mapistore_property_data *data);
+enum mapistore_error imap_message_get_data(void *message, TALLOC_CTX *mem_ctx, struct mapistore_message **msg);
+enum mapistore_error imap_message_get_attachment_table(void *message, TALLOC_CTX *mem_ctx, void **table,
+						       uint32_t *row_count);
+enum mapistore_error imap_message_open_attachment(void *message, TALLOC_CTX *mem_ctx, uint32_t number,
+						  void **attachment);
 
 #endif /* __IMAP_BACKEND_H__ */
