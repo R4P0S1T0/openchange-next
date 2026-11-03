@@ -185,6 +185,9 @@ pub async fn handle_body<A: Authenticator, B: Backend>(
             return nspi::bind(srv, req, cred_hash).await
         }
         (Some("Unbind"), Admitted::Session(s)) => nspi::unbind(req, s),
+        (Some(t), Admitted::Session(_)) if nspi::SESSION_TYPES.contains(&t) => {
+            nspi::handle(srv, req, t)
+        }
         (Some("Execute"), Admitted::Session(s)) => emsmdb::execute(srv, req, &s).await,
         (Some("Disconnect"), Admitted::Session(s)) => emsmdb::disconnect(srv, req, s).await,
         (Some("NotificationWait"), Admitted::Session(s)) => {
@@ -290,7 +293,10 @@ pub(crate) mod tests {
         Server {
             auth: FakeAuth::default(),
             sessions: SessionTable::new(Duration::from_secs(1800)),
-            nspi: nspi::State::new(Duration::from_secs(1800), crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot())),
+            nspi: nspi::State::new(
+                Duration::from_secs(1800),
+                crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot()),
+            ),
             autodiscover: settings(),
             backend: FakeBackend::default(),
             notification_wait: Duration::from_secs(300),

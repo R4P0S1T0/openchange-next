@@ -52,14 +52,17 @@ impl Snapshot {
             .into_iter()
             .enumerate()
             .map(|(i, (address, display_name))| Entry {
-                mid: generation << GEN_SHIFT | (FIRST_MID + i as u32),
+                mid: (generation << GEN_SHIFT) | (FIRST_MID + i as u32),
                 nickname: nickname(&address),
                 legacy_dn: legacy_dn(settings, &address),
                 address,
                 display_name,
             })
             .collect();
-        Snapshot { generation, entries }
+        Snapshot {
+            generation,
+            entries,
+        }
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -108,7 +111,7 @@ impl Snapshot {
     }
 
     /// Entries whose address, nickname or display-name words start with `prefix` (lower case).
-    pub fn matching<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s Entry> + 's {
+    fn matching<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s Entry> + 's {
         self.entries.iter().filter(move |e| {
             let display = e.display_name.to_lowercase();
             e.address.starts_with(prefix)
@@ -157,7 +160,9 @@ impl Gal {
     /// The current snapshot; a missing or unreadable file is an empty GAL.
     pub fn current(&self) -> Arc<Snapshot> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mtime = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
         if mtime.is_some() && mtime != st.mtime {
             let text = std::fs::read_to_string(&self.path).unwrap_or_default();
             let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
@@ -190,14 +195,21 @@ pub mod tests {
     #[test]
     fn test_gal_sorted_mids() {
         let s = snapshot();
-        let names: Vec<_> = s.entries().iter().map(|e| e.display_name.as_str()).collect();
+        let names: Vec<_> = s
+            .entries()
+            .iter()
+            .map(|e| e.display_name.as_str())
+            .collect();
         assert_eq!(names, ["Alfred Other", "Alice Example", "bob", "Teste Lab"]);
         let mids: Vec<_> = s.entries().iter().map(|e| e.mid).collect();
         assert_eq!(mids, [0x100010, 0x100011, 0x100012, 0x100013]);
         assert_eq!(s.by_mid(0x100011).unwrap().address, "alice@example.invalid");
         assert!(s.by_mid(0x100014).is_none() && s.by_mid(1).is_none());
         let e = s.by_mid(0x100013).unwrap();
-        assert_eq!(e.legacy_dn, legacy_dn(&settings(), "teste@lab.example.invalid"));
+        assert_eq!(
+            e.legacy_dn,
+            legacy_dn(&settings(), "teste@lab.example.invalid")
+        );
         assert!(s.by_legacy_dn(&e.legacy_dn.to_uppercase()).is_some());
     }
 
@@ -205,18 +217,34 @@ pub mod tests {
     fn test_stale_mid_after_reload() {
         let old = snapshot();
         let alfred = old.entries()[0].mid;
-        let new = Snapshot::parse("bob@example.invalid\tAaron\nzed@example.invalid\tZed\n", &settings(), 2);
-        assert!(new.by_mid(alfred).is_none(), "a MId of the old snapshot names nobody");
+        let new = Snapshot::parse(
+            "bob@example.invalid\tAaron\nzed@example.invalid\tZed\n",
+            &settings(),
+            2,
+        );
+        assert!(
+            new.by_mid(alfred).is_none(),
+            "a MId of the old snapshot names nobody"
+        );
     }
 
     #[test]
     fn test_resolve_prefix_unique_ambiguous_none() {
         let s = snapshot();
         let mid = |a: &str| s.entries().iter().find(|e| e.address == a).unwrap().mid;
-        assert_eq!(s.resolve("teste"), Resolution::One(mid("teste@lab.example.invalid")));
-        assert_eq!(s.resolve("Example"), Resolution::One(mid("alice@example.invalid")));
+        assert_eq!(
+            s.resolve("teste"),
+            Resolution::One(mid("teste@lab.example.invalid"))
+        );
+        assert_eq!(
+            s.resolve("Example"),
+            Resolution::One(mid("alice@example.invalid"))
+        );
         assert_eq!(s.resolve("al"), Resolution::Ambiguous);
-        assert_eq!(s.resolve("ALICE@example.invalid"), Resolution::One(mid("alice@example.invalid")));
+        assert_eq!(
+            s.resolve("ALICE@example.invalid"),
+            Resolution::One(mid("alice@example.invalid"))
+        );
         assert_eq!(s.resolve("nobody"), Resolution::None);
         assert_eq!(s.resolve("  "), Resolution::None);
     }
@@ -239,7 +267,12 @@ pub mod tests {
         assert_eq!(gal.current().entries()[0].mid, first);
         std::fs::write(&path, "zed@example.invalid\tZed\n").unwrap();
         let filetime = SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(filetime).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(filetime)
+            .unwrap();
         assert!(gal.current().by_mid(first).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }

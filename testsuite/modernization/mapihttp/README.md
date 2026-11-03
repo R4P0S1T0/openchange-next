@@ -74,3 +74,19 @@ unknown auxiliary blocks as opaque and walk them by `Size`.
 
 Flags 0, HasState 0xFF, STAT (36 bytes: all zero except CodePage 1252,
 TemplateLocale 0x0416, SortLocale 0x0416), AuxiliaryBufferSize 0.
+
+## NSPI captures (lab, 2026-11-03)
+
+Captured with a temporary nginx `client_body_in_file_only` location for
+`/mapi/nspi/` while Outlook 16.0.19127 opened the Address Book against the lab
+mailbox `teste@lab.fitasonline.com.br` (test account, no personal data). The
+capture location and files were removed afterwards.
+
+| File | Decoded |
+|---|---|
+| `nspi-dntomid-…bin` | Reserved 0, HasNames 0xFF, NameCount 1, the lab mailbox LegacyDN (`…/cn=teste-ec0903c6`), AuxiliaryBufferSize 0 |
+| `nspi-getspecialtable-…bin` | Flags 0x04 (NspiUnicodeStrings), HasState 0xFF, STAT (ContainerID 1, TotalRecs 1, CodePage 1252, locales 0x0416), HasVersion 0xFF, Version 0, AuxiliaryBufferSize 0 |
+| `nspi-unbind-…bin` | Reserved 0, AuxiliaryBufferSize 0 |
+
+Outlook stops at the first request type the server answers with
+X-ResponseCode 5, so later types are captured as they are implemented.

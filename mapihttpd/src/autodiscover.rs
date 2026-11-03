@@ -205,7 +205,12 @@ fn requested(body: &[u8]) -> Option<(Option<String>, Option<String>)> {
 
 /// The mailbox LegacyDN, as the directory (python/openchange/directory.py) writes it.
 pub fn legacy_dn(s: &Settings, address: &str) -> String {
-    format!("/o={}/ou={}/cn=Recipients/cn={}", s.org, s.ou, nickname(address))
+    format!(
+        "/o={}/ou={}/cn=Recipients/cn={}",
+        s.org,
+        s.ou,
+        nickname(address)
+    )
 }
 
 /// Directory mailNickname (openchange_directory_sync): the lower-cased local part with bytes
