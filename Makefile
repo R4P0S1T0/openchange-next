@@ -1839,7 +1839,8 @@ OC_EMSMDB_TEST = bin/oc-emsmdb-test
 .PHONY: check-oc-emsmdb
 check-oc-emsmdb: setup/mapistore/mapistore_namedprops.ldif libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 	! nm -D --undefined-only mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) | grep dcesrv_
-	rm -f $(OC_EMSMDB_TEST)/directory.ldb
+	rm -f $(OC_EMSMDB_TEST)/directory.ldb $(OC_EMSMDB_TEST)/private/openchange.ldb
+	PYTHONPATH=python python3 testsuite/modernization/oc_emsmdb_openchangedb.py $(OC_EMSMDB_TEST)/private/openchange.ldb > /dev/null
 	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 
 bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/default/emsmdb/emsmdbp_identity.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)

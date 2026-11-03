@@ -47,34 +47,6 @@ static bool untouched(const uint8_t *p, size_t from, size_t to)
     return true;
 }
 
-/* openchangedb needs a rootDSE; there is no provisioning in the test tree. */
-static int seed_openchangedb(const char *conf)
-{
-    TALLOC_CTX *ctx = talloc_new(NULL);
-    struct loadparm_context *lp = loadparm_init(ctx);
-    struct ldb_context *ldb;
-    struct ldb_message *msg;
-    int ret;
-    CHECK(ctx && lp && lpcfg_load(lp, conf));
-    ldb = ldb_init(ctx, NULL);
-    CHECK(ldb && ldb_connect(ldb, talloc_asprintf(ctx, "%s/openchange.ldb", lpcfg_private_dir(lp)), 0, NULL) == LDB_SUCCESS);
-    msg = ldb_msg_new(ctx);
-    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "@ROOTDSE")));
-    CHECK(ldb_msg_add_string(msg, "rootDomainNamingContext", "DC=example,DC=invalid") == 0 &&
-        ldb_msg_add_string(msg, "defaultNamingContext", "DC=example,DC=invalid") == 0);
-    ret = ldb_add(ldb, msg);
-    CHECK(ret == LDB_SUCCESS || ret == LDB_ERR_ENTRY_ALREADY_EXISTS);
-    msg = ldb_msg_new(ctx);
-    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "CN=SERVER,DC=example,DC=invalid")));
-    CHECK(ldb_msg_add_string(msg, "objectClass", "server") == 0 && ldb_msg_add_string(msg, "cn", "SERVER") == 0 &&
-        ldb_msg_add_string(msg, "GlobalCount", "1") == 0 && ldb_msg_add_string(msg, "ChangeNumber", "1") == 0 &&
-        ldb_msg_add_string(msg, "ReplicaID", "1") == 0);
-    ret = ldb_add(ldb, msg);
-    CHECK(ret == LDB_SUCCESS || ret == LDB_ERR_ENTRY_ALREADY_EXISTS);
-    talloc_free(ctx);
-    return 0;
-}
-
 static int test_disconnect_null(void) { oc_emsmdb_disconnect(NULL); return 0; }
 
 static int test_execute_null_session(void)
@@ -310,6 +282,73 @@ static int test_provision_backend_takes_over_inbox(void)
     return 0;
 }
 
+/* One private-mailbox RopLogon (MS-OXCSTOR 2.2.1.1.1) as Outlook sends it after Connect. */
+static DATA_BLOB logon_request(TALLOC_CTX *mem_ctx, const char *essdn)
+{
+    struct mapi_request request = {0};
+    struct RPC_HEADER_EXT header = { .Flags = RHEF_Last };
+    struct ndr_push *rop = ndr_push_init_ctx(mem_ctx), *wire = ndr_push_init_ctx(mem_ctx);
+    struct Logon_req logon = { .LogonFlags = LogonPrivate, .OpenFlags = USE_PER_MDB_REPLID_MAPPING | HOME_LOGON | TAKE_OWNERSHIP,
+        .StoreState = 0, .EssDN = essdn };
+    request.handles = talloc_array(mem_ctx, uint32_t, 1);
+    request.mapi_req = talloc_zero_array(mem_ctx, struct EcDoRpc_MAPI_REQ, 2);
+    if (!rop || !wire || !request.handles || !request.mapi_req ||
+        ndr_push_Logon_req(rop, NDR_SCALARS, &logon) != NDR_ERR_SUCCESS) return data_blob_null;
+    request.handles[0] = 0xFFFFFFFF;
+    request.mapi_req[0].opnum = op_MAPI_Logon;
+    request.mapi_req[0].u.mapi_Logon = logon;
+    request.length = 2 + 3 + rop->offset;  /* RopSize + RopId/LogonId/OutputHandleIndex + body */
+    request.mapi_len = request.length + 4;
+    header.Size = header.SizeActual = request.mapi_len;
+    if (ndr_push_RPC_HEADER_EXT(wire, NDR_SCALARS, &header) != NDR_ERR_SUCCESS ||
+        ndr_push_mapi_request(wire, NDR_SCALARS, &request) != NDR_ERR_SUCCESS) return data_blob_null;
+    return ndr_push_blob(wire);
+}
+
+/* Runs one RopLogon on a fresh session and returns its ROP error code (or 0xFFFFFFFF on transport failure). */
+static uint32_t logon_as(const char *user, const char *dn, const char *essdn, uint64_t *inbox)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint8_t out[4096];
+    size_t len;
+    struct mapi2k7_response decoded = {0};
+    struct ndr_pull *pull;
+    DATA_BLOB in, blob;
+    uint32_t code = 0xFFFFFFFF;
+    if (connect_as(user, dn, &session, &name, &prefix) != MAPI_E_SUCCESS) return code;
+    in = logon_request(session, essdn);
+    if (in.length && oc_emsmdb_execute(session, 0, in.data, in.length, out, sizeof out, &len) == MAPI_E_SUCCESS) {
+        blob = data_blob_const(out, len);
+        pull = ndr_pull_init_blob(&blob, session);
+        decoded.mapi_response = talloc_zero(session, struct mapi_response);
+        if (pull && decoded.mapi_response &&
+            ndr_pull_mapi2k7_response(pull, NDR_SCALARS | NDR_BUFFERS, &decoded) == NDR_ERR_SUCCESS &&
+            decoded.mapi_response->mapi_repl) {
+            code = decoded.mapi_response->mapi_repl[0].error_code;
+            if (code == MAPI_E_SUCCESS && inbox)
+                *inbox = decoded.mapi_response->mapi_repl[0].u.mapi_Logon.LogonType.store_mailbox.Inbox;
+        }
+    }
+    if (code != MAPI_E_SUCCESS) fprintf(stderr, "RopLogon %s as %s: 0x%08x\n", essdn, user, code);
+    oc_emsmdb_disconnect(session);
+    return code;
+}
+
+static int test_logon_private_mailbox(void)
+{
+    uint64_t inbox = 0;
+    CHECK(logon_as("alice@example.invalid", ORG_OU "alice-0001", ORG_OU "alice-0001", &inbox) == MAPI_E_SUCCESS);
+    CHECK(inbox == first_fids[5]);
+    return 0;
+}
+
+static int test_logon_other_users_dn(void)
+{
+    CHECK(logon_as("alice@example.invalid", ORG_OU "alice-0001", ORG_OU "bob-0002", NULL) == MAPI_E_NO_ACCESS);
+    return 0;
+}
+
 static int test_connect_fails_closed(void)
 {
     oc_emsmdb_session *session = NULL;
@@ -356,11 +395,12 @@ int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
     talloc_enable_null_tracking();
-    if (seed_openchangedb(argv[1]) || test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
+    if (test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
         test_directory_ldb_opens(argv[1]) ||
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
         test_provision_native_mailbox() || test_provision_idempotent() ||
+        test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
