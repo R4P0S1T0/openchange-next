@@ -256,7 +256,7 @@ _PUBLIC_ bool mapistore_backend_run_init(init_backend_fn *fns)
 	}
 
 	for (i = 0; fns[i]; i++) {
-		ret &= (bool)fns[i]();
+		ret &= (fns[i]() == MAPISTORE_SUCCESS);  /* init functions return 0 on success */
 	}
 
 	return ret;
@@ -301,7 +301,7 @@ enum mapistore_error mapistore_backend_init(TALLOC_CTX *mem_ctx, const char *pat
 		}
 	}
 
-	return (status != true) ? MAPISTORE_SUCCESS : MAPISTORE_ERR_BACKEND_INIT;
+	return status ? MAPISTORE_SUCCESS : MAPISTORE_ERR_BACKEND_INIT;
 }
 
 /**

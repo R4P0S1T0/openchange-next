@@ -64,6 +64,13 @@ static int seed_openchangedb(const char *conf)
         ldb_msg_add_string(msg, "defaultNamingContext", "DC=example,DC=invalid") == 0);
     ret = ldb_add(ldb, msg);
     CHECK(ret == LDB_SUCCESS || ret == LDB_ERR_ENTRY_ALREADY_EXISTS);
+    msg = ldb_msg_new(ctx);
+    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "CN=SERVER,DC=example,DC=invalid")));
+    CHECK(ldb_msg_add_string(msg, "objectClass", "server") == 0 && ldb_msg_add_string(msg, "cn", "SERVER") == 0 &&
+        ldb_msg_add_string(msg, "GlobalCount", "1") == 0 && ldb_msg_add_string(msg, "ChangeNumber", "1") == 0 &&
+        ldb_msg_add_string(msg, "ReplicaID", "1") == 0);
+    ret = ldb_add(ldb, msg);
+    CHECK(ret == LDB_SUCCESS || ret == LDB_ERR_ENTRY_ALREADY_EXISTS);
     talloc_free(ctx);
     return 0;
 }
@@ -222,6 +229,87 @@ static int test_connect_filter_metacharacters(void)
     return 0;
 }
 
+static const uint32_t provisioned[] = { EMSMDBP_MAILBOX_ROOT, EMSMDBP_DEFERRED_ACTION, EMSMDBP_VIEWS,
+    EMSMDBP_REMINDERS, EMSMDBP_TOP_INFORMATION_STORE, EMSMDBP_INBOX, EMSMDBP_OUTBOX, EMSMDBP_SENT_ITEMS,
+    EMSMDBP_DELETED_ITEMS };
+#define N_PROVISIONED (sizeof provisioned / sizeof provisioned[0])
+static uint64_t first_fids[N_PROVISIONED + 1];
+
+/* fids[N_PROVISIONED] is the Calendar, located by name under Top of Information Store like Outlook's lookups. */
+static int provisioned_fids(struct emsmdbp_context *ctx, uint64_t *fids)
+{
+    size_t i;
+    for (i = 0; i < N_PROVISIONED; i++)
+        CHECK(openchangedb_get_SystemFolderID(ctx->oc_ctx, ctx->username, provisioned[i], fids + i) == MAPI_E_SUCCESS && fids[i]);
+    CHECK(openchangedb_get_fid_by_name(ctx->oc_ctx, ctx->username, fids[4], "Calendar", fids + N_PROVISIONED) == MAPI_E_SUCCESS);
+    return 0;
+}
+
+static int test_provision_native_mailbox(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    char *uri = NULL;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    if (provisioned_fids(session->ctx, first_fids)) return 1;
+    /* Native folders have no mapistore URI until a backend offers their role. */
+    CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", first_fids[5], &uri, true)
+        != MAPI_E_SUCCESS || uri == NULL || uri[0] == '\0');
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_provision_idempotent(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t again[N_PROVISIONED + 1];
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    if (provisioned_fids(session->ctx, again)) return 1;
+    CHECK(memcmp(again, first_fids, sizeof again) == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* A backend offering only the mail role: it must take over the native Inbox, keeping its folder ID. */
+static enum mapistore_error fake_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                               struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "fake://inbox/");
+    entry->name = talloc_strdup(entry, "Inbox");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_MAIL_ROLE;
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error fake_backend_init(void) { return MAPISTORE_SUCCESS; }
+
+static int test_provision_backend_takes_over_inbox(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t again[N_PROVISIONED + 1];
+    char *uri = NULL;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "fake"; fake.backend.description = "test"; fake.backend.namespace = "fake://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = fake_list_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    if (provisioned_fids(session->ctx, again)) return 1;
+    CHECK(memcmp(again, first_fids, sizeof again) == 0);
+    CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", first_fids[5], &uri, true)
+        == MAPI_E_SUCCESS && strcmp(uri, "fake://inbox/") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 static int test_connect_fails_closed(void)
 {
     oc_emsmdb_session *session = NULL;
@@ -272,7 +360,8 @@ int main(int argc, char **argv)
         test_directory_ldb_opens(argv[1]) ||
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
-        test_connect_fails_closed() || test_execute()) return 1;
+        test_provision_native_mailbox() || test_provision_idempotent() ||
+        test_provision_backend_takes_over_inbox() || test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;

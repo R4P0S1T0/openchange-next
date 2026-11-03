@@ -199,6 +199,25 @@ end:
 	return retval;
 }
 
+/* Without a fallback backend, folders are native openchangedb folders: no mapistore URI. */
+static char *fallback_folder_uri(TALLOC_CTX *mem_ctx, const char *fallback_url, uint64_t fid)
+{
+	return fallback_url ? talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, fid) : NULL;
+}
+
+/* Instantiate a backend folder so it is initialized properly; native folders need nothing. */
+static void register_backend_folder(struct emsmdbp_context *emsmdbp_ctx, const char *username,
+				    const char *uri, uint64_t fid)
+{
+	uint32_t	context_id;
+	void		*backend_object;
+
+	if (uri == NULL) return;
+	if (mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, uri, fid, &context_id, &backend_object) != MAPISTORE_SUCCESS) return;
+	mapistore_indexing_record_add_fmid_for_uri(emsmdbp_ctx->mstore_ctx, context_id, username, fid, uri);
+	mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+}
+
 _PUBLIC_ enum MAPISTATUS emsmdbp_mailbox_provision(struct emsmdbp_context *emsmdbp_ctx, const char *username)
 {
 /* auto-provisioning:
@@ -404,17 +423,15 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 		current_entry = next_entry;
 	}
 
-	/* Fallback role MUST exist */
-	if (!main_entries[MAPISTORE_FALLBACK_ROLE]) {
-		OC_DEBUG(5, "No fallback provisioning role was found while such role is mandatory. "
-			  "Provisioning must be done manually.\n");
-		openchangedb_transaction_commit(emsmdbp_ctx->oc_ctx);
-		talloc_free(mem_ctx);
-		return MAPI_E_DISK_ERROR;
-	}
-	fallback_url = main_entries[MAPISTORE_FALLBACK_ROLE]->url;
-	if (fallback_url[strlen(fallback_url)-1] != '/') {
-		fallback_url = talloc_asprintf(mem_ctx, "%s/", fallback_url);
+	/* Without a fallback backend the mailbox is kept natively in openchangedb (M2c). */
+	fallback_url = NULL;
+	if (main_entries[MAPISTORE_FALLBACK_ROLE]) {
+		fallback_url = main_entries[MAPISTORE_FALLBACK_ROLE]->url;
+		if (fallback_url[strlen(fallback_url)-1] != '/') {
+			fallback_url = talloc_asprintf(mem_ctx, "%s/", fallback_url);
+		}
+	} else {
+		OC_DEBUG(5, "No fallback provisioning role: creating native openchangedb folders.\n");
 	}
 
 	/* Mailbox and subfolders */
@@ -461,16 +478,11 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 		if (ret != MAPI_E_SUCCESS) {
 			mapistore_indexing_get_new_folderID_as_user(emsmdbp_ctx->mstore_ctx, username, &current_fid);
 			openchangedb_get_new_changeNumber(emsmdbp_ctx->oc_ctx, username, &current_cn);
-			mapistore_url = talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, current_fid);
+			mapistore_url = fallback_folder_uri(mem_ctx, fallback_url, current_fid);
 			openchangedb_create_folder(emsmdbp_ctx->oc_ctx, username, mailbox_fid, current_fid, current_cn, mapistore_url, i);
 			property_row.lpProps[0].value.lpszW = folder_names[i];
 			openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, username, current_fid, &property_row);
-
-			/* instantiate the new folder in the backend to make sure it is initialized properly */
-			retval = mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, mapistore_url, current_fid, &context_id, &backend_object);
-			mapistore_indexing_record_add_fmid_for_uri(emsmdbp_ctx->mstore_ctx, context_id,
-								   username, current_fid, mapistore_url);
-			mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+			register_backend_folder(emsmdbp_ctx, username, mapistore_url, current_fid);
 		}
 	}
 
@@ -514,31 +526,38 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 	property_row.lpProps[1].value.lpszW = "IPF.Note";
 	/* TODO: mapistore_url/mapistore_tag change */
 	for (i = EMSMDBP_INBOX; i < EMSMDBP_MAX_MAILBOX_SYSTEMIDX; i++) {
+		switch (i) {
+		case EMSMDBP_INBOX:
+			current_entry = main_entries[MAPISTORE_MAIL_ROLE];
+			break;
+		case EMSMDBP_OUTBOX:
+			current_entry = main_entries[MAPISTORE_OUTBOX_ROLE];
+			break;
+		case EMSMDBP_SENT_ITEMS:
+			current_entry = main_entries[MAPISTORE_SENTITEMS_ROLE];
+			break;
+		case EMSMDBP_DELETED_ITEMS:
+			current_entry = main_entries[MAPISTORE_DELETEDITEMS_ROLE];
+			break;
+		default:
+			current_entry = NULL;
+		}
 		ret = openchangedb_get_SystemFolderID(emsmdbp_ctx->oc_ctx, username, i, &current_fid);
 		if (ret == MAPI_E_SUCCESS) {
 			if (i == EMSMDBP_INBOX) {
 				inbox_fid = current_fid;
 			}
+			/* A backend now offering this role takes over the (native) folder; the folder ID stays. */
+			if (current_entry && current_entry->url &&
+			    (openchangedb_get_mapistoreURI(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_fid, &url, true) != MAPI_E_SUCCESS ||
+			     url == NULL || strcmp(url, current_entry->url) != 0)) {
+				if (openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, current_entry->url) != MAPI_E_SUCCESS) goto error;
+				register_backend_folder(emsmdbp_ctx, username, current_entry->url, current_fid);
+			}
 		} else {
 			current_name = folder_names[i];
 
-			switch (i) {
-			case EMSMDBP_INBOX:
-				current_entry = main_entries[MAPISTORE_MAIL_ROLE];
-				break;
-			case EMSMDBP_OUTBOX:
-				current_entry = main_entries[MAPISTORE_OUTBOX_ROLE];
-				break;
-			case EMSMDBP_SENT_ITEMS:
-				current_entry = main_entries[MAPISTORE_SENTITEMS_ROLE];
-				break;
-			case EMSMDBP_DELETED_ITEMS:
-				current_entry = main_entries[MAPISTORE_DELETEDITEMS_ROLE];
-				break;
-			default:
-				current_entry = NULL;
-			}
-
+			mapistore_url = NULL;
 			if (current_entry) {
 				if (current_entry->name) {
 					current_name = current_entry->name;
@@ -560,8 +579,8 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 					OC_DEBUG(1, "Error getting new change number: %s", mapi_get_errstr(ret));
 					goto error;
 				}
-				if (!current_entry) {
-					mapistore_url = talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, current_fid);
+				if (!current_entry && fallback_url) {
+					mapistore_url = fallback_folder_uri(mem_ctx, fallback_url, current_fid);
 					if (!mapistore_url) {
 						OC_DEBUG(1, "Out-of-memory when allocating a MAPIStore URL");
 						goto error;
@@ -574,14 +593,14 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 				}
 			} else if (ret == MAPI_E_SUCCESS) {
 				current_fid = found_fid;
-				if (!current_entry) {
-					mapistore_url = talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, current_fid);
+				if (!current_entry && fallback_url) {
+					mapistore_url = fallback_folder_uri(mem_ctx, fallback_url, current_fid);
 					if (!mapistore_url) {
 						OC_DEBUG(1, "Out-of-memory when allocating a MAPIStore URL");
 						goto error;
 					}
 				}
-				ret = openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, mapistore_url);
+				ret = mapistore_url ? openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, mapistore_url) : MAPI_E_SUCCESS;
 				if (ret != MAPI_E_SUCCESS) {
 					OC_DEBUG(1, "Error setting new MAPIStore URI %s: %s", mapistore_url, mapi_get_errstr(ret));
 					goto error;
@@ -600,11 +619,7 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 			property_row.lpProps[0].value.lpszW = current_name;
 			openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, username, current_fid, &property_row);
 
-			/* instantiate the new folder in the backend to make sure it is initialized properly */
-			retval = mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, mapistore_url, current_fid, &context_id, &backend_object);
-			mapistore_indexing_record_add_fmid_for_uri(emsmdbp_ctx->mstore_ctx, context_id,
-								   username, current_fid, mapistore_url);
-			mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+			register_backend_folder(emsmdbp_ctx, username, mapistore_url, current_fid);
 
 			if (i == EMSMDBP_INBOX) {
 				inbox_fid = current_fid;
@@ -634,6 +649,7 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 
 			current_name = current_folder->name;
 			current_entry = main_entries[current_folder->role];
+			mapistore_url = NULL;
 			if (current_entry) {
 				if (current_entry->name) {
 					current_name = current_entry->name;
@@ -655,8 +671,8 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 					OC_DEBUG(1, "Error getting new change number: %s", mapi_get_errstr(ret));
 					goto error;
 				}
-				if (!current_entry) {
-					mapistore_url = talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, current_fid);
+				if (!current_entry && fallback_url) {
+					mapistore_url = fallback_folder_uri(mem_ctx, fallback_url, current_fid);
 					if (!mapistore_url) {
 						OC_DEBUG(1, "Out-of-memory when allocating a MAPIStore URL");
 						goto error;
@@ -669,14 +685,14 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 				}
 			} else if (ret == MAPI_E_SUCCESS) {
 				current_fid = found_fid;
-				if (!current_entry) {
-					mapistore_url = talloc_asprintf(mem_ctx, "%s0x%"PRIx64"/", fallback_url, current_fid);
+				if (!current_entry && fallback_url) {
+					mapistore_url = fallback_folder_uri(mem_ctx, fallback_url, current_fid);
 					if (!mapistore_url) {
 						OC_DEBUG(1, "Out-of-memory when allocating a MAPIStore URL");
 						goto error;
 					}
 				}
-				ret = openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, mapistore_url);
+				ret = mapistore_url ? openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, mapistore_url) : MAPI_E_SUCCESS;
 				if (ret != MAPI_E_SUCCESS) {
 					OC_DEBUG(1, "Error setting new MAPIStore URI %s: %s", mapistore_url, mapi_get_errstr(ret));
 					goto error;
@@ -696,11 +712,7 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 			property_row.lpProps[1].value.lpszW = container_classes[current_folder->role];
 			openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, username, current_fid, &property_row);
 
-			/* instantiate the new folder in the backend to make sure it is initialized properly */
-			retval = mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, mapistore_url, current_fid, &context_id, &backend_object);
-			mapistore_indexing_record_add_fmid_for_uri(emsmdbp_ctx->mstore_ctx, context_id,
-								   username, current_fid, mapistore_url);
-			mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+			register_backend_folder(emsmdbp_ctx, username, mapistore_url, current_fid);
 
 			/* set entryid on mailbox and inbox */
 			folder_entryid.FolderGlobalCounter.value = (current_fid >> 16);
@@ -785,7 +797,18 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 
 	/** create root/Freebusy Data folder + "LocalFreebusy" message (OXODLGT) */
 	/* FIXME: the problem here is that only the owner of a mailbox can create the delegation message and its container, meaning that when sharing an object, a delegate must at least login once to OpenChange before any one subscribes to his resources */
-	if (strcmp(emsmdbp_ctx->username, username) == 0) {
+	if (strcmp(emsmdbp_ctx->username, username) == 0 && fallback_url == NULL) {
+		/* Native mailbox: the folder only; Outlook writes its own LocalFreebusy message (shortcut: no OXODLGT message until a store backend exists). */
+		if (openchangedb_get_fid_by_name(emsmdbp_ctx->oc_ctx, username, mailbox_fid, "Freebusy Data", &current_fid) == MAPI_E_NOT_FOUND &&
+		    mapistore_indexing_get_new_folderID_as_user(emsmdbp_ctx->mstore_ctx, username, &current_fid) == MAPISTORE_SUCCESS &&
+		    openchangedb_get_new_changeNumber(emsmdbp_ctx->oc_ctx, username, &current_cn) == MAPI_E_SUCCESS) {
+			property_row.cValues = 1;
+			property_row.lpProps[0].ulPropTag = PidTagDisplayName;
+			property_row.lpProps[0].value.lpszW = "Freebusy Data";
+			openchangedb_create_folder(emsmdbp_ctx->oc_ctx, username, mailbox_fid, current_fid, current_cn, NULL, -1);
+			openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, username, current_fid, &property_row);
+		}
+	} else if (strcmp(emsmdbp_ctx->username, username) == 0) {
 		struct mapi_SRestriction restriction;
 		uint8_t status;
 
