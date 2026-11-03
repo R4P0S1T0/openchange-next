@@ -833,17 +833,18 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 			openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, username, current_fid, &property_row);
 
 			/* instantiate the new folder in the backend to make sure it is initialized properly */
-			mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, mapistore_url, current_fid, &context_id, &backend_object);
+			if (mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, mapistore_url, current_fid, &context_id, &backend_object) != MAPISTORE_SUCCESS) goto error;
 			mapistore_indexing_record_add_fmid_for_uri(emsmdbp_ctx->mstore_ctx, context_id,
 								   username, current_fid, mapistore_url);
 			mapistore_properties_set_properties(emsmdbp_ctx->mstore_ctx, context_id, backend_object, &property_row);
 		}
 		else {
 			/* open the existing folder */
+			url = NULL;
 			openchangedb_get_mapistoreURI(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_fid, &url, true);
-			mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, url, current_fid, &context_id, &backend_object);
-			/* if (emsmdbp_ctx->mstore_ctx */
-			/* mapistore_search_context_by_uri(emsmdbp_ctx->mstore_ctx, url, &context_id, &backend_object); */
+			/* shortcut: a native Freebusy Data folder (provisioned with no backend) stays native and gets no LocalFreebusy message; re-point it when a backend must own it. */
+			if (!url || !url[0]) goto freebusy_done;
+			if (mapistore_add_context(emsmdbp_ctx->mstore_ctx, username, url, current_fid, &context_id, &backend_object) != MAPISTORE_SUCCESS) goto error;
 		}
 
 		/* find out whether "LocalFreebusy" message exists */
@@ -876,6 +877,8 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 		}
 
 		mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+	freebusy_done:
+		;
 	}
 
 	// Update mailbox's locale

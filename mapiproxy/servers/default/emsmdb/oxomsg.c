@@ -320,6 +320,12 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetAddressTypes(TALLOC_CTX *mem_ctx,
 
 	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res, basedn,
                          LDB_SCOPE_SUBTREE, attrs, "CN=%x", emsmdbp_ctx->userLanguage);
+	/* Locales without a template of their own (en-GB, es-MX, ...) use the en-US one. */
+	if (ret == LDB_SUCCESS && res->count == 0 && emsmdbp_ctx->userLanguage != 0x409) {
+		talloc_free(res);
+		ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res, basedn,
+				 LDB_SCOPE_SUBTREE, attrs, "CN=409");
+	}
 	talloc_free(basedn);
 	/* If the search failed */
 	if (ret != LDB_SUCCESS) {

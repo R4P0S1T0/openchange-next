@@ -117,6 +117,9 @@ static int test_connect_without_samdb(const char *conf)
     "\ndisplayName: Name " nick "\nmailNickname: " nick "\nlegacyExchangeDN: " ORG_OU nick \
     "\nmsExchUserAccountControl: " control "\n\n"
 
+#define ORG_DN "CN=First Organization,CN=Microsoft Exchange,CN=Services,CN=Configuration,DC=openchange"
+#define TEMPLATES "CN=Address-Templates,CN=Addressing," ORG_DN
+
 /* Mirrors what openchange_directory_sync writes (python/openchange/directory.py). */
 static const char directory_ldif[] =
     "dn: @ATTRIBUTES\nlegacyExchangeDN: CASE_INSENSITIVE\nsAMAccountName: CASE_INSENSITIVE\n"
@@ -126,7 +129,12 @@ static const char directory_ldif[] =
     USER_LDIF("bob@example.invalid", "bob-0002", "0")
     USER_LDIF("carol@example.invalid", "carol-0003", "2")
     USER_LDIF("a*b@example.invalid", "a_b-0004", "0")
-    USER_LDIF("ab@example.invalid", "ab-0005", "0");
+    USER_LDIF("ab@example.invalid", "ab-0005", "0")
+    "dn: " ORG_DN "\nobjectClass: msExchOrganizationContainer\ncn: First Organization\n\n"
+    "dn: CN=Addressing," ORG_DN "\nobjectClass: container\n\n"
+    "dn: " TEMPLATES "\nobjectClass: container\nmsExchTemplateRDNs: 409\nmsExchTemplateRDNs: 416\n\n"
+    "dn: CN=409," TEMPLATES "\nobjectClass: container\ncn: 409\nmsExchTemplateRDNs: EX\nmsExchTemplateRDNs: SMTP\n\n"
+    "dn: CN=416," TEMPLATES "\nobjectClass: container\ncn: 416\nmsExchTemplateRDNs: EX\nmsExchTemplateRDNs: SMTP\n\n";
 
 static int seed_directory(const char *conf)
 {
@@ -307,6 +315,34 @@ static int test_create_native_subfolder(void)
     return 0;
 }
 
+/* RopGetAddressTypes for an Outlook locale with no template of its own (en-GB) uses the en-US one. */
+static int address_types(uint32_t lcid, enum MAPISTATUS *status, uint16_t *count)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct EcDoRpc_MAPI_REQ req = { .opnum = op_MAPI_AddressTypes };
+    struct EcDoRpc_MAPI_REPL repl = {0};
+    uint32_t handles[1] = { 0 };
+    uint16_t size = 0;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    session->ctx->userLanguage = lcid;
+    *status = EcDoRpc_RopGetAddressTypes(session, session->ctx, &req, &repl, handles, &size);
+    *count = repl.u.mapi_AddressTypes.cValues;
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_address_types_locale_fallback(void)
+{
+    enum MAPISTATUS status;
+    uint16_t count;
+    if (address_types(0x416, &status, &count)) return 1;
+    CHECK(status == MAPI_E_SUCCESS && count == 2);
+    if (address_types(0x809, &status, &count)) return 1;
+    CHECK(status == MAPI_E_SUCCESS && count == 2);
+    return 0;
+}
+
 /* A backend offering only the mail role: it must take over the native Inbox, keeping its folder ID. */
 static enum mapistore_error fake_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
                                                struct mapistore_contexts_list **list)
@@ -317,6 +353,7 @@ static enum mapistore_error fake_list_contexts(const char *user, struct indexing
     entry->name = talloc_strdup(entry, "Inbox");
     entry->main_folder = true;
     entry->role = MAPISTORE_MAIL_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
     *list = entry;
     return MAPISTORE_SUCCESS;
 }
@@ -340,6 +377,37 @@ static int test_provision_backend_takes_over_inbox(void)
     CHECK(memcmp(again, first_fids, sizeof again) == 0);
     CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", first_fids[5], &uri, true)
         == MAPI_E_SUCCESS && strcmp(uri, "fake://inbox/") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* A later backend offering the fallback role (as M3's may) must not break logon of a native mailbox. */
+static enum mapistore_error fake_fallback_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                                   struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "fakefb://fallback/");
+    entry->name = talloc_strdup(entry, "Fallback");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_FALLBACK_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_provision_fallback_after_native(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "fakefb"; fake.backend.description = "test"; fake.backend.namespace = "fakefb://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = fake_fallback_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
     oc_emsmdb_disconnect(session);
     return 0;
 }
@@ -462,8 +530,10 @@ int main(int argc, char **argv)
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
         test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
+        test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
-        test_provision_backend_takes_over_inbox() || test_connect_fails_closed() || test_execute()) return 1;
+        test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() ||
+        test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;
