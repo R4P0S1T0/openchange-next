@@ -25,7 +25,51 @@
 
 #include "mapiproxy/libmapistore/mapistore_errors.h"
 
+#include <stdbool.h>
+#include <stdint.h>
+#include "gen_ndr/exchange.h"
+
 struct mapistore_backend;
+struct mapistore_contexts_list;
+struct mapistore_connection_info;
+struct mapistore_property_data;
+struct indexing_context;
+struct shared_conn;
+struct imap_message_row;
+
+/* First field of every backend object, so get_properties can dispatch. */
+enum imap_object_type {
+	IMAP_OBJ_FOLDER = 0x494D4631,
+	IMAP_OBJ_TABLE,
+	IMAP_OBJ_MESSAGE,
+};
+
+struct imap_folder;
+
+struct imap_context {
+	char			*username;	/* the session's user; the only mailbox ever opened */
+	struct indexing_context	*ictx;
+	struct shared_conn	*shared;
+	struct imap_folder	*root;
+};
+
+struct imap_folder {
+	uint32_t		type;		/* IMAP_OBJ_FOLDER */
+	struct imap_context	*ctx;
+	char			*mailbox;	/* modified UTF-7, as on the wire */
+	uint64_t		fid;
+};
+
+struct imap_table {
+	uint32_t			type;	/* IMAP_OBJ_TABLE */
+	struct imap_folder		*folder;
+	enum mapistore_table_type	table_type;
+	uint16_t			column_count;
+	enum MAPITAGS			*columns;
+	uint32_t			row_count;
+	char				**children;	/* folder table */
+	struct imap_message_row		*rows;		/* message table */
+};
 
 /* Entry point dlopen()ed by mapistore_backend_init. */
 enum mapistore_error mapistore_init_backend(void);
@@ -33,7 +77,52 @@ enum mapistore_error mapistore_init_backend(void);
 /* Settings read by init(); NULL when the backend is not configured. */
 const struct imap_settings *imap_backend_settings(void);
 
+/* imap://<user>/<component>/.../ with each component %-encoded (see emsmdbp_compute_parent_uri). */
+char *imap_uri(TALLOC_CTX *mem_ctx, const char *username, const char *mailbox, char delimiter);
+int imap_uri_parse(TALLOC_CTX *mem_ctx, const char *uri, char delimiter, char **username, char **mailbox);
+/* The leaf of `mailbox`, modified UTF-7 decoded to UTF-8 (raw when malformed). */
+char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter);
+
+/* Replaces the settings (tests; NULL = not configured). */
+void imap_backend_set_settings(const struct imap_settings *settings);
+
 /* Sets the context, folder, table, message and properties operations. */
 void imap_backend_fill(struct mapistore_backend *backend);
+void imap_message_fill(struct mapistore_backend *backend);
+
+/* imap_folder.c */
+struct imap_conn *imap_context_conn(struct imap_context *ctx);
+char imap_context_delimiter(struct imap_context *ctx);
+enum mapistore_error imap_fmid_for_uri(struct imap_context *ctx, const char *uri, uint64_t *fmid);
+enum mapistore_error imap_list_contexts(const char *username, struct indexing_context *ictx, TALLOC_CTX *mem_ctx,
+					struct mapistore_contexts_list **listp);
+enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct mapistore_connection_info *conn_info,
+					 struct indexing_context *ictx, const char *uri, void **backend_object);
+enum mapistore_error imap_create_root_folder(const char *username, enum mapistore_context_role role, uint64_t fid,
+					     const char *name, TALLOC_CTX *mem_ctx, char **uri);
+enum mapistore_error imap_folder_open_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, void **child);
+enum mapistore_error imap_folder_get_child_count(void *folder, enum mapistore_table_type type, uint32_t *count);
+enum mapistore_error imap_folder_open_table(void *folder, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
+					    uint32_t handle_id, void **table, uint32_t *row_count);
+enum mapistore_error imap_table_set_columns(void *table, uint16_t count, enum MAPITAGS *columns);
+enum mapistore_error imap_table_get_row(void *table, TALLOC_CTX *mem_ctx, enum mapistore_query_type type,
+					uint32_t row, struct mapistore_property_data **data);
+enum mapistore_error imap_table_get_row_count(void *table, enum mapistore_query_type type, uint32_t *count);
+enum mapistore_error imap_folder_properties(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint16_t count,
+					    enum MAPITAGS *tags, struct mapistore_property_data *data);
+enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,
+					 struct mapistore_property_data *data);
+uint32_t *imap_long(TALLOC_CTX *mem_ctx, uint32_t v);
+uint8_t *imap_bool(TALLOC_CTX *mem_ctx, bool v);
+uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v);
+
+/* imap_message.c */
+enum mapistore_error imap_message_table_load(struct imap_table *t);
+enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
+				      struct mapistore_property_data *data);
+enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
+					      void **message);
+enum mapistore_error imap_message_properties(void *message, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,
+					     struct mapistore_property_data *data);
 
 #endif /* __IMAP_BACKEND_H__ */

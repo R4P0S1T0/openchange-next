@@ -31,6 +31,11 @@ _PUBLIC_ const struct imap_settings *imap_backend_settings(void)
 	return settings;
 }
 
+_PUBLIC_ void imap_backend_set_settings(const struct imap_settings *s)
+{
+	settings = (struct imap_settings *) s;
+}
+
 static enum mapistore_error imap_init(void)
 {
 	if (settings) {

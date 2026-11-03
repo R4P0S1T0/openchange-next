@@ -412,6 +412,36 @@ static int test_provision_fallback_after_native(void)
     return 0;
 }
 
+/* A backend that cannot reach its store (Dovecot down) must not fail logon or drop folders. */
+static bool store_down;
+static enum mapistore_error flaky_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                                struct mapistore_contexts_list **list)
+{
+    *list = NULL;
+    return store_down ? MAPISTORE_ERR_CONN_REFUSED : MAPISTORE_SUCCESS;
+}
+
+static int test_provision_store_down_keeps_folders(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t again[N_PROVISIONED + 1];
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "flaky"; fake.backend.description = "test"; fake.backend.namespace = "flaky://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = flaky_list_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    store_down = true;
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    store_down = false;
+    if (provisioned_fids(session->ctx, again)) return 1;
+    CHECK(memcmp(again, first_fids, sizeof again) == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 /* One private-mailbox RopLogon (MS-OXCSTOR 2.2.1.1.1) as Outlook sends it after Connect. */
 static DATA_BLOB logon_request(TALLOC_CTX *mem_ctx, const char *essdn)
 {
@@ -532,7 +562,7 @@ int main(int argc, char **argv)
         test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
         test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
-        test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() ||
+        test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

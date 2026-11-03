@@ -70,6 +70,10 @@ int imap_list(struct imap_conn *conn, TALLOC_CTX *mem_ctx, struct imap_mailbox *
 int imap_examine(struct imap_conn *conn, const char *name, struct imap_status *status);
 int imap_status(struct imap_conn *conn, const char *name, struct imap_status *status);
 
+char imap_conn_delimiter(struct imap_conn *conn);
+/* False once the server or the stream has gone away. */
+bool imap_conn_alive(struct imap_conn *conn);
+
 /* libetpan session of an open connection (for the fetch code). */
 struct mailimap *imap_conn_session(struct imap_conn *conn);
 

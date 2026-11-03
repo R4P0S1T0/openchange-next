@@ -11,6 +11,7 @@
  */
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,6 +186,194 @@ static int test_settings_password_file(void)
     return 0;
 }
 
+static int test_mailbox_name_round_trip(void)
+{
+    static const char *names[] = { "INBOX", "Projects/Sub", "a%b", "Caf&AOk-", "with space", "Quote\"d", "&-and", "x/y/z/w" };
+    size_t i;
+    char *user, *mailbox, *uri;
+    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+        uri = imap_uri(root, "alice@example.invalid", names[i], '/');
+        CHECK(uri != NULL && strncmp(uri, "imap://alice%40example.invalid/", 31) == 0 && uri[strlen(uri) - 1] == '/');
+        CHECK(imap_uri_parse(root, uri, '/', &user, &mailbox) == 0);
+        CHECK(strcmp(user, "alice@example.invalid") == 0 && strcmp(mailbox, names[i]) == 0);
+    }
+    /* One path segment per hierarchy level: the parent is the URI without its last segment. */
+    CHECK(strcmp(imap_uri(root, "u", "Projects/Sub", '/'), "imap://u/Projects/Sub/") == 0);
+    CHECK(strcmp(imap_uri(root, "u", "a%b", '/'), "imap://u/a%25b/") == 0);
+    CHECK(strcmp(imap_uri(root, "u", "P.Sub", '.'), "imap://u/P/Sub/") == 0);
+    CHECK(imap_uri_parse(root, "imap://u/P/Sub/", '.', &user, &mailbox) == 0 && strcmp(mailbox, "P.Sub") == 0);
+    CHECK(imap_uri_parse(root, "imap://u/a%2/", '/', &user, &mailbox) != 0);
+    CHECK(imap_uri_parse(root, "imap://u/a%00b/", '/', &user, &mailbox) != 0);
+    CHECK(imap_uri_parse(root, "imap://u//", '/', &user, &mailbox) != 0);
+    CHECK(imap_uri_parse(root, "sogo://u/INBOX/", '/', &user, &mailbox) != 0);
+    CHECK(strcmp(imap_display_name(root, "Caf&AOk-", '/'), "Caf\xc3\xa9") == 0);
+    CHECK(strcmp(imap_display_name(root, "Projects/Sub", '/'), "Sub") == 0);
+    CHECK(strcmp(imap_display_name(root, "&-and", '/'), "&and") == 0);
+    CHECK(strcmp(imap_display_name(root, "bad&AOk", '/'), "bad&AOk") == 0);   /* unterminated: shown raw */
+    CHECK(strcmp(imap_display_name(root, "&2D3eAA-", '/'), "\xf0\x9f\x98\x80") == 0); /* surrogate pair */
+    CHECK(strcmp(imap_display_name(root, "&2D0-", '/'), "&2D0-") == 0);       /* lone surrogate: shown raw */
+    return 0;
+}
+
+/* In-memory mapistore indexing: fmid <-> URI, as the TDB/MySQL backends keep it. */
+struct fake_index { uint64_t fmid[256]; char *uri[256]; size_t n; uint64_t next; };
+static struct fake_index fidx;
+static struct indexing_context ictx;
+
+static enum mapistore_error fi_get_fmid(struct indexing_context *c, const char *u, const char *uri, bool partial,
+                                        uint64_t *fmid, bool *soft)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (strcmp(fidx.uri[i], uri) == 0) { *fmid = fidx.fmid[i]; *soft = false; return MAPISTORE_SUCCESS; }
+    }
+    return MAPISTORE_ERR_NOT_FOUND;
+}
+static enum mapistore_error fi_get_uri(struct indexing_context *c, const char *u, TALLOC_CTX *mem, uint64_t fmid,
+                                       char **uri, bool *soft)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.fmid[i] == fmid) { *uri = talloc_strdup(mem, fidx.uri[i]); *soft = false; return MAPISTORE_SUCCESS; }
+    }
+    return MAPISTORE_ERR_NOT_FOUND;
+}
+static enum mapistore_error fi_add_fmid(struct indexing_context *c, const char *u, uint64_t fmid, const char *uri)
+{
+    if (fidx.n == 256) return MAPISTORE_ERR_NO_MEMORY;
+    fidx.fmid[fidx.n] = fmid;
+    fidx.uri[fidx.n++] = talloc_strdup(root, uri);
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error fi_allocate(struct indexing_context *c, const char *u, uint64_t *fmid)
+{
+    *fmid = fidx.next++;
+    return MAPISTORE_SUCCESS;
+}
+
+static struct mapistore_connection_info conn_info = { .username = "alice@example.invalid" };
+
+static void *context_for(const char *mailbox)
+{
+    void *folder = NULL;
+    char *uri = imap_uri(root, "alice@example.invalid", mailbox, '/');
+    if (!uri || imap_create_context(root, &conn_info, &ictx, uri, &folder) != MAPISTORE_SUCCESS) return NULL;
+    return folder;
+}
+
+static const struct mapistore_contexts_list *entry(const struct mapistore_contexts_list *l, const char *name)
+{
+    for (; l; l = l->next) {
+        if (strcmp(l->name, name) == 0) return l;
+    }
+    return NULL;
+}
+
+static int test_list_contexts_roles(void)
+{
+    struct mapistore_contexts_list *list = NULL;
+    const struct mapistore_contexts_list *e;
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_SUCCESS && list);
+    CHECK((e = entry(list, "Inbox")) && e->main_folder && e->role == MAPISTORE_MAIL_ROLE);
+    CHECK(strcmp(e->url, "imap://alice%40example.invalid/INBOX/") == 0);
+    CHECK((e = entry(list, "Sent")) && e->main_folder && e->role == MAPISTORE_SENTITEMS_ROLE);
+    CHECK((e = entry(list, "Drafts")) && e->main_folder && e->role == MAPISTORE_DRAFTS_ROLE);
+    CHECK((e = entry(list, "Trash")) && e->main_folder && e->role == MAPISTORE_DELETEDITEMS_ROLE);
+    CHECK((e = entry(list, "Junk")) && !e->main_folder && e->role == MAPISTORE_MAIL_ROLE);
+    CHECK((e = entry(list, "Projects")) && !e->main_folder && e->role == MAPISTORE_MAIL_ROLE);
+    CHECK(entry(list, "Sub") == NULL); /* subfolders come from the hierarchy table */
+    CHECK(list->prev != NULL);         /* a DLIST head: prev is the tail */
+    return 0;
+}
+
+static int test_uri_user_must_match(void)
+{
+    void *folder = NULL;
+    char *uri = imap_uri(root, "bob@example.invalid", "INBOX", '/');
+    CHECK(imap_create_context(root, &conn_info, &ictx, uri, &folder) == MAPISTORE_ERR_DENIED && folder == NULL);
+    CHECK(imap_create_context(root, &conn_info, &ictx, "imap://alice%40example.invalid/", &folder) != MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static enum MAPITAGS hierarchy_columns[] = { PidTagFolderId, PidTagDisplayName, PidTagContentCount,
+    PidTagSubfolders, PidTagContainerClass };
+
+static int test_hierarchy_table_rows(void)
+{
+    void *projects = context_for("Projects"), *table = NULL, *sub = NULL;
+    struct mapistore_property_data *row = NULL;
+    uint32_t count = 99;
+    uint64_t fid;
+    CHECK(projects != NULL);
+    CHECK(imap_folder_get_child_count(projects, MAPISTORE_FOLDER_TABLE, &count) == MAPISTORE_SUCCESS && count == 1);
+    CHECK(imap_folder_open_table(projects, root, MAPISTORE_FOLDER_TABLE, 1, &table, &count) == MAPISTORE_SUCCESS);
+    CHECK(count == 1);
+    CHECK(imap_table_set_columns(table, 5, hierarchy_columns) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &row) == MAPISTORE_SUCCESS);
+    CHECK(row[0].error == MAPISTORE_SUCCESS && (fid = *(uint64_t *) row[0].data) != 0);
+    CHECK(row[1].error == MAPISTORE_SUCCESS && strcmp(row[1].data, "Sub") == 0);
+    CHECK(row[2].error == MAPISTORE_SUCCESS && *(uint32_t *) row[2].data == 0);
+    CHECK(row[3].error == MAPISTORE_SUCCESS && *(uint8_t *) row[3].data == 0);
+    CHECK(row[4].error == MAPISTORE_SUCCESS && strcmp(row[4].data, "IPF.Note") == 0);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 1, &row) == MAPISTORE_ERR_NOT_FOUND);
+    /* The row's folder ID opens the child; the same ID is returned on the next listing. */
+    CHECK(imap_folder_open_folder(projects, root, fid, &sub) == MAPISTORE_SUCCESS && sub);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &row) == MAPISTORE_SUCCESS);
+    CHECK(*(uint64_t *) row[0].data == fid);
+    CHECK((fid & 0xFFFF) == 0x0001); /* replica ID 1, as mapistore_indexing_get_new_folderID_as_user */
+    /* A known folder outside the subtree (INBOX) does not open through Projects. */
+    {
+        struct imap_folder *inbox = context_for("INBOX");
+        void *outside = NULL;
+        CHECK(inbox != NULL);
+        CHECK(imap_folder_open_folder(projects, root, inbox->fid, &outside) == MAPISTORE_ERR_NOT_FOUND && !outside);
+    }
+    return 0;
+}
+
+static int test_folder_properties(void)
+{
+    void *inbox = context_for("INBOX"), *other = NULL, *fai = NULL;
+    enum MAPITAGS tags[] = { PidTagContentCount, PidTagContentUnreadCount, PidTagSubfolders, PidTagDisplayName,
+        PidTagAttachDataBinary };
+    struct mapistore_property_data data[5];
+    uint32_t count = 99;
+    CHECK(inbox != NULL);
+    CHECK(imap_properties_get(inbox, root, 5, tags, data) == MAPISTORE_SUCCESS);
+    CHECK(data[0].error == MAPISTORE_SUCCESS && *(uint32_t *) data[0].data == 2);
+    CHECK(data[1].error == MAPISTORE_SUCCESS && *(uint32_t *) data[1].data == 2);
+    CHECK(data[2].error == MAPISTORE_SUCCESS && *(uint8_t *) data[2].data == 0);
+    CHECK(data[3].error == MAPISTORE_SUCCESS && strcmp(data[3].data, "Inbox") == 0);
+    CHECK(data[4].error == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(imap_folder_get_child_count(inbox, MAPISTORE_FAI_TABLE, &count) == MAPISTORE_SUCCESS && count == 0);
+    CHECK(imap_folder_open_table(inbox, root, MAPISTORE_FAI_TABLE, 2, &fai, &count) == MAPISTORE_SUCCESS && count == 0);
+    /* A folder ID that is not below this folder does not open through it. */
+    CHECK(imap_folder_open_folder(inbox, root, 0xDEAD0001, &other) == MAPISTORE_ERR_NOT_FOUND);
+    return 0;
+}
+
+static int test_create_root_folder_not_found(void)
+{
+    char *uri = NULL;
+    /* NOT_FOUND lets emsmdb create the folder natively (emsmdbp_object_folder_commit_creation). */
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "New", root, &uri)
+        == MAPISTORE_ERR_NOT_FOUND && uri == NULL);
+    return 0;
+}
+
+static int test_imap_down_is_an_error(void)
+{
+    struct imap_settings down = tunnel;
+    struct mapistore_contexts_list *list = NULL;
+    down.tunnel = "/nonexistent/imap";
+    imap_backend_set_settings(&down);
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_ERR_CONN_REFUSED);
+    imap_backend_set_settings(NULL);
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_SUCCESS && list == NULL);
+    imap_backend_set_settings(&tunnel);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -198,10 +387,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <dovecot imap binary> <fixture dir>\n", argv[0]);
         return 2;
     }
+    signal(SIGPIPE, SIG_IGN); /* as openchange-mapihttpd (Rust ignores SIGPIPE) */
     root = talloc_new(NULL);
     fixture = argv[2];
+    ictx.get_fmid = fi_get_fmid;
+    ictx.get_uri = fi_get_uri;
+    ictx.add_fmid = fi_add_fmid;
+    ictx.allocate_fmid = fi_allocate;
+    fidx.next = 0x2000;
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
-        test_username_is_checked() || test_settings_password_file() || test_backend_registers()) {
+        test_username_is_checked() || test_settings_password_file() || test_mailbox_name_round_trip() ||
+        (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_uri_user_must_match() ||
+        test_hierarchy_table_rows() || test_folder_properties() || test_create_root_folder_not_found() ||
+        test_imap_down_is_an_error() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

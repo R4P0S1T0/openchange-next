@@ -39,6 +39,7 @@ extern char **environ;
 struct imap_conn {
 	mailimap	*imap;
 	pid_t		tunnel_pid;
+	char		delimiter;	/* hierarchy delimiter, from LIST "" "" */
 };
 
 /* Largest password file read; the master password is a random token. */
@@ -49,7 +50,8 @@ struct imap_conn {
 static int imap_conn_destructor(struct imap_conn *conn)
 {
 	if (conn->imap) {
-		if (conn->imap->imap_stream) {
+		/* Only a session that got past the greeting has someone to say LOGOUT to. */
+		if (conn->imap->imap_stream && conn->imap->imap_state >= MAILIMAP_STATE_AUTHENTICATED) {
 			mailimap_logout(conn->imap);
 		}
 		mailimap_free(conn->imap);
@@ -261,7 +263,33 @@ _PUBLIC_ struct imap_conn *imap_conn_open(TALLOC_CTX *mem_ctx, const struct imap
 		talloc_free(conn);
 		return NULL;
 	}
+	{
+		clist *root = NULL;
+
+		/* LIST "" "" names the hierarchy delimiter (RFC 3501 6.3.8); '/' when the server has none. */
+		conn->delimiter = '/';
+		if (mailimap_list(conn->imap, "", "", &root) == MAILIMAP_NO_ERROR && root && clist_begin(root)) {
+			const struct mailimap_mailbox_list *mb = clist_content(clist_begin(root));
+
+			if (mb && mb->mb_delimiter) {
+				conn->delimiter = mb->mb_delimiter;
+			}
+		}
+		if (root) {
+			mailimap_list_result_free(root);
+		}
+	}
 	return conn;
+}
+
+_PUBLIC_ char imap_conn_delimiter(struct imap_conn *conn)
+{
+	return conn ? conn->delimiter : '/';
+}
+
+_PUBLIC_ bool imap_conn_alive(struct imap_conn *conn)
+{
+	return conn && conn->imap && conn->imap->imap_stream;
 }
 
 _PUBLIC_ struct mailimap *imap_conn_session(struct imap_conn *conn)
