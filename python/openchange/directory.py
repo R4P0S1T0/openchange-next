@@ -101,7 +101,7 @@ def write_directory(path, org, ou, mailboxes):
             raise
         db.transaction_commit()
         del db
-        os.chmod(tmp, 0o640)
+        os.chmod(tmp, 0o660)  # tdb opens O_RDWR even for read-only LDB connects
         try:
             os.chown(tmp, -1, grp.getgrnam("openchange").gr_gid)
         except (KeyError, PermissionError):

@@ -82,8 +82,9 @@ openchange_directory_sync --mysql-defaults /etc/openchange/directory-my.cnf \
 
 The option file holds a `[client]` section for a user with `SELECT` on the two
 tables only; keep it mode 0600. `--org`/`--ou` must match the daemon's flags.
-The file is rebuilt in a temporary file and renamed, mode 0640 with group
-`openchange` when that group exists; a failed run leaves the previous file.
+The file is rebuilt in a temporary file and renamed, mode 0660 with group
+`openchange` when that group exists (ldb's tdb backend opens files read-write even
+for read-only connects); a failed run leaves the previous file.
 Run it from a systemd timer (60 seconds): a mailbox created, disabled or
 removed in PostfixAdmin reaches new Connects within one timer period, while
 existing MAPI/HTTP sessions live until their idle timeout.

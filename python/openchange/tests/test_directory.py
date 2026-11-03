@@ -107,6 +107,11 @@ class DirectoryTests(unittest.TestCase):
         self.assertIn("msExchAdminGroup", [str(v) for v in group["objectClass"]])
         self.assertEqual(str(group["msExchDefaultAdminGroup"]), "TRUE")
 
+    def test_file_mode(self):
+        # ldb's tdb backend opens O_RDWR even when asked for read-only: the service group needs write.
+        directory.write_directory(self.path, ORG, OU, [ALICE])
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o660)
+
     def test_display_name_fallback(self):
         directory.write_directory(self.path, ORG, OU, [Mailbox("carol@example.invalid", "  ", True)])
         self.assertEqual(str(self.user(self.open(), "carol@example.invalid")["displayName"]), "carol@example.invalid")
