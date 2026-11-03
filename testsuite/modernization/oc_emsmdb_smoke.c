@@ -255,6 +255,10 @@ static int test_provision_native_mailbox(void)
     CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
     CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
     if (provisioned_fids(session->ctx, first_fids)) return 1;
+    /* Mailbox folder IDs must stay above the public folder range, which openchangedb's MySQL backend
+       recognizes by the counter (is_public_folder_id); otherwise mailbox folders are stored as public. */
+    for (size_t i = 0; i <= N_PROVISIONED; i++)
+        CHECK(((first_fids[i] >> 56) | (((first_fids[i] >> 48) & 0xFF) << 8)) > 1000);
     /* Native folders have no mapistore URI until a backend offers their role. */
     CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", first_fids[5], &uri, true)
         != MAPI_E_SUCCESS || uri == NULL || uri[0] == '\0');

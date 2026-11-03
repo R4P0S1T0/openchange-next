@@ -25,6 +25,7 @@
 #include "../mapistore_private.h"
 #include "../mapistore_errors.h"
 #include "indexing_tdb.h"
+#include "mapiproxy/libmapiproxy/backends/openchangedb_mysql.h"
 #include "utils/dlinklist.h"
 #include "libmapi/libmapi_private.h"
 
@@ -437,6 +438,8 @@ static enum mapistore_error tdb_record_allocate_fmids(struct indexing_context *i
 		GlobalCount = strtoull(counter, NULL, 16);
 	}
 	free(data.dptr);
+	/* Counters up to MAX_PUBLIC_FOLDER_ID denote public folders (openchangedb MySQL); as in indexing_mysql. */
+	if (GlobalCount <= MAX_PUBLIC_FOLDER_ID) GlobalCount = MAX_PUBLIC_FOLDER_ID + 1;
 
 	/* Save and increment the counter (reserve) */
 	*fmidp = GlobalCount;
