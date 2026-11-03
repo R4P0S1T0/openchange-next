@@ -25,6 +25,9 @@ pub const SESSION_TYPES: &[&str] = &[
     "ResolveNames",
     "GetMatches",
     "SeekEntries",
+    "GetTemplateInfo",
+    "GetPropList",
+    "CompareMIds",
 ];
 
 pub struct State {
@@ -148,6 +151,7 @@ const NSPI_UNICODE_STRINGS: u32 = 0x4;
 /// LargePropertyTagArray limit (2.2.1.8).
 const MAX_TAGS: u32 = 100_000;
 const MAPI_E_TOO_COMPLEX: u32 = 0x8004_0117;
+const MAPI_E_NO_SUPPORT: u32 = 0x8004_0102;
 
 /// `count` items of `size` bytes each must fit in what is left: no allocation from a claimed count.
 fn check_count(r: &Reader<'_>, count: u32, size: usize) -> Result<usize, u32> {
@@ -237,6 +241,9 @@ pub fn handle<A: Authenticator, B: Backend>(
         "ResolveNames" => resolve_names(&gal, req.body, &srv.nspi.server_guid),
         "GetMatches" => get_matches(&gal, req.body, &srv.nspi.server_guid),
         "SeekEntries" => seek_entries(&gal, req.body, &srv.nspi.server_guid),
+        "GetTemplateInfo" => get_template_info(req.body),
+        "GetPropList" => get_prop_list(&gal, req.body),
+        "CompareMIds" => compare_mids(&gal, req.body),
         _ => Err(5),
     };
     match result {
@@ -537,6 +544,60 @@ fn seek_entries(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Res
     put(&mut out, &[u32::from(found.is_some())]);
     if let Some(e) = found {
         props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
+    }
+    Ok(out)
+}
+
+/// GetTemplateInfo (2.2.5.9): there are no display templates; the request is answered, not refused.
+fn get_template_info(body: &[u8]) -> Result<Vec<u8>, u32> {
+    let mut r = Reader(body);
+    r.u32()?; // Flags
+    r.u32()?; // DisplayType
+    if r.u8()? != 0 {
+        r.ascii_z()?;
+    }
+    let code_page = r.u32()?;
+    r.u32()?; // LocaleId
+    r.aux()?;
+    let mut out = Vec::new();
+    put(&mut out, &[0, MAPI_E_NO_SUPPORT, code_page]);
+    out.push(0); // HasRow
+    Ok(out)
+}
+
+/// GetPropList (2.2.5.6): the properties a mail user has.
+fn get_prop_list(gal: &gal::Snapshot, body: &[u8]) -> Result<Vec<u8>, u32> {
+    let mut r = Reader(body);
+    r.u32()?; // Flags
+    let mid = r.u32()?;
+    r.u32()?; // CodePage
+    r.aux()?;
+    let mut out = Vec::new();
+    if gal.by_mid(mid).is_none() {
+        put(&mut out, &[0, props::MAPI_E_NOT_FOUND]);
+        out.push(0);
+        return Ok(out);
+    }
+    put(&mut out, &[0, 0]);
+    out.push(0xFF);
+    push_tags(&mut out, props::USER_TAGS);
+    Ok(out)
+}
+
+/// CompareMinIds (2.2.5.3): the sign of position(MinimalId1) - position(MinimalId2).
+fn compare_mids(gal: &gal::Snapshot, body: &[u8]) -> Result<Vec<u8>, u32> {
+    let mut r = Reader(body);
+    r.u32()?;
+    read_opt_stat(&mut r)?;
+    let (a, b) = (r.u32()?, r.u32()?);
+    r.aux()?;
+    let mut out = Vec::new();
+    match (gal.position(a), gal.position(b)) {
+        (Some(x), Some(y)) => put(
+            &mut out,
+            &[0, 0, (x as i64 - y as i64).signum() as i32 as u32],
+        ),
+        _ => put(&mut out, &[0, props::MAPI_E_NOT_FOUND, 0]),
     }
     Ok(out)
 }
@@ -1034,5 +1095,59 @@ mod tests {
         past_end[47..51].copy_from_slice(&[b'z', 0, b'z', 0]);
         let body = call(&srv, &c, "SeekEntries", &past_end);
         assert_eq!(&body[..8], &le(&[0, 0x8004_010F])[..]);
+    }
+
+    #[test]
+    fn test_get_template_info_not_supported() {
+        let (srv, c) = bound(None);
+        let capture = fixture("nspi-gettemplateinfo-m365-16.0.19127.20800.bin");
+        let body = call(&srv, &c, "GetTemplateInfo", &capture);
+        assert_eq!(
+            body,
+            [&le(&[0, MAPI_E_NO_SUPPORT, 1252])[..], &[0], &le(&[0])].concat()
+        );
+        for n in 0..capture.len() {
+            assert_eq!(
+                run(handle(
+                    &srv,
+                    nspi("GetTemplateInfo", &capture[..n], Some(&c))
+                ))
+                .response_code,
+                12,
+                "length {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prop_list_and_compare_mids() {
+        let (srv, c) = bound(None);
+        let body = call(&srv, &c, "GetPropList", &le(&[0, 0x100011, 1252, 0]));
+        assert_eq!(
+            &body[..13],
+            &[
+                &le(&[0, 0])[..],
+                &[0xFF],
+                &le(&[props::USER_TAGS.len() as u32])
+            ]
+            .concat()[..]
+        );
+        assert_eq!(
+            &call(&srv, &c, "GetPropList", &le(&[0, 0xDEAD, 1252, 0]))[..8],
+            &le(&[0, 0x8004_010F])[..]
+        );
+        let cmp = |a: u32, b: u32| {
+            let mut body = le(&[0]);
+            body.push(0);
+            body.extend(le(&[a, b, 0]));
+            call(&srv, &c, "CompareMIds", &body)
+        };
+        assert_eq!(
+            cmp(0x100010, 0x100013),
+            [&le(&[0, 0, u32::MAX])[..], &le(&[0])].concat()
+        );
+        assert_eq!(cmp(0x100013, 0x100010)[8..12], le(&[1])[..]);
+        assert_eq!(cmp(0x100011, 0x100011)[8..12], le(&[0])[..]);
+        assert_eq!(cmp(0x100011, 0xDEAD)[4..8], le(&[0x8004_010F])[..]);
     }
 }
