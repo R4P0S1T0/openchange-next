@@ -10,7 +10,8 @@ Request bodies are capped at 16 MiB for MAPI/HTTP and 64 KiB for Autodiscover.
 The C backend deliberately rejects every Connect with `MAPI_E_LOGON_FAILED`
 until M2 verifies the Dovecot identity against PostfixAdmin and the LegacyDN.
 M1 therefore cannot create an Outlook profile or serve mailbox content.
-`/mapi/nspi/` supports PING only; Bind and other NSPI operations return code 5.
+`/mapi/nspi/` serves the address book from the directory snapshot (see
+"Address book (M2b)" below).
 
 ## Build and checks
 
@@ -48,6 +49,7 @@ fixture and the native library directories in `LD_LIBRARY_PATH` (see Makefile).
 | `--session-idle-seconds SECONDS` | `1800`; positive idle timeout |
 | `--notification-wait-seconds SECONDS` | `300`; positive wait with EventPending 0 |
 | `--smb-conf PATH` | Required with `c-backend`; native provider configuration |
+| `--directory-snapshot PATH` | `/var/lib/openchange/directory.tsv`; GAL for `/mapi/nspi/` |
 
 Autodiscover assumes Dovecot returns a canonical full email address. Verify
 that in the lab. It returns only the authenticated user's settings, requires
@@ -55,7 +57,8 @@ positive `X-MapiHttpCapability`, rejects DOCTYPE, and ignores session cookies.
 The mailbox GUID is a stable version 8 UUID derived from the lower-cased email.
 M2 will replace the temporary identity strings with directory data.
 
-Sessions use a random `MapiContext` cookie (`Secure; HttpOnly; Path=/mapi/`)
+Sessions use a random `MapiContext` cookie (`Secure; HttpOnly`, `Path=/mapi/emsmdb/`
+or `/mapi/nspi/`: each endpoint has its own Session Contexts)
 and a keyed credential hash. PING refreshes their idle clock. Idle sessions
 are swept every 60 seconds; Disconnect releases the backend handle. A restart
 invalidates all sessions. Dovecot exchanges time out after 10 seconds, with
@@ -204,6 +207,27 @@ are supported; those pruned targets are not. Audit requires a separately
 installed cargo-audit and network access to the advisory database. The CI
 Rust job records its own audit result; a local offline build is no audit.
 
+## Address book (M2b)
+
+`openchange_directory_sync` also writes `directory.tsv` beside the LDB (or
+`--snapshot PATH`): one active mailbox per line, lower-case address, TAB,
+display name; mode 0640, group `openchange`, replaced atomically. The daemon
+reloads it when its content changes. It is the Global Address List: one
+container, mail users only, sorted by display name. Nicknames and LegacyDNs
+come from the same functions as Autodiscover and the C directory.
+
+Request types served: Bind, Unbind, GetSpecialTable (the GAL row), DNToMId,
+QueryRows, GetProps, GetPropList, QueryColumns, UpdateStat, CompareMIds,
+ResolveNames, SeekEntries (display name), GetMatches (the CurrentRec object,
+or a property/content restriction on ANR, display name, SMTP address or
+account, matched by prefix) and GetTemplateInfo (answers MAPI_E_NO_SUPPORT:
+no display templates). Other request types (ModProps, ModLinkAtt,
+ResortRestriction, GetMailboxUrl, GetAddressBookUrl) still return code 5;
+Outlook 16.0.19127 did not send them in the lab. Minimal Entry IDs carry the
+snapshot generation, so a MId from an older snapshot never names another
+mailbox. Names, addresses and search strings are never logged. The bodies
+Outlook sent are fixtures in `testsuite/modernization/mapihttp/`.
+
 ## Validation limits
 
 Unit tests use fake backends, in-memory HTTP streams and a local fake Dovecot
@@ -212,7 +236,7 @@ production mailbox or network server. The sanitized Task 0 captures test
 parsing; they are not captures of this Rust service.
 
 Not validated against this implementation: real Dovecot, nginx, TLS, any
-Outlook version, Interop-TestSuites, NSPI operations beyond PING, chunked or
+Outlook version, Interop-TestSuites, NSPI request types Outlook did not send, chunked or
 PENDING responses, successful C Connect, profile creation, mailbox content,
 or a complete SamDB-free deployment. Task 0 observed only classic Microsoft
 365 Outlook 16.0.19127.20800; Outlook 2016/2019/2013 SP1 still need lab runs.

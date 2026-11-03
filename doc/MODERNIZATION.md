@@ -284,6 +284,33 @@ Known gaps, not blocking the open:
 - Many `Unsupported property tag` notices from openchangedb (warnings only).
 - NSPI is still Bind-only (M2b); Outlook waits about 90 s on it before Connect.
 
+## M2b lab result (2026-11-03)
+
+Branch `m2b` (plan `docs/plans/2026-11-03-m2b-nspi.md`): NSPI over MAPI/HTTP in
+the Rust daemon, from the directory snapshot. `cargo test` (110 tests),
+`cargo clippy -D warnings`, the Python directory suite and `make
+check-oc-emsmdb check-mapihttp` passed on the VM. Outlook 16.0.19127 with the
+lab mailbox: the Address Book ("Global Address List") lists the PostfixAdmin
+mailboxes sorted by name, "Name only" search positions on the typed name
+(SeekEntries), Check Names resolves `teste` (ResolveNames), the People pane
+search finds "Ana" (GetMatches with an ANR restriction), and every NSPI
+request in the nginx log answered X-ResponseCode 0.
+
+Found during the run: the `MapiContext` cookie had `Path=/mapi/`, so the NSPI
+cookie would have overwritten the EMSMDB one (now scoped per endpoint); the
+daemon's make rule ignored source files in subdirectories; GetMatches
+restrictions carry a presence byte before the value (as the RPC pointer).
+
+Known gaps:
+
+- Every daemon restart drops the Session Contexts; Outlook then shows an
+  error or a long "Loading profile" until it binds again.
+- Before its first request after a restart Outlook waited up to 2 minutes
+  with no traffic to the VM (client side; possibly the Microsoft 365
+  endpoint lookup, not verified).
+- No display templates (details dialog), no distribution lists, no
+  "More columns" searches beyond ANR/display name/address/account.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
