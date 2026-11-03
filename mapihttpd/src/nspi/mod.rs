@@ -23,6 +23,7 @@ pub const SESSION_TYPES: &[&str] = &[
     "QueryColumns",
     "UpdateStat",
     "ResolveNames",
+    "GetMatches",
 ];
 
 pub struct State {
@@ -145,6 +146,7 @@ const EC_WARN_WITH_ERRORS: u32 = 0x0004_0380;
 const NSPI_UNICODE_STRINGS: u32 = 0x4;
 /// LargePropertyTagArray limit (2.2.1.8).
 const MAX_TAGS: u32 = 100_000;
+const MAPI_E_TOO_COMPLEX: u32 = 0x8004_0117;
 
 /// `count` items of `size` bytes each must fit in what is left: no allocation from a claimed count.
 fn check_count(r: &Reader<'_>, count: u32, size: usize) -> Result<usize, u32> {
@@ -232,6 +234,7 @@ pub fn handle<A: Authenticator, B: Backend>(
         "QueryColumns" => query_columns(req.body),
         "UpdateStat" => update_stat(&gal, req.body),
         "ResolveNames" => resolve_names(&gal, req.body, &srv.nspi.server_guid),
+        "GetMatches" => get_matches(&gal, req.body, &srv.nspi.server_guid),
         _ => Err(5),
     };
     match result {
@@ -415,6 +418,57 @@ fn resolve_names(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Re
     push_tags(&mut out, &columns);
     put(&mut out, &[resolved.len() as u32]);
     for e in resolved {
+        props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
+    }
+    Ok(out)
+}
+
+/// GetMatches (2.2.5.5) without a filter: the CurrentRec object, as Outlook asks for a user's details. Filters (searches) answer MAPI_E_TOO_COMPLEX until their layout is captured.
+fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Result<Vec<u8>, u32> {
+    let mut r = Reader(body);
+    r.u32()?;
+    let stat = read_opt_stat(&mut r)?.unwrap_or_default();
+    if r.u8()? != 0 {
+        let count = r.u32()?;
+        read_u32s(&mut r, count)?;
+    }
+    r.u32()?; // InterfaceOptionFlags
+    let has_filter = r.u8()? != 0;
+    if has_filter {
+        let mut out = Vec::new();
+        put(&mut out, &[0, MAPI_E_TOO_COMPLEX]);
+        out.extend_from_slice(&[0, 0]); // HasState, HasMinimalIds
+        out.push(0); // HasColumnsAndRows
+        return Ok(out);
+    }
+    if r.u8()? != 0 {
+        r.take(16 + 4)?; // PropertyNameGuid, PropertyNameId
+    }
+    let row_count = r.u32()?;
+    let columns = read_opt_tags(&mut r)?.unwrap_or_else(|| props::USER_TAGS.to_vec());
+    r.aux()?;
+    // No filter: the table is the CurrentRec object alone (MS-OXNSPI 3.1.4.1.10).
+    let rows: Vec<&gal::Entry> = gal
+        .by_mid(stat.current_rec)
+        .into_iter()
+        .take(row_count as usize)
+        .collect();
+    let ctx = props::Ctx {
+        flags: 0,
+        server_guid,
+    };
+    let mut out = Vec::new();
+    put(&mut out, &[0, 0]);
+    push_stat(&mut out, &stat);
+    out.push(0xFF);
+    put(&mut out, &[rows.len() as u32]);
+    for e in &rows {
+        put(&mut out, &[e.mid]);
+    }
+    out.push(0xFF);
+    push_tags(&mut out, &columns);
+    put(&mut out, &[rows.len() as u32]);
+    for e in rows {
         props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
     }
     Ok(out)
@@ -854,5 +908,38 @@ mod tests {
                 "length {n}"
             );
         }
+    }
+
+    #[test]
+    fn test_get_matches_from_capture() {
+        let (srv, c) = bound(None);
+        let capture = fixture("nspi-getmatches-m365-16.0.19127.20800.bin");
+        let body = call(&srv, &c, "GetMatches", &capture);
+        assert_eq!(&body[..8], &[0; 8]);
+        let mut r = Reader(&body[8..]);
+        let st = read_opt_stat(&mut r).unwrap().unwrap();
+        assert_eq!(st.current_rec, 0x100013, "the STAT comes back unchanged");
+        assert_eq!(
+            (r.u8().unwrap(), r.u32().unwrap(), r.u32().unwrap()),
+            (0xFF, 1, 0x100013)
+        );
+        assert_eq!(
+            (r.u8().unwrap(), r.u32().unwrap()),
+            (0xFF, 15),
+            "the 15 columns asked for"
+        );
+        for n in 0..capture.len() {
+            assert_eq!(
+                run(handle(&srv, nspi("GetMatches", &capture[..n], Some(&c)))).response_code,
+                12,
+                "length {n}"
+            );
+        }
+        let mut filtered = capture.clone();
+        filtered[46] = 0xFF;
+        assert_eq!(
+            &call(&srv, &c, "GetMatches", &filtered)[..8],
+            &le(&[0, MAPI_E_TOO_COMPLEX])[..]
+        );
     }
 }
