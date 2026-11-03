@@ -20,6 +20,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <iconv.h>
 
 #include <libetpan/libetpan.h>
 
@@ -35,7 +36,8 @@
 #define MAX_HEADER_TEXT 4096
 
 
-/* Replaces every byte sequence that is not well-formed UTF-8 by U+FFFD, and controls by spaces. */
+/* Replaces every byte sequence that is not well-formed UTF-8 by U+FFFD, and controls other than
+   tab, CR and LF by spaces. */
 _PUBLIC_ char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len)
 {
 	const unsigned char	*p = (const unsigned char *) s;
@@ -56,7 +58,7 @@ _PUBLIC_ char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len)
 		size_t k;
 
 		if (need == 0) {
-			out[n++] = (c < 0x20 || c == 0x7F) ? ' ' : c;
+			out[n++] = ((c < 0x20 && c != '\t' && c != '\r' && c != '\n') || c == 0x7F) ? ' ' : c;
 			i++;
 			continue;
 		}
@@ -90,7 +92,8 @@ _PUBLIC_ char *imap_decode_header(TALLOC_CTX *mem_ctx, const char *raw)
 	if (!raw) {
 		return NULL;
 	}
-	if (mailmime_encoded_phrase_parse("utf-8", raw, strlen(raw), &idx, "utf-8", &decoded) == MAILIMF_NO_ERROR && decoded) {
+	/* Only encoded words need decoding; libetpan's conversion drops invalid raw bytes silently. */
+	if (strstr(raw, "=?") && mailmime_encoded_phrase_parse("utf-8", raw, strlen(raw), &idx, "utf-8", &decoded) == MAILIMF_NO_ERROR && decoded) {
 		out = imap_utf8_clean(mem_ctx, decoded, strlen(decoded));
 		free(decoded);
 		return out;
@@ -511,6 +514,31 @@ _PUBLIC_ enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX 
 /* Attachments kept per message. */
 #define MAX_ATTACHMENTS 256
 
+/* `len` bytes in `charset` as UTF-8 (glibc iconv; libetpan's charconv leaks on unknown charsets).
+   NULL when the charset is unknown or the text does not convert. */
+static char *to_utf8(TALLOC_CTX *mem_ctx, const char *charset, const char *in, size_t len)
+{
+	iconv_t	cd = iconv_open("UTF-8", charset);
+	char	*out, *op, *ip = (char *) in;
+	size_t	il = len, ol, size;
+
+	if (cd == (iconv_t) -1) {
+		return NULL;
+	}
+	size = len * 4 + 1; /* any charset to UTF-8 grows at most 4x per input byte */
+	out = talloc_array(mem_ctx, char, size);
+	op = out;
+	ol = size - 1;
+	if (!out || iconv(cd, &ip, &il, &op, &ol) == (size_t) -1) {
+		iconv_close(cd);
+		talloc_free(out);
+		return NULL;
+	}
+	iconv_close(cd);
+	*op = '\0';
+	return out;
+}
+
 /* A part's bytes after its Content-Transfer-Encoding, as UTF-8 text when `text` is set. */
 static char *part_content(TALLOC_CTX *mem_ctx, struct mailmime *mime, const struct mailmime_single_fields *sf,
 			  bool text, size_t *lenp)
@@ -537,13 +565,10 @@ static char *part_content(TALLOC_CTX *mem_ctx, struct mailmime *mime, const stru
 		return out;
 	}
 	/* Unknown or broken charsets fall back to the raw bytes, cleaned as UTF-8. */
-	if (sf->fld_content_charset && strcasecmp(sf->fld_content_charset, "utf-8") != 0 &&
-	    charconv("utf-8", sf->fld_content_charset, decoded, len, &converted) == MAIL_CHARCONV_NO_ERROR && converted) {
-		out = imap_utf8_clean(mem_ctx, converted, strlen(converted));
-		charconv_buffer_free(converted);
-	} else {
-		out = imap_utf8_clean(mem_ctx, decoded, len);
-	}
+	converted = (sf->fld_content_charset && strcasecmp(sf->fld_content_charset, "utf-8") != 0)
+		? to_utf8(mem_ctx, sf->fld_content_charset, decoded, len) : NULL;
+	out = converted ? imap_utf8_clean(mem_ctx, converted, strlen(converted)) : imap_utf8_clean(mem_ctx, decoded, len);
+	talloc_free(converted);
 	mailmime_decoded_part_free(decoded);
 	*lenp = out ? strlen(out) : 0;
 	return out;

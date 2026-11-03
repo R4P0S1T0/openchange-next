@@ -615,9 +615,10 @@ static int test_open_html_message_and_attachment(void)
     uint32_t count = 0;
     if (open_message("Projects", 1, &msg, d)) return 1;
     bin = d[1].data;
-    CHECK(d[1].error == 0 && bin->cb == strlen("<p>See <b>attached</b>.</p>\r\n"));
+    /* RFC 2046: the CRLF before a boundary belongs to the boundary, not to the part. */
+    CHECK(d[1].error == 0 && bin->cb == strlen("<p>See <b>attached</b>.</p>"));
     CHECK(memcmp(bin->lpb, "<p>See <b>attached</b>.</p>", 27) == 0);
-    CHECK(d[0].error == 0 && strcmp(d[0].data, "See attached.\r\n") == 0); /* text from the HTML */
+    CHECK(d[0].error == 0 && strcmp(d[0].data, "See attached.") == 0); /* text from the HTML */
     CHECK(*(uint32_t *) d[2].data == 3 && *(uint32_t *) d[4].data == 65001); /* HTML, UTF-8 */
     CHECK(imap_message_get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count == 1);
     CHECK(imap_table_set_columns(table, 5, att_columns) == MAPISTORE_SUCCESS);
