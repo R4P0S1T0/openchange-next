@@ -284,6 +284,24 @@ static enum mapistore_error emsmdbp_object_folder_commit_creation(struct emsmdbp
 	owner = emsmdbp_get_owner(new_folder);
 
 	ret = mapistore_create_root_folder(owner, role, fid, value->value.lpszW, mem_ctx, &mapistore_uri);
+	if (ret == MAPISTORE_ERR_NOT_FOUND) {
+		/* No backend serves this role: keep the folder native in openchangedb, like provisioning does. */
+		parent_fid = (new_folder->parent_object->type == EMSMDBP_OBJECT_MAILBOX)
+			? new_folder->parent_object->object.mailbox->folderID
+			: new_folder->parent_object->object.folder->folderID;
+		value = get_SPropValue_SRow(new_folder->object.folder->postponed_props, PidTagChangeNumber);
+		retval = openchangedb_create_folder(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parent_fid, fid, value->value.d, NULL, -1);
+		if (retval == MAPI_E_SUCCESS) {
+			retval = openchangedb_set_folder_properties(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, fid, new_folder->object.folder->postponed_props);
+		}
+		ret = mapi_error_to_mapistore(retval);
+		if (ret == MAPISTORE_SUCCESS) {
+			new_folder->object.folder->mapistore_root = false;
+			talloc_unlink(new_folder, new_folder->object.folder->postponed_props);
+			new_folder->object.folder->postponed_props = NULL;
+		}
+		goto end;
+	}
 	if (ret != MAPISTORE_SUCCESS) {
 		goto end;
 	}

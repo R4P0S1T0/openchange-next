@@ -1111,6 +1111,7 @@ provision-install: python-install
 	$(INSTALL) -m 0755 setup/openchange_newuser $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_neworganization $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_group $(DESTDIR)$(sbindir)/
+	$(INSTALL) -m 0755 setup/openchange_directory_sync $(DESTDIR)$(sbindir)/
 	$(INSTALL) -d $(DESTDIR)$(datadir)/setup/AD
 	$(INSTALL) -m 0644 setup/AD/oc_provision* $(DESTDIR)$(datadir)/setup/AD/
 	$(INSTALL) -m 0644 setup/AD/prefixMap.txt $(DESTDIR)$(datadir)/setup/AD/
@@ -1122,7 +1123,7 @@ provision-install: python-install
 
 provision-uninstall: python-uninstall
 	rm -f $(DESTDIR)$(sbindir)/openchange_provision $(DESTDIR)$(sbindir)/openchange_migrate
-	rm -f $(DESTDIR)$(sbindir)/openchange_newuser $(DESTDIR)$(sbindir)/openchange_neworganization $(DESTDIR)$(sbindir)/openchange_group
+	rm -f $(DESTDIR)$(sbindir)/openchange_newuser $(DESTDIR)$(sbindir)/openchange_neworganization $(DESTDIR)$(sbindir)/openchange_group $(DESTDIR)$(sbindir)/openchange_directory_sync
 	rm -rf $(DESTDIR)$(datadir)/setup/AD
 	rm -rf $(DESTDIR)$(datadir)/setup/openchangedb
 
@@ -1824,7 +1825,7 @@ check-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb-backend
 
-bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/emsmdb_execute.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/emsmdb_execute.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/default/emsmdb/emsmdbp_identity.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=talloc_strdup mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
 
@@ -1836,24 +1837,27 @@ OC_EMSMDB_TEST = bin/oc-emsmdb-test
 
 # liboc_emsmdb must not need a DCE/RPC call; only libmapiproxy may pull libdcerpc-server.
 .PHONY: check-oc-emsmdb
-check-oc-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
+check-oc-emsmdb: setup/mapistore/mapistore_namedprops.ldif libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 	! nm -D --undefined-only mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) | grep dcesrv_
+	rm -f $(OC_EMSMDB_TEST)/directory.ldb $(OC_EMSMDB_TEST)/private/openchange.ldb
+	PYTHONPATH=python python3 testsuite/modernization/oc_emsmdb_openchangedb.py $(OC_EMSMDB_TEST)/private/openchange.ldb > /dev/null
 	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 
-bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
+bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/default/emsmdb/emsmdbp_identity.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -Wl,--wrap=emsmdbp_init mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) $(EMSMDB_PROVIDER_LIBS) $(LIBS) $(SAMBASERVER_LIBS)
 
-# SamDB points at a missing directory, so connect fails before any directory lookup.
+# The directory LDB does not exist until the test creates it, so the first connects fail before any lookup.
 $(OC_EMSMDB_TEST)/smb.conf:
 	mkdir -p $(OC_EMSMDB_TEST)/private
-	printf '[global]\n\trealm = example.invalid\n\tprivate dir = %s\n\tmapiproxy:openchangedb = ldb://\n\tdcerpc_mapiproxy:samdb_url = tdb://%s/missing/sam.ldb\n' \
-		'$(CURDIR)/$(OC_EMSMDB_TEST)/private' '$(CURDIR)/$(OC_EMSMDB_TEST)' > $@
+	rm -f $(OC_EMSMDB_TEST)/directory.ldb
+	printf '[global]\n\trealm = example.invalid\n\tprivate dir = %s\n\tmapiproxy:openchangedb = ldb://\n\tdcerpc_mapiproxy:samdb_url = tdb://%s/missing/sam.ldb\n\tmapiproxy:directory_url = tdb://%s/directory.ldb\n\tnamedproperties:ldb_url = %s/private/named_properties.ldb\n\tnamedproperties:ldb_data = %s/setup/mapistore\n' \
+		'$(CURDIR)/$(OC_EMSMDB_TEST)/private' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)' > $@
 
 clean::
 	rm -rf $(OC_EMSMDB_TEST)
 
-bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs) $(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) libmapistore.$(SHLIBEXT).$(LIBMAPISTORE_SO_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION))
+bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs mapihttpd/src/*/*.rs) $(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) libmapistore.$(SHLIBEXT).$(LIBMAPISTORE_SO_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION))
 	LD_LIBRARY_PATH=$(CURDIR):$(CURDIR)/mapiproxy:$(CURDIR)/mapiproxy/servers:$(LD_LIBRARY_PATH) \
 		$(if $(OC_MAPIHTTP),OC_EMSMDB_LIBDIR=$(CURDIR)/mapiproxy/servers) $(CARGO) build --offline --locked --release $(if $(OC_MAPIHTTP),--features c-backend)
 	mkdir -p bin

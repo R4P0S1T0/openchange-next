@@ -15,7 +15,7 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='openchange-cli-test-') as directory:
             for name in ('openchange_provision', 'openchange_migrate',
                          'openchange_group', 'openchange_newuser',
-                         'openchange_neworganization'):
+                         'openchange_neworganization', 'openchange_directory_sync'):
                 with self.subTest(command=name):
                     result = subprocess.run([sys.executable, str(ROOT / 'setup' / name), '--help'],
                                             cwd=directory, capture_output=True,

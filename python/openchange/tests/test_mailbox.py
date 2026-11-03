@@ -69,3 +69,31 @@ class MailboxFIDTests(unittest.TestCase):
 
     def test_simple(self):
         self.assertEqual(0x7816000000012345, int(gen_mailbox_folder_fid(0x1678, 0x12345)))
+
+
+class MysqlDatabaseNameTests(unittest.TestCase):
+    """mysqlclient's escape_string returns bytes on Python 3; DDL must use the plain name."""
+
+    def setUp(self):
+        from openchange.mailbox import OpenChangeDBWithMysqlBackend
+
+        class FakeDb:
+            def escape_string(self, value):
+                return value.encode() if isinstance(value, str) else value
+
+            def select_db(self, name):
+                pass
+
+        self.db = OpenChangeDBWithMysqlBackend.__new__(OpenChangeDBWithMysqlBackend)
+        self.db.db = FakeDb()
+        self.db.db_name = "openchange"
+        self.sql = []
+        self.db._execute = lambda sql, params=(): self.sql.append(sql)
+
+    def test_create_database_uses_plain_name(self):
+        self.db._create_database()
+        self.assertEqual(self.sql, ["DROP DATABASE IF EXISTS `openchange`", "CREATE DATABASE `openchange`"])
+
+    def test_remove_uses_plain_name(self):
+        self.db.remove()
+        self.assertEqual(self.sql, ["DROP DATABASE `openchange`"])

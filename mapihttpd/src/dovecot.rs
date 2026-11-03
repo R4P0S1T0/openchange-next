@@ -299,6 +299,10 @@ mod tests {
                     service: "openchange".into(),
                 },
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+                nspi: crate::nspi::State::new(
+                    Duration::from_secs(1800),
+                    crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot()),
+                ),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
                 autodiscover: crate::request::tests::settings(),
@@ -335,6 +339,10 @@ mod tests {
                     service: "openchange".into(),
                 },
                 sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+                nspi: crate::nspi::State::new(
+                    Duration::from_secs(1800),
+                    crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot()),
+                ),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
                 autodiscover: crate::request::tests::settings(),
@@ -356,6 +364,10 @@ mod tests {
                 service: "openchange".into(),
             },
             sessions: crate::session::SessionTable::new(Duration::from_secs(1800)),
+            nspi: crate::nspi::State::new(
+                Duration::from_secs(1800),
+                crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot()),
+            ),
             backend: crate::backend::FakeBackend::default(),
             notification_wait: Duration::from_secs(300),
             autodiscover: crate::request::tests::settings(),

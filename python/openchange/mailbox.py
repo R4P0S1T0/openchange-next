@@ -383,16 +383,16 @@ class OpenChangeDBWithMysqlBackend(MysqlBackendMixin):
     def _create_database(self):
         if '`' in self.db_name:
             raise Exception("Database name must not have '`' on its name")
-        self._execute("DROP DATABASE IF EXISTS `%s`" %
-                      self.db.escape_string(self.db_name))
-        self._execute("CREATE DATABASE `%s`" %
-                      self.db.escape_string(self.db_name))
+        # Backticks are rejected above; escape_string returns bytes on Python 3.
+        self._execute("DROP DATABASE IF EXISTS `%s`" % self.db_name)
+        self._execute("CREATE DATABASE `%s`" % self.db_name)
         self.db.select_db(self.db_name)
 
     def remove(self):
         """Remove an existing OpenChangeDB."""
-        self._execute("DROP DATABASE `%s`" %
-                      self.db.escape_string(self.db_name))
+        if '`' in self.db_name:
+            raise Exception("Database name must not have '`' on its name")
+        self._execute("DROP DATABASE `%s`" % self.db_name)
 
     def setup(self, names=None):
         self._create_database()

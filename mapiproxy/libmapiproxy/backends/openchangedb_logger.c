@@ -659,9 +659,10 @@ static enum MAPISTATUS get_indexing_url(struct openchangedb_context *self,
 	OC_DEBUG(priv_data->log_level, "%s[in]: username=[%s]",
 				     priv_data->log_prefix, username);
 	retval = priv_data->backend->get_indexing_url(priv_data->backend, username, indexing_url);
+	/* indexing URLs may carry a database password: log only whether one is set. */
 	OC_DEBUG(priv_data->log_level, "%s[out]: retval=[%s], indexing_url=[%s]",
 				     priv_data->log_prefix, mapi_get_errstr(retval),
-				     *indexing_url);
+				     (indexing_url && *indexing_url) ? "set" : "unset");
 
 	return retval;
 }

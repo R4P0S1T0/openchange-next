@@ -256,7 +256,7 @@ _PUBLIC_ bool mapistore_backend_run_init(init_backend_fn *fns)
 	}
 
 	for (i = 0; fns[i]; i++) {
-		ret &= (bool)fns[i]();
+		ret &= (fns[i]() == MAPISTORE_SUCCESS);  /* init functions return 0 on success */
 	}
 
 	return ret;
@@ -285,8 +285,9 @@ enum mapistore_error mapistore_backend_init(TALLOC_CTX *mem_ctx, const char *pat
 	talloc_free(ret);
 
 	if (num_backends == 0) {
-		OC_DEBUG(0, "No mapistore backends available (using backend path '%s').", path);
-		return MAPISTORE_ERR_BACKEND_INIT;
+		/* A session without backends can still connect; mailbox provisioning reports the missing store. */
+		OC_DEBUG(1, "No mapistore backends available (using backend path '%s').", path);
+		return MAPISTORE_SUCCESS;
 	}
 
 	for (i = 0; i < num_backends; i++) {
@@ -300,7 +301,7 @@ enum mapistore_error mapistore_backend_init(TALLOC_CTX *mem_ctx, const char *pat
 		}
 	}
 
-	return (status != true) ? MAPISTORE_SUCCESS : MAPISTORE_ERR_BACKEND_INIT;
+	return status ? MAPISTORE_SUCCESS : MAPISTORE_ERR_BACKEND_INIT;
 }
 
 /**

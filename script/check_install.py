@@ -27,7 +27,7 @@ MODULES = tuple(name + '.so' for name in (
 ))
 COMMANDS = ('mapiprofile', 'openchangeclient', 'openchangepfadmin', 'mapipropsdump')
 ADMIN = ('openchange_provision', 'openchange_migrate', 'openchange_newuser',
-         'openchange_neworganization', 'openchange_group')
+         'openchange_neworganization', 'openchange_group', 'openchange_directory_sync')
 
 
 def digest(path):

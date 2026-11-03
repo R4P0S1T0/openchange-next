@@ -3,7 +3,7 @@
  <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
   <User>
    <DisplayName>alice@example.invalid</DisplayName>
-   <LegacyDN>/o=First Organization/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=alice</LegacyDN>
+   <LegacyDN>/o=First Organization/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=alice-78d66dbf</LegacyDN>
    <AutoDiscoverSMTPAddress>alice@example.invalid</AutoDiscoverSMTPAddress>
    <DeploymentId>78d66dbf-bec6-8c3f-b4aa-150451ce5c0c</DeploymentId>
   </User>

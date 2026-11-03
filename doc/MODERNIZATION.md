@@ -220,6 +220,97 @@ Still open for M1: Outlook 2016 or 2019 (and 2013 SP1 if licensed), the
 from the same client never reached the VM; the next one did. The cause was not
 confirmed; the client proxy issue in [MAPIHTTP.md](MAPIHTTP.md) is the likely one.
 
+## M2a lab result (2026-11-03)
+
+Branch `m2a` (plan `docs/plans/2026-11-03-m2a-directory-connect.md`) on the
+same lab VM, now with the **C backend** (`--enable-mapihttp`, native build on
+the VM): `make check-oc-emsmdb check-emsmdb check-asyncemsmdb check-mapihttp`
+passed there (C smoke tests, 85 Rust tests without and with `c-backend`),
+the C Connect paths also under ASan/UBSan; both Python suites passed.
+
+Setup: `openchange_directory_sync` every 60 s from a column-restricted,
+read-only MariaDB account; `mapiproxy:directory_url` in a dedicated smb.conf;
+openchangedb created with the project's `OpenChangeDB.setup/add_server/
+add_public_folders` (no SamDB). The daemon and `liboc_emsmdb` were copied by
+hand (no install rule before M7).
+
+Observed with classic Microsoft 365 Outlook 16.0.19127 and a new profile:
+
+- Autodiscover returned the directory LegacyDN (`.../cn=teste-ec0903c6`).
+- Connect succeeded (StatusCode 0, `MapiContext` cookie, display name from
+  PostfixAdmin); each Connect was preceded by exactly one 401 challenge and
+  **no 401 preceded any Execute** (Task 0 finding 1 answered: the session
+  cookie and Basic credentials are reused).
+- Outlook created the profile window, but RopLogon (`0xFE`) failed in mailbox
+  provisioning: with no mapistore backend there is no fallback context
+  (`emsmdbp_provisioning.c`, MAPI_E_DISK_ERROR). Outlook then looped
+  Connect/Execute/Disconnect (about 50 cycles) and showed a local data file.
+  This is the expected M2a limit; M2c adds the store.
+- NSPI Bind still answers code 5 (M2b).
+
+Found and fixed during the run: mapistore refused to initialize without any
+backend (blocking Connect), and ldb's tdb backend opens files read-write even
+for read-only connects (directory mode 0660 for the service group).
+The first attempt from a second Windows host never reached the VM until its
+client configuration was corrected; the cause was not recorded.
+
+## M2c lab result (2026-11-03)
+
+Branch `m2c` (plan `docs/plans/2026-11-03-m2c-native-store.md`), openchangedb
+and mapistore indexing on MariaDB, no mapistore backend. `make
+check-oc-emsmdb` passed on the VM. Classic Microsoft 365 Outlook 16.0.19127
+with a new profile (cached mode left on) **opened the mailbox**: status bar
+"Connected to: Microsoft Exchange", "All folders are up to date", the server
+folder tree (Inbox, Drafts, Sent Items, Deleted Items, Outbox, Junk E-mail,
+RSS Feeds, Search Folders) and no local data file. Hierarchy ICS
+(SyncConfigure, upload state, FastTransfer GetBuffer) succeeded; Outlook
+created its own folders (Sync Issues tree) with RopCreateFolder.
+
+Fixed during the run, each with a test: inverted mapistore `run_init`
+status, GlobalCount over-read, mailbox fids in the public range, the MySQL
+URL (with password) written to the log, unescaped SQL and NULL locale in the
+MySQL backend, missing address templates (RopGetAddressTypes, "could not
+open the information store"), unchecked fid allocation that stored the
+mailbox root as fid 0 (provisioning then duplicated the special folders on
+every logon), and RopCreateFolder requiring a backend (now native).
+
+Known gaps, not blocking the open:
+
+- Folders and mail from Dovecot are not visible (M3).
+- Message uploads from the cache (`RopSyncImportMessageChange`, 0x72) answer
+  MAPI_E_NO_SUPPORT: native folders do not store messages (M4/M5).
+- One table QueryRows runs SQL with an unknown column (MySQL 1054); not yet
+  traced.
+- Many `Unsupported property tag` notices from openchangedb (warnings only).
+- NSPI is still Bind-only (M2b); Outlook waits about 90 s on it before Connect.
+
+## M2b lab result (2026-11-03)
+
+Branch `m2b` (plan `docs/plans/2026-11-03-m2b-nspi.md`): NSPI over MAPI/HTTP in
+the Rust daemon, from the directory snapshot. `cargo test` (110 tests),
+`cargo clippy -D warnings`, the Python directory suite and `make
+check-oc-emsmdb check-mapihttp` passed on the VM. Outlook 16.0.19127 with the
+lab mailbox: the Address Book ("Global Address List") lists the PostfixAdmin
+mailboxes sorted by name, "Name only" search positions on the typed name
+(SeekEntries), Check Names resolves `teste` (ResolveNames), the People pane
+search finds "Ana" (GetMatches with an ANR restriction), and every NSPI
+request in the nginx log answered X-ResponseCode 0.
+
+Found during the run: the `MapiContext` cookie had `Path=/mapi/`, so the NSPI
+cookie would have overwritten the EMSMDB one (now scoped per endpoint); the
+daemon's make rule ignored source files in subdirectories; GetMatches
+restrictions carry a presence byte before the value (as the RPC pointer).
+
+Known gaps:
+
+- Every daemon restart drops the Session Contexts; Outlook then shows an
+  error or a long "Loading profile" until it binds again.
+- Before its first request after a restart Outlook waited up to 2 minutes
+  with no traffic to the VM (client side; possibly the Microsoft 365
+  endpoint lookup, not verified).
+- No display templates (details dialog), no distribution lists, no
+  "More columns" searches beyond ANR/display name/address/account.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern

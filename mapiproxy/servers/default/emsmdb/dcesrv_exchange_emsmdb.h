@@ -293,6 +293,7 @@ NTSTATUS	samba_init_module(void);
 /* definitions from emsmdbp.c */
 struct emsmdbp_context	*emsmdbp_init(struct loadparm_context *, const char *, void *);
 bool			emsmdbp_set_session_uuid(struct emsmdbp_context *, struct GUID);
+bool			emsmdbp_lookup_account(struct emsmdbp_context *, const char *, const char *, struct ldb_message **);
 void			*emsmdbp_openchangedb_init(struct loadparm_context *);
 bool			emsmdbp_destructor(void *);
 bool			emsmdbp_verify_user(struct dcesrv_call_state *, struct emsmdbp_context *);

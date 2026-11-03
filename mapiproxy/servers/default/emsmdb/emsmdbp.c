@@ -48,6 +48,26 @@ static struct ldb_context *samdb_init(TALLOC_CTX *owner, struct loadparm_context
 	const char *url;
 	char *error = NULL;
 	if (ev == NULL) return NULL;
+	url = lpcfg_parm_string(lp_ctx, NULL, "mapiproxy", "directory_url");
+	if (url != NULL) {
+		/* Plain LDB generated from PostfixAdmin: no Samba rootdse module, so publish its @ROOTDSE contexts. */
+		const char * const names[] = { "defaultNamingContext", "configurationNamingContext", NULL };
+		struct ldb_result *res = NULL;
+		struct ldb_dn *dn;
+		int i;
+		samdb_ctx = ldb_init(owner, ev);
+		if (samdb_ctx == NULL || ldb_connect(samdb_ctx, url, LDB_FLG_RDONLY, NULL) != LDB_SUCCESS ||
+		    ldb_search(samdb_ctx, samdb_ctx, &res, ldb_dn_new(samdb_ctx, samdb_ctx, "@ROOTDSE"),
+			       LDB_SCOPE_BASE, names, NULL) != LDB_SUCCESS || res->count != 1) goto directory_failure;
+		for (i = 0; names[i] != NULL; i++) {
+			dn = ldb_msg_find_attr_as_dn(samdb_ctx, samdb_ctx, res->msgs[0], names[i]);
+			if (dn == NULL || ldb_set_opaque(samdb_ctx, names[i], dn) != LDB_SUCCESS) goto directory_failure;
+		}
+		return samdb_ctx;
+	directory_failure:
+		talloc_free(samdb_ctx);
+		return NULL;
+	}
 	url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
 	if (url == NULL) return samdb_connect(owner, ev, lp_ctx, system_session(lp_ctx), NULL, 0);
 	if (samdb_connect_url(owner, ev, lp_ctx, system_session(lp_ctx),
@@ -152,6 +172,42 @@ _PUBLIC_ struct emsmdbp_context *emsmdbp_init(struct loadparm_context *lp_ctx,
 
    \return true on success, otherwise false
  */
+/**
+   \details Find the enabled directory account of an already authenticated
+   user (no Samba SID: MAPI/HTTP) and check the DN it asks to connect as.
+
+   \return true when exactly one enabled entry matches username and its
+   legacyExchangeDN equals user_dn ignoring case; delegation is unsupported.
+ */
+_PUBLIC_ bool emsmdbp_lookup_account(struct emsmdbp_context *emsmdbp_ctx, const char *username,
+				     const char *user_dn, struct ldb_message **msg)
+{
+	const char * const	attrs[] = { "*", NULL };
+	struct ldb_result	*res = NULL;
+	const char		*legacy_dn;
+	char			*encoded;
+	int			ret;
+
+	if (msg == NULL) return false;
+	*msg = NULL;
+	if (!emsmdbp_ctx || !emsmdbp_ctx->samdb_ctx || !username || !username[0] || !user_dn) return false;
+	encoded = ldb_binary_encode_string(emsmdbp_ctx, username);
+	if (encoded == NULL) return false;
+	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res, ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx),
+			 LDB_SCOPE_SUBTREE, attrs, "(sAMAccountName=%s)", encoded);
+	talloc_free(encoded);
+	if (ret != LDB_SUCCESS || res->count != 1 ||
+	    ldb_msg_find_attr_as_int(res->msgs[0], "msExchUserAccountControl", 2) != 0 ||
+	    (legacy_dn = ldb_msg_find_attr_as_string(res->msgs[0], "legacyExchangeDN", NULL)) == NULL ||
+	    strcasecmp(legacy_dn, user_dn) != 0) {
+		talloc_free(res);
+		return false;
+	}
+	*msg = talloc_steal(emsmdbp_ctx, res->msgs[0]);
+	talloc_free(res);
+	return true;
+}
+
 _PUBLIC_ bool emsmdbp_set_session_uuid(struct emsmdbp_context *emsmdbp_ctx, struct GUID uuid)
 {
 	if (!emsmdbp_ctx) return false;

@@ -693,6 +693,9 @@ enum MAPISTATUS EcDoRpc_process_transaction(TALLOC_CTX *mem_ctx,
 
 		if (size < before || (uint32_t)size + 2 + handles_length > UINT16_MAX) return ecBufferTooSmall;
 		if (mapi_request->mapi_req[i].opnum != op_MAPI_Release) {
+			/* Lab trace: ROP id, handle index and result only, never property values or bodies. */
+			OC_DEBUG(3, "ROP 0x%.2x handle_idx %u error 0x%.8x\n", mapi_request->mapi_req[i].opnum,
+				 mapi_request->mapi_req[i].handle_idx, mapi_response->mapi_repl[idx].error_code);
 			idx++;
 		}
 

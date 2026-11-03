@@ -24,6 +24,8 @@ struct Session {
 /// No Debug: it holds cookies and credential hashes.
 pub struct SessionTable {
     idle: Duration,
+    /// Cookie Path: one per endpoint, so the EMSMDB and NSPI contexts never overwrite each other.
+    path: &'static str,
     key: [u8; 32],
     sessions: Mutex<HashMap<String, Session>>,
 }
@@ -71,8 +73,13 @@ fn find_cookie(header: Option<&str>) -> Result<&str, u32> {
 
 impl SessionTable {
     pub fn new(idle: Duration) -> Self {
+        Self::for_path(idle, "/mapi/emsmdb/")
+    }
+
+    pub fn for_path(idle: Duration, path: &'static str) -> Self {
         SessionTable {
             idle,
+            path,
             key: random(),
             sessions: Mutex::new(HashMap::new()),
         }
@@ -112,7 +119,7 @@ impl SessionTable {
             waiting: false,
         };
         self.lock().insert(cookie.clone(), session);
-        set_cookie(&cookie)
+        self.set_cookie(&cookie)
     }
 
     pub fn begin(
@@ -215,13 +222,18 @@ impl SessionTable {
     }
 }
 
-fn set_cookie(cookie: &str) -> String {
-    format!("{COOKIE_NAME}={cookie}; Path=/mapi/; Secure; HttpOnly")
+impl SessionTable {
+    fn set_cookie(&self, cookie: &str) -> String {
+        format!(
+            "{COOKIE_NAME}={cookie}; Path={}; Secure; HttpOnly",
+            self.path
+        )
+    }
 }
 
 impl SessionGuard<'_> {
     pub fn set_cookie(&self) -> String {
-        set_cookie(&self.cookie)
+        self.table.set_cookie(&self.cookie)
     }
 
     /// X-ExpirationInfo: `begin`/`touch` just reset the idle clock, so the full idle time remains.
@@ -264,7 +276,7 @@ impl Drop for SessionGuard<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     const IDLE: Duration = Duration::from_secs(1800);
@@ -286,7 +298,7 @@ mod tests {
         let sc = t.create(h, 7, now);
         let value = sc
             .strip_prefix("MapiContext=")
-            .and_then(|r| r.strip_suffix("; Path=/mapi/; Secure; HttpOnly"))
+            .and_then(|r| r.strip_suffix("; Path=/mapi/emsmdb/; Secure; HttpOnly"))
             .unwrap_or_else(|| panic!("bad Set-Cookie {sc}"));
         assert_eq!(value.len(), 32);
         assert!(value
