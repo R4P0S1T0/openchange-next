@@ -428,12 +428,15 @@ static enum mapistore_error tdb_record_allocate_fmids(struct indexing_context *i
 	key.dsize = strlen((const char *)key.dptr);
 
 	data = tdb_fetch(TDB_WRAP(ictx)->tdb, key);
-	if (!data.dptr || !data.dsize) {
-		GlobalCount = 1;
+	GlobalCount = 1;
+	if (data.dptr && data.dsize && data.dsize < 32) {
+		/* Stored without a NUL terminator: parse a bounded copy. */
+		char counter[32];
+		memcpy(counter, data.dptr, data.dsize);
+		counter[data.dsize] = '\0';
+		GlobalCount = strtoull(counter, NULL, 16);
 	}
-	else {
-		GlobalCount = strtoull((const char*)data.dptr, NULL, 16);
-	}
+	free(data.dptr);
 
 	/* Save and increment the counter (reserve) */
 	*fmidp = GlobalCount;
