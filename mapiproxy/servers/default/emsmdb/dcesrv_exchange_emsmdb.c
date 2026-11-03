@@ -31,6 +31,7 @@
 #include "mapiproxy/libmapiproxy/fault_util.h"
 #include "mapiproxy/libmapiserver/libmapiserver.h"
 #include "dcesrv_exchange_emsmdb.h"
+#include "emsmdbp_identity.h"
 
 static void *openchange_db_ctx;
 
@@ -57,7 +58,6 @@ static enum MAPISTATUS emsmdb_connect_context(struct dcesrv_call_state *call,
 	struct emsmdbp_context *ctx;
 	struct dcesrv_handle *handle;
 	struct ldb_message *msg;
-	const char *nickname, *legacy_dn, *last_cn, *name;
 	enum MAPISTATUS status = MAPI_E_LOGON_FAILED;
 
 	if (user_dn == NULL || user_dn[0] == '\0') return MAPI_E_NO_ACCESS;
@@ -66,23 +66,9 @@ static enum MAPISTATUS emsmdb_connect_context(struct dcesrv_call_state *call,
 	if (ctx == NULL) return MAPI_E_LOGON_FAILED;
 	if (!emsmdbp_verify_user(call, ctx) ||
 	    !emsmdbp_verify_userdn(call, ctx, user_dn, &msg)) goto failure;
-	nickname = ldb_msg_find_attr_as_string(msg, "mailNickname", NULL);
-	legacy_dn = ldb_msg_find_attr_as_string(msg, "legacyExchangeDN", NULL);
-	name = ldb_msg_find_attr_as_string(msg, "displayName", NULL);
-	if (nickname == NULL || nickname[0] == '\0' || legacy_dn == NULL || name == NULL) goto failure;
-	last_cn = strrchr(legacy_dn, '/');
-	if (last_cn == NULL || strncasecmp(last_cn, "/cn=", 4) != 0 ||
-	    strcasecmp(last_cn + 4, nickname) != 0) goto failure;
-	ctx->szUserDN = talloc_strdup(ctx, user_dn);
-	ctx->szDisplayName = talloc_strdup(ctx, name);
-	ctx->szDNPrefix = talloc_strndup(ctx, legacy_dn, last_cn + 4 - legacy_dn);
-	ctx->userLanguage = language;
+	status = emsmdbp_connect_identity(ctx, msg, user_dn, language, mem_ctx, display_name, dn_prefix);
+	if (status != MAPI_E_SUCCESS) goto failure;
 	status = MAPI_E_NOT_ENOUGH_RESOURCES;
-	if (ctx->szUserDN == NULL || ctx->szDisplayName == NULL || ctx->szDNPrefix == NULL) goto failure;
-	/* Reply strings must remain valid when this session is disconnected. */
-	*display_name = talloc_strdup(mem_ctx, ctx->szDisplayName);
-	*dn_prefix = strupper_talloc(mem_ctx, ctx->szDNPrefix);
-	if (*display_name == NULL || *dn_prefix == NULL) goto failure;
 	handle = dcesrv_handle_create(call, EXCHANGE_HANDLE_EMSMDB);
 	if (handle == NULL) goto failure;
 	if (!emsmdbp_set_session_uuid(ctx, handle->wire_handle.uuid)) {

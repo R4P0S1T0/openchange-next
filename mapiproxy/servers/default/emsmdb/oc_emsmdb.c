@@ -26,6 +26,7 @@
 
 #include "mapiproxy/dcesrv_mapiproxy.h"
 #include "dcesrv_exchange_emsmdb.h"
+#include "emsmdbp_identity.h"
 #include "oc_emsmdb.h"
 
 struct oc_emsmdb_session {
@@ -67,6 +68,9 @@ uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
 			   const char **display_name, const char **dn_prefix)
 {
 	struct emsmdbp_context *ctx;
+	struct ldb_message *msg;
+	oc_emsmdb_session *s = NULL;
+	uint32_t status;
 
 	if (session == NULL || display_name == NULL || dn_prefix == NULL) return MAPI_E_INVALID_PARAMETER;
 	*session = NULL;
@@ -75,9 +79,25 @@ uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
 	if (username == NULL || username[0] == '\0' || user_dn == NULL || user_dn[0] == '\0') return MAPI_E_NO_ACCESS;
 	ctx = emsmdbp_init(oc_lp_ctx, username, oc_db_ctx);
 	if (ctx == NULL) return MAPI_E_LOGON_FAILED;
-	/* Fail closed: verifying the Dovecot user against the directory (PostfixAdmin mailbox, LegacyDN) is M2; there is no Samba SID here. */
+	/* username is Dovecot's canonical user; the directory binds it to exactly one enabled LegacyDN. */
+	status = MAPI_E_LOGON_FAILED;
+	if (!emsmdbp_lookup_account(ctx, username, user_dn, &msg)) goto failure;
+	status = MAPI_E_NOT_ENOUGH_RESOURCES;
+	ctx->username = talloc_strdup(ctx, username);
+	if (ctx->username == NULL) goto failure;
+	s = talloc_zero(oc_root, oc_emsmdb_session);
+	if (s == NULL) goto failure;
+	status = emsmdbp_connect_identity(ctx, msg, user_dn, lcid_string, s, display_name, dn_prefix);
+	if (status != MAPI_E_SUCCESS) goto failure;
+	if (!emsmdbp_set_session_uuid(ctx, GUID_random())) goto failure;
+	s->ctx = talloc_steal(s, ctx);
+	*session = s;
+	return MAPI_E_SUCCESS;
+failure:
+	talloc_free(s);
 	talloc_free(ctx);
-	return MAPI_E_LOGON_FAILED;
+	*display_name = *dn_prefix = "";
+	return status;
 }
 
 uint32_t oc_emsmdb_execute(oc_emsmdb_session *session, uint32_t flags,

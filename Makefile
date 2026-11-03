@@ -1825,7 +1825,7 @@ check-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/emsmdb-backend
 
-bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/emsmdb_execute.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
+bin/emsmdb: testsuite/modernization/emsmdb_smoke.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.c mapiproxy/servers/default/emsmdb/emsmdb_execute.c mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/default/emsmdb/emsmdbp_identity.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=talloc_strdup mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
 
@@ -1842,7 +1842,7 @@ check-oc-emsmdb: setup/mapistore/mapistore_namedprops.ldif libmapi libmapiproxy 
 	rm -f $(OC_EMSMDB_TEST)/directory.ldb
 	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 
-bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
+bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/default/emsmdb/emsmdbp_identity.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -Wl,--wrap=emsmdbp_init mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) $(EMSMDB_PROVIDER_LIBS) $(LIBS) $(SAMBASERVER_LIBS)
 

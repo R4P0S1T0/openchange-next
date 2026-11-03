@@ -102,33 +102,50 @@ static int test_connect_without_samdb(const char *conf)
     return 0;
 }
 
+#define ORG_OU "/o=First Organization/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn="
+#define USER_LDIF(mail, nick, control) \
+    "dn: CN=" mail ",CN=Users,DC=openchange\nobjectClass: user\nsAMAccountName: " mail "\nmail: " mail \
+    "\ndisplayName: Name " nick "\nmailNickname: " nick "\nlegacyExchangeDN: " ORG_OU nick \
+    "\nmsExchUserAccountControl: " control "\n\n"
+
+/* Mirrors what openchange_directory_sync writes (python/openchange/directory.py). */
+static const char directory_ldif[] =
+    "dn: @ATTRIBUTES\nlegacyExchangeDN: CASE_INSENSITIVE\nsAMAccountName: CASE_INSENSITIVE\n"
+    "mail: CASE_INSENSITIVE\nmailNickname: CASE_INSENSITIVE\ncn: CASE_INSENSITIVE\n\n"
+    "dn: @ROOTDSE\ndefaultNamingContext: DC=openchange\nconfigurationNamingContext: CN=Configuration,DC=openchange\n\n"
+    USER_LDIF("alice@example.invalid", "alice-0001", "0")
+    USER_LDIF("bob@example.invalid", "bob-0002", "0")
+    USER_LDIF("carol@example.invalid", "carol-0003", "2")
+    USER_LDIF("a*b@example.invalid", "a_b-0004", "0")
+    USER_LDIF("ab@example.invalid", "ab-0005", "0");
+
+static int seed_directory(const char *conf)
+{
+    TALLOC_CTX *mem = talloc_new(NULL);
+    struct loadparm_context *lp = loadparm_init(mem);
+    struct ldb_context *ldb;
+    struct ldb_ldif *ldif;
+    const char *text = directory_ldif, *url;
+    CHECK(mem && lp && lpcfg_load(lp, conf));
+    url = lpcfg_parm_string(lp, NULL, "mapiproxy", "directory_url");
+    ldb = ldb_init(mem, NULL);
+    CHECK(url && ldb && ldb_connect(ldb, url, 0, NULL) == LDB_SUCCESS);
+    while ((ldif = ldb_ldif_read_string(ldb, &text)) != NULL) {
+        CHECK(ldb_add(ldb, ldif->msg) == LDB_SUCCESS);
+        ldb_ldif_read_free(ldb, ldif);
+    }
+    talloc_free(mem);
+    return 0;
+}
+
 /* mapiproxy:directory_url names a plain LDB; it is opened without Samba's SamDB modules. */
 static int test_directory_ldb_opens(const char *conf)
 {
     TALLOC_CTX *mem = talloc_new(NULL);
     struct loadparm_context *lp = loadparm_init(mem);
-    struct ldb_context *ldb;
-    struct ldb_message *msg;
     struct ldb_result *res;
     struct emsmdbp_context *ctx;
-    const char *url;
-    CHECK(mem && lp && lpcfg_load(lp, conf));
-    url = lpcfg_parm_string(lp, NULL, "mapiproxy", "directory_url");
-    CHECK(url != NULL);
-    ldb = ldb_init(mem, NULL);
-    CHECK(ldb && ldb_connect(ldb, url, 0, NULL) == LDB_SUCCESS);
-    msg = ldb_msg_new(mem);
-    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "@ROOTDSE")));
-    CHECK(ldb_msg_add_string(msg, "defaultNamingContext", "DC=openchange") == 0 &&
-        ldb_msg_add_string(msg, "configurationNamingContext", "CN=Configuration,DC=openchange") == 0);
-    CHECK(ldb_add(ldb, msg) == LDB_SUCCESS);
-    msg = ldb_msg_new(mem);
-    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "CN=alice@example.invalid,CN=Users,DC=openchange")));
-    CHECK(ldb_msg_add_string(msg, "objectClass", "user") == 0 &&
-        ldb_msg_add_string(msg, "sAMAccountName", "alice@example.invalid") == 0);
-    CHECK(ldb_add(ldb, msg) == LDB_SUCCESS);
-    talloc_free(ldb);
-
+    CHECK(mem && lp && lpcfg_load(lp, conf) && seed_directory(conf) == 0);
     ctx = __real_emsmdbp_init(lp, "alice@example.invalid", oc_db_ctx);
     CHECK(ctx != NULL);
     CHECK(ldb_get_default_basedn(ctx->samdb_ctx) && ldb_get_config_basedn(ctx->samdb_ctx));
@@ -138,6 +155,70 @@ static int test_directory_ldb_opens(const char *conf)
         NULL, "sAMAccountName=alice@example.invalid") == LDB_SUCCESS && res->count == 1);
     talloc_free(ctx);
     talloc_free(mem);
+    return 0;
+}
+
+static uint32_t connect_as(const char *user, const char *dn, oc_emsmdb_session **session,
+                           const char **name, const char **prefix)
+{
+    *session = (oc_emsmdb_session *)session;
+    return oc_emsmdb_connect(user, dn, 0, 1252, 1033, 1033, session, name, prefix);
+}
+
+static int test_connect_success(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(session != NULL && strcmp(name, "Name alice-0001") == 0);
+    CHECK(strcmp(prefix, "/O=FIRST ORGANIZATION/OU=EXCHANGE ADMINISTRATIVE GROUP (FYDIBOHF23SPDLT)/CN=RECIPIENTS/CN=") == 0);
+    CHECK(session->ctx && strcmp(session->ctx->username, "alice@example.invalid") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_connect_dn_case_insensitive(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    CHECK(connect_as("alice@example.invalid",
+        "/O=FIRST ORGANIZATION/OU=EXCHANGE ADMINISTRATIVE GROUP (FYDIBOHF23SPDLT)/CN=RECIPIENTS/CN=ALICE-0001",
+        &session, &name, &prefix) == MAPI_E_SUCCESS && session != NULL);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_connect_rejected(const char *user, const char *dn)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    CHECK(connect_as(user, dn, &session, &name, &prefix) == MAPI_E_LOGON_FAILED);
+    CHECK(session == NULL && name[0] == '\0' && prefix[0] == '\0');
+    return 0;
+}
+
+static int test_connect_other_users_dn(void)
+{
+    return test_connect_rejected("alice@example.invalid", ORG_OU "bob-0002");
+}
+
+static int test_connect_inactive(void)
+{
+    return test_connect_rejected("carol@example.invalid", ORG_OU "carol-0003");
+}
+
+static int test_connect_unknown_user(void)
+{
+    return test_connect_rejected("nobody@example.invalid", ORG_OU "alice-0001");
+}
+
+static int test_connect_filter_metacharacters(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    if (test_connect_rejected("a*b@example.invalid", ORG_OU "ab-0005")) return 1;
+    CHECK(connect_as("a*b@example.invalid", ORG_OU "a_b-0004", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    oc_emsmdb_disconnect(session);
     return 0;
 }
 
@@ -188,8 +269,11 @@ int main(int argc, char **argv)
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
     talloc_enable_null_tracking();
     if (seed_openchangedb(argv[1]) || test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
-        test_directory_ldb_opens(argv[1]) || test_connect_fails_closed() || test_execute()) return 1;
+        test_directory_ldb_opens(argv[1]) ||
+        test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
+        test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
+        test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
-    printf("oc_emsmdb null handles, fail-closed connect and bounded execute: OK\n");
+    printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;
 }

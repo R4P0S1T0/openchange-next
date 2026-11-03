@@ -172,6 +172,42 @@ _PUBLIC_ struct emsmdbp_context *emsmdbp_init(struct loadparm_context *lp_ctx,
 
    \return true on success, otherwise false
  */
+/**
+   \details Find the enabled directory account of an already authenticated
+   user (no Samba SID: MAPI/HTTP) and check the DN it asks to connect as.
+
+   \return true when exactly one enabled entry matches username and its
+   legacyExchangeDN equals user_dn ignoring case; delegation is unsupported.
+ */
+_PUBLIC_ bool emsmdbp_lookup_account(struct emsmdbp_context *emsmdbp_ctx, const char *username,
+				     const char *user_dn, struct ldb_message **msg)
+{
+	const char * const	attrs[] = { "*", NULL };
+	struct ldb_result	*res = NULL;
+	const char		*legacy_dn;
+	char			*encoded;
+	int			ret;
+
+	if (msg == NULL) return false;
+	*msg = NULL;
+	if (!emsmdbp_ctx || !emsmdbp_ctx->samdb_ctx || !username || !username[0] || !user_dn) return false;
+	encoded = ldb_binary_encode_string(emsmdbp_ctx, username);
+	if (encoded == NULL) return false;
+	ret = ldb_search(emsmdbp_ctx->samdb_ctx, emsmdbp_ctx, &res, ldb_get_default_basedn(emsmdbp_ctx->samdb_ctx),
+			 LDB_SCOPE_SUBTREE, attrs, "(sAMAccountName=%s)", encoded);
+	talloc_free(encoded);
+	if (ret != LDB_SUCCESS || res->count != 1 ||
+	    ldb_msg_find_attr_as_int(res->msgs[0], "msExchUserAccountControl", 2) != 0 ||
+	    (legacy_dn = ldb_msg_find_attr_as_string(res->msgs[0], "legacyExchangeDN", NULL)) == NULL ||
+	    strcasecmp(legacy_dn, user_dn) != 0) {
+		talloc_free(res);
+		return false;
+	}
+	*msg = talloc_steal(emsmdbp_ctx, res->msgs[0]);
+	talloc_free(res);
+	return true;
+}
+
 _PUBLIC_ bool emsmdbp_set_session_uuid(struct emsmdbp_context *emsmdbp_ctx, struct GUID uuid)
 {
 	if (!emsmdbp_ctx) return false;
