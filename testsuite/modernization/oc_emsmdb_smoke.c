@@ -279,6 +279,34 @@ static int test_provision_idempotent(void)
     return 0;
 }
 
+/* Outlook creates folders (RopCreateFolder) under native ones; with no backend for the role they stay native. */
+static int test_create_native_subfolder(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct emsmdbp_object *mailbox, *ipm, *created = NULL;
+    struct SPropValue props[3];
+    struct SRow row = { .cValues = 3, .lpProps = props };
+    uint64_t fid, found = 0, cn;
+    char *uri = NULL;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    CHECK(mailbox != NULL);
+    CHECK(emsmdbp_object_open_folder(session, session->ctx, mailbox, first_fids[4], &ipm) == MAPISTORE_SUCCESS);
+    CHECK(mapistore_indexing_get_new_folderID(session->ctx->mstore_ctx, &fid) == MAPISTORE_SUCCESS);
+    CHECK(openchangedb_get_new_changeNumber(session->ctx->oc_ctx, session->ctx->username, &cn) == MAPI_E_SUCCESS);
+    props[0].ulPropTag = PR_DISPLAY_NAME_UNICODE; props[0].value.lpszW = "Sync Issues";
+    props[1].ulPropTag = PR_CONTAINER_CLASS_UNICODE; props[1].value.lpszW = "IPF.Note";
+    props[2].ulPropTag = PidTagChangeNumber; props[2].value.d = cn;
+    CHECK(emsmdbp_object_create_folder(session->ctx, ipm, session, fid, &row, true, &created) == MAPI_E_SUCCESS && created);
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Sync Issues", &found)
+        == MAPI_E_SUCCESS && found == fid);
+    CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", fid, &uri, true)
+        != MAPI_E_SUCCESS || uri == NULL || uri[0] == '\0');
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 /* A backend offering only the mail role: it must take over the native Inbox, keeping its folder ID. */
 static enum mapistore_error fake_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
                                                struct mapistore_contexts_list **list)
@@ -433,7 +461,7 @@ int main(int argc, char **argv)
         test_directory_ldb_opens(argv[1]) ||
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
-        test_provision_native_mailbox() || test_provision_idempotent() ||
+        test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
