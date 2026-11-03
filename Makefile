@@ -1111,6 +1111,7 @@ provision-install: python-install
 	$(INSTALL) -m 0755 setup/openchange_newuser $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_neworganization $(DESTDIR)$(sbindir)/
 	$(INSTALL) -m 0755 setup/openchange_group $(DESTDIR)$(sbindir)/
+	$(INSTALL) -m 0755 setup/openchange_directory_sync $(DESTDIR)$(sbindir)/
 	$(INSTALL) -d $(DESTDIR)$(datadir)/setup/AD
 	$(INSTALL) -m 0644 setup/AD/oc_provision* $(DESTDIR)$(datadir)/setup/AD/
 	$(INSTALL) -m 0644 setup/AD/prefixMap.txt $(DESTDIR)$(datadir)/setup/AD/
@@ -1122,7 +1123,7 @@ provision-install: python-install
 
 provision-uninstall: python-uninstall
 	rm -f $(DESTDIR)$(sbindir)/openchange_provision $(DESTDIR)$(sbindir)/openchange_migrate
-	rm -f $(DESTDIR)$(sbindir)/openchange_newuser $(DESTDIR)$(sbindir)/openchange_neworganization $(DESTDIR)$(sbindir)/openchange_group
+	rm -f $(DESTDIR)$(sbindir)/openchange_newuser $(DESTDIR)$(sbindir)/openchange_neworganization $(DESTDIR)$(sbindir)/openchange_group $(DESTDIR)$(sbindir)/openchange_directory_sync
 	rm -rf $(DESTDIR)$(datadir)/setup/AD
 	rm -rf $(DESTDIR)$(datadir)/setup/openchangedb
 

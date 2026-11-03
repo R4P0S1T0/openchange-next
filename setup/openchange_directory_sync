@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""Write the MAPI directory LDB from PostfixAdmin's mailbox and domain tables."""
+import argparse
+import os
+import sys
+
+# To allow running from the source directory
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--mysql-defaults", required=True,
+                    help="MySQL option file with a [client] section (read-only PostfixAdmin user)")
+parser.add_argument("--org", required=True, help="organization, same as openchange-mapihttpd --org")
+parser.add_argument("--ou", required=True, help="administrative group, same as openchange-mapihttpd --ou")
+parser.add_argument("--output", required=True, help="directory LDB path (mapiproxy:directory_url)")
+args = parser.parse_args()
+
+import MySQLdb  # noqa: E402 (keeps --help usable without the module)
+from openchange import directory  # noqa: E402
+
+try:
+    conn = MySQLdb.connect(read_default_file=args.mysql_defaults, read_default_group="client")
+    try:
+        mailboxes = directory.fetch_mailboxes(conn)
+    finally:
+        conn.close()
+    directory.write_directory(args.output, args.org, args.ou, mailboxes)
+except Exception as e:
+    # MySQLdb errors carry no credentials; print only the error class and code.
+    print("openchange_directory_sync: failed: %s %s" % (type(e).__name__, e.args[:1]), file=sys.stderr)
+    sys.exit(1)

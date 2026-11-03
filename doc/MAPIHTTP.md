@@ -66,6 +66,36 @@ One ordinary request and one NotificationWait may run concurrently on a
 session (MS-OXCMAPIHTTP 3.1.5.5); a second request in either slot gets code 15.
 Pending requests prevent idle expiry, and completion restarts the idle clock.
 
+## Directory (M2a)
+
+PostfixAdmin's MariaDB stays the source of truth. `openchange_directory_sync`
+reads `mailbox` and `domain` (read-only) and writes a plain LDB file that the
+C backend opens through smb.conf `mapiproxy:directory_url` (for example
+`tdb:///var/lib/openchange/directory.ldb`). No AD, LDAP server or Samba
+daemon is involved; when the option is unset, the legacy SamDB path is used.
+
+```sh
+openchange_directory_sync --mysql-defaults /etc/openchange/directory-my.cnf \
+  --org "First Organization" --ou "Exchange Administrative Group (FYDIBOHF23SPDLT)" \
+  --output /var/lib/openchange/directory.ldb
+```
+
+The option file holds a `[client]` section for a user with `SELECT` on the two
+tables only; keep it mode 0600. `--org`/`--ou` must match the daemon's flags.
+The file is rebuilt in a temporary file and renamed, mode 0640 with group
+`openchange` when that group exists; a failed run leaves the previous file.
+Run it from a systemd timer (60 seconds): a mailbox created, disabled or
+removed in PostfixAdmin reaches new Connects within one timer period, while
+existing MAPI/HTTP sessions live until their idle timeout.
+
+Each mailbox becomes `CN=<email>,CN=Users,DC=openchange` with
+`sAMAccountName`/`mail` = the lower-case email (Dovecot's canonical user),
+`mailNickname` = local part (bytes outside `[a-z0-9._-]` as `_`) + `-` + the
+first 8 hex digits of SHA-256 of the email, and
+`legacyExchangeDN` = `/o=<org>/ou=<ou>/cn=Recipients/cn=<mailNickname>`.
+An account is enabled (`msExchUserAccountControl` 0) only when both the
+mailbox and its domain are active.
+
 ## Lab systemd example
 
 Install the binary and native libraries in the paths used below, create a
