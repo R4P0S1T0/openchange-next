@@ -432,7 +432,8 @@ fn resolve_names(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Re
     Ok(out)
 }
 
-/// GetMatches (2.2.5.5) without a filter: the CurrentRec object, as Outlook asks for a user's details. Filters (searches) answer MAPI_E_TOO_COMPLEX until their layout is captured.
+/// GetMatches (2.2.5.5): with a name filter, the matching GAL entries (People search); without one,
+/// the CurrentRec object, as Outlook asks for a user's details. Other filters: MAPI_E_TOO_COMPLEX.
 fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Result<Vec<u8>, u32> {
     let mut r = Reader(body);
     r.u32()?;
@@ -442,8 +443,12 @@ fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resu
         read_u32s(&mut r, count)?;
     }
     r.u32()?; // InterfaceOptionFlags
-    let has_filter = r.u8()? != 0;
-    if has_filter {
+    let filter = if r.u8()? != 0 {
+        Some(read_filter(&mut r)?)
+    } else {
+        None
+    };
+    if let Some(None) = filter {
         let mut out = Vec::new();
         put(&mut out, &[0, MAPI_E_TOO_COMPLEX]);
         out.extend_from_slice(&[0, 0]); // HasState, HasMinimalIds
@@ -456,12 +461,19 @@ fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resu
     let row_count = r.u32()?;
     let columns = read_opt_tags(&mut r)?.unwrap_or_else(|| props::USER_TAGS.to_vec());
     r.aux()?;
-    // No filter: the table is the CurrentRec object alone (MS-OXNSPI 3.1.4.1.10).
-    let rows: Vec<&gal::Entry> = gal
-        .by_mid(stat.current_rec)
-        .into_iter()
-        .take(row_count as usize)
-        .collect();
+    let rows: Vec<&gal::Entry> = match filter {
+        Some(Some(prefix)) => gal
+            .matching(&prefix)
+            .into_iter()
+            .take(row_count as usize)
+            .collect(),
+        // No filter: the table is the CurrentRec object alone (MS-OXNSPI 3.1.4.1.10).
+        _ => gal
+            .by_mid(stat.current_rec)
+            .into_iter()
+            .take(row_count as usize)
+            .collect(),
+    };
     let ctx = props::Ctx {
         flags: 0,
         server_guid,
@@ -481,6 +493,42 @@ fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resu
         props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
     }
     Ok(out)
+}
+
+/// A restriction (MS-OXCDATA 2.12) with AddressBookTaggedPropertyValue values, as Outlook's People
+/// search sends it. Returns the lower-case search text for a property or content restriction on
+/// ANR, display name, SMTP address or account; None for anything else (MAPI_E_TOO_COMPLEX).
+fn read_filter(r: &mut Reader<'_>) -> Result<Option<String>, u32> {
+    const SEARCHABLE: [u16; 4] = [0x360C, 0x3001, 0x39FE, 0x3A00]; // Anr, DisplayName, SmtpAddress, Account
+    let tag = match r.u8()? {
+        0x03 => {
+            r.u16()?; // FuzzyLevelLow: every level matches by prefix here
+            r.u16()?; // FuzzyLevelHigh
+            r.u32()?
+        }
+        0x04 => {
+            if r.u8()? != 4 {
+                return Ok(None); // RELOP_EQ only
+            }
+            r.u32()?
+        }
+        _ => return Ok(None),
+    };
+    // The value is a pointer in the RPC form: a presence byte comes before it.
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let text = match r.u32()? as u16 {
+        props::PT_UNICODE if r.u8()? != 0 => utf16_z(r)?,
+        props::PT_STRING8 if r.u8()? != 0 => r.ascii_z()?,
+        _ => return Ok(None),
+    };
+    if !SEARCHABLE.contains(&((tag >> 16) as u16)) {
+        return Ok(None);
+    }
+    // A leading '=' asks ANR for an exact match; People search sends it while typing, so prefix.
+    let text = text.trim_start_matches('=').trim().to_lowercase();
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// SeekEntries (2.2.5.16): moves to the first row whose display name sorts at or after the
@@ -1063,12 +1111,6 @@ mod tests {
                 "length {n}"
             );
         }
-        let mut filtered = capture.clone();
-        filtered[46] = 0xFF;
-        assert_eq!(
-            &call(&srv, &c, "GetMatches", &filtered)[..8],
-            &le(&[0, MAPI_E_TOO_COMPLEX])[..]
-        );
     }
 
     #[test]
@@ -1149,5 +1191,41 @@ mod tests {
         assert_eq!(cmp(0x100013, 0x100010)[8..12], le(&[1])[..]);
         assert_eq!(cmp(0x100011, 0x100011)[8..12], le(&[0])[..]);
         assert_eq!(cmp(0x100011, 0xDEAD)[4..8], le(&[0x8004_010F])[..]);
+    }
+
+    #[test]
+    fn test_get_matches_anr() {
+        let (srv, c) = bound(None);
+        let capture = fixture("nspi-getmatches-anr-m365-16.0.19127.20800.bin");
+        let body = call(&srv, &c, "GetMatches", &capture);
+        assert_eq!(&body[..8], &[0; 8]);
+        let mut r = Reader(&body[8..]);
+        read_opt_stat(&mut r).unwrap();
+        // "=An": no display-name word, address or nickname starts with "an" in the test GAL.
+        assert_eq!((r.u8().unwrap(), r.u32().unwrap()), (0xFF, 0));
+        let mut al = capture.clone();
+        al[63..65].copy_from_slice(&[b'l', 0]); // "=Al"
+        let body = call(&srv, &c, "GetMatches", &al);
+        let mut r = Reader(&body[8..]);
+        read_opt_stat(&mut r).unwrap();
+        assert_eq!(
+            (r.u8().unwrap(), r.u32().unwrap()),
+            (0xFF, 2),
+            "Alfred, Alice"
+        );
+        assert_eq!((r.u32().unwrap(), r.u32().unwrap()), (0x100010, 0x100011));
+        for n in 0..capture.len() {
+            assert_eq!(
+                run(handle(&srv, nspi("GetMatches", &capture[..n], Some(&c)))).response_code,
+                12,
+                "length {n}"
+            );
+        }
+        let mut other = capture.clone();
+        other[51..53].copy_from_slice(&[0x99, 0x99]); // restriction on another property
+        assert_eq!(
+            &call(&srv, &c, "GetMatches", &other)[..8],
+            &le(&[0, MAPI_E_TOO_COMPLEX])[..]
+        );
     }
 }

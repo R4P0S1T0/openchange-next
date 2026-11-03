@@ -102,8 +102,8 @@ impl Snapshot {
         if let Some(e) = exact {
             return Resolution::One(e.mid);
         }
-        let mut hits = self.matching(&name);
-        match (hits.next(), hits.next()) {
+        let hits = self.matching(&name);
+        match (hits.first(), hits.get(1)) {
             (None, _) => Resolution::None,
             (Some(e), None) => Resolution::One(e.mid),
             _ => Resolution::Ambiguous,
@@ -111,14 +111,17 @@ impl Snapshot {
     }
 
     /// Entries whose address, nickname or display-name words start with `prefix` (lower case).
-    fn matching<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s Entry> + 's {
-        self.entries.iter().filter(move |e| {
-            let display = e.display_name.to_lowercase();
-            e.address.starts_with(prefix)
-                || e.nickname.starts_with(prefix)
-                || display.starts_with(prefix)
-                || display.split_whitespace().any(|w| w.starts_with(prefix))
-        })
+    pub fn matching(&self, prefix: &str) -> Vec<&Entry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                let display = e.display_name.to_lowercase();
+                e.address.starts_with(prefix)
+                    || e.nickname.starts_with(prefix)
+                    || display.starts_with(prefix)
+                    || display.split_whitespace().any(|w| w.starts_with(prefix))
+            })
+            .collect()
     }
 }
 
