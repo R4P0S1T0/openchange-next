@@ -317,6 +317,7 @@ static enum mapistore_error fake_list_contexts(const char *user, struct indexing
     entry->name = talloc_strdup(entry, "Inbox");
     entry->main_folder = true;
     entry->role = MAPISTORE_MAIL_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
     *list = entry;
     return MAPISTORE_SUCCESS;
 }
@@ -340,6 +341,37 @@ static int test_provision_backend_takes_over_inbox(void)
     CHECK(memcmp(again, first_fids, sizeof again) == 0);
     CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", first_fids[5], &uri, true)
         == MAPI_E_SUCCESS && strcmp(uri, "fake://inbox/") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* A later backend offering the fallback role (as M3's may) must not break logon of a native mailbox. */
+static enum mapistore_error fake_fallback_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                                   struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "fakefb://fallback/");
+    entry->name = talloc_strdup(entry, "Fallback");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_FALLBACK_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_provision_fallback_after_native(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "fakefb"; fake.backend.description = "test"; fake.backend.namespace = "fakefb://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = fake_fallback_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
     oc_emsmdb_disconnect(session);
     return 0;
 }
@@ -463,7 +495,8 @@ int main(int argc, char **argv)
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
         test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
-        test_provision_backend_takes_over_inbox() || test_connect_fails_closed() || test_execute()) return 1;
+        test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() ||
+        test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;
