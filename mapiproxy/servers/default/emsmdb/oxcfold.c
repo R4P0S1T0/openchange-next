@@ -102,6 +102,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopOpenFolder(TALLOC_CTX *mem_ctx,
 	mapi_handles_add(emsmdbp_ctx->handles_ctx, 0, &rec);
 	retval = emsmdbp_object_open_folder_by_fid(rec, emsmdbp_ctx, parent_object, request->folder_id, &object);
 	if (retval != MAPI_E_SUCCESS) {
+		OC_DEBUG(3, "  OpenFolder fid 0x%.16"PRIx64" error 0x%.8x\n", request->folder_id, retval);
 		mapi_repl->error_code = retval;
 		goto end;
 	}
