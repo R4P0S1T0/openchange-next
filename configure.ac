@@ -823,6 +823,26 @@ OC_MAPISTORE=
 OC_MAPISTORE_CLEAN=
 OC_MAPISTORE_INSTALL=
 OC_MAPISTORE_UNINSTALL=
+
+dnl Read-only IMAP backend (M3): built when libetpan is found, unless --disable-imap-backend.
+AC_ARG_ENABLE(imap-backend,
+              AS_HELP_STRING([--disable-imap-backend],
+                             [Do not build the IMAP mapistore backend (needs libetpan)]),
+              enable_imap_backend=$enableval,
+              enable_imap_backend="auto")
+if test x"$enable_imap_backend" != x"no"; then
+   PKG_CHECK_MODULES([LIBETPAN], [libetpan >= 1.9], [have_libetpan=yes], [have_libetpan=no])
+   if test x"$have_libetpan" = x"yes"; then
+      OC_MAPISTORE="$OC_MAPISTORE mapistore_imap"
+      OC_MAPISTORE_CLEAN="$OC_MAPISTORE_CLEAN mapistore_imap-clean"
+      OC_MAPISTORE_INSTALL="$OC_MAPISTORE_INSTALL mapistore_imap-install"
+      OC_MAPISTORE_UNINSTALL="$OC_MAPISTORE_UNINSTALL mapistore_imap-uninstall"
+   elif test x"$enable_imap_backend" = x"yes"; then
+      AC_MSG_ERROR([--enable-imap-backend needs libetpan >= 1.9 (libetpan-dev)])
+   fi
+fi
+AC_SUBST(LIBETPAN_CFLAGS)
+AC_SUBST(LIBETPAN_LIBS)
 AC_SUBST(OC_MAPISTORE)
 AC_SUBST(OC_MAPISTORE_CLEAN)
 AC_SUBST(OC_MAPISTORE_INSTALL)

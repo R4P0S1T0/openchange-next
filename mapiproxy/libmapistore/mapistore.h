@@ -312,6 +312,7 @@ int mapistore_getprops(struct mapistore_context *, uint32_t, TALLOC_CTX *, uint6
 int mapistore_setprops(struct mapistore_context *, uint32_t, uint64_t, uint8_t, struct SRow *);
 
 struct mapistore_context *mapistore_init(TALLOC_CTX *, struct loadparm_context *, const char *);
+struct loadparm_context *mapistore_backend_lp_ctx(void);
 void mapistore_set_default_indexing_url(const char *);
 void mapistore_set_default_cache_url(const char *);
 char *mapistore_get_default_cache_url(void);

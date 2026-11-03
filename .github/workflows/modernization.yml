@@ -25,7 +25,7 @@ jobs:
           git ca-certificates curl build-essential autoconf automake pkg-config
           flex bison python3-dev python3-samba python3-mysqldb samba-dev libmariadb-dev-compat
           libmemcached-dev libnanomsg-dev libpopt-dev libparse-yapp-perl
-          check libsubunit-dev
+          check libsubunit-dev libetpan-dev dovecot-imapd
       - uses: actions/checkout@v4
       - name: Fetch matching-generation PIDL source
         run: |
@@ -121,6 +121,12 @@ jobs:
           make -j2 all
           make check-emsmdb check-oc-emsmdb check-mapihttp
           OC_EMSMDB_LIBDIR="$PWD/mapiproxy/servers" cargo clippy --offline --locked --all-targets --features c-backend -- -D warnings
+      - name: Check the IMAP backend against Dovecot (PREAUTH, no root)
+        run: |
+          make check-imap-backend
+          rm -f mapiproxy/libmapistore/backends/imap/*.po bin/imap-backend-test
+          make check-imap-backend CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+          rm -f mapiproxy/libmapistore/backends/imap/*.po bin/imap-backend-test
       - name: Check the C boundary with sanitizers and restore plain objects
         run: |
           make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
