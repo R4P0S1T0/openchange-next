@@ -24,6 +24,7 @@ pub const SESSION_TYPES: &[&str] = &[
     "UpdateStat",
     "ResolveNames",
     "GetMatches",
+    "SeekEntries",
 ];
 
 pub struct State {
@@ -235,6 +236,7 @@ pub fn handle<A: Authenticator, B: Backend>(
         "UpdateStat" => update_stat(&gal, req.body),
         "ResolveNames" => resolve_names(&gal, req.body, &srv.nspi.server_guid),
         "GetMatches" => get_matches(&gal, req.body, &srv.nspi.server_guid),
+        "SeekEntries" => seek_entries(&gal, req.body, &srv.nspi.server_guid),
         _ => Err(5),
     };
     match result {
@@ -469,6 +471,71 @@ fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resu
     push_tags(&mut out, &columns);
     put(&mut out, &[rows.len() as u32]);
     for e in rows {
+        props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
+    }
+    Ok(out)
+}
+
+/// SeekEntries (2.2.5.16): moves to the first row whose display name sorts at or after the
+/// target (Address Book "Name only" search) and returns that row. Explicit tables and other
+/// target properties answer MAPI_E_TOO_COMPLEX.
+fn seek_entries(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Result<Vec<u8>, u32> {
+    let mut r = Reader(body);
+    r.u32()?;
+    let stat = read_opt_stat(&mut r)?.unwrap_or_default();
+    let target = if r.u8()? != 0 {
+        let tag = r.u32()?;
+        let ty = tag as u16;
+        let value = match ty {
+            props::PT_UNICODE if r.u8()? != 0 => Some(utf16_z(&mut r)?),
+            props::PT_STRING8 if r.u8()? != 0 => Some(r.ascii_z()?),
+            _ => None,
+        };
+        value.filter(|_| tag >> 16 == 0x3001)
+    } else {
+        None
+    };
+    let explicit = if r.u8()? != 0 {
+        let count = r.u32()?;
+        read_u32s(&mut r, count)?
+    } else {
+        Vec::new()
+    };
+    let columns = read_opt_tags(&mut r)?.unwrap_or_else(|| props::USER_TAGS.to_vec());
+    r.aux()?;
+    let mut out = Vec::new();
+    let Some(target) = target.filter(|_| explicit.is_empty()) else {
+        put(&mut out, &[0, MAPI_E_TOO_COMPLEX]);
+        out.extend_from_slice(&[0, 0]); // HasState, HasColumnsAndRows
+        return Ok(out);
+    };
+    let target = target.to_lowercase();
+    let pos = gal
+        .entries()
+        .iter()
+        .position(|e| e.display_name.to_lowercase() >= target)
+        .unwrap_or(gal.entries().len());
+    let found = gal.entries().get(pos);
+    put(
+        &mut out,
+        &[
+            0,
+            if found.is_some() {
+                0
+            } else {
+                props::MAPI_E_NOT_FOUND
+            },
+        ],
+    );
+    push_stat(&mut out, &stat_at(gal, &stat, pos));
+    out.push(0xFF);
+    push_tags(&mut out, &columns);
+    let ctx = props::Ctx {
+        flags: 0,
+        server_guid,
+    };
+    put(&mut out, &[u32::from(found.is_some())]);
+    if let Some(e) = found {
         props::push_row(&mut out, &columns, &values_for(e, &columns, &ctx));
     }
     Ok(out)
@@ -941,5 +1008,31 @@ mod tests {
             &call(&srv, &c, "GetMatches", &filtered)[..8],
             &le(&[0, MAPI_E_TOO_COMPLEX])[..]
         );
+    }
+
+    #[test]
+    fn test_seek_entries_display_name() {
+        let (srv, c) = bound(None);
+        let capture = fixture("nspi-seekentries-m365-16.0.19127.20800.bin");
+        let body = call(&srv, &c, "SeekEntries", &capture);
+        assert_eq!(&body[..8], &[0; 8]);
+        let mut r = Reader(&body[8..]);
+        let st = read_opt_stat(&mut r).unwrap().unwrap();
+        // "An" sorts after "Alfred Other" and "Alice Example": the cursor lands on "bob".
+        assert_eq!((st.num_pos, st.current_rec), (2, 0x100012));
+        assert_eq!((r.u8().unwrap(), r.u32().unwrap()), (0xFF, 16));
+        r.take(16 * 4).unwrap();
+        assert_eq!(r.u32().unwrap(), 1, "the row at the cursor");
+        for n in 0..capture.len() {
+            assert_eq!(
+                run(handle(&srv, nspi("SeekEntries", &capture[..n], Some(&c)))).response_code,
+                12,
+                "length {n}"
+            );
+        }
+        let mut past_end = capture.clone();
+        past_end[47..51].copy_from_slice(&[b'z', 0, b'z', 0]);
+        let body = call(&srv, &c, "SeekEntries", &past_end);
+        assert_eq!(&body[..8], &le(&[0, 0x8004_010F])[..]);
     }
 }
