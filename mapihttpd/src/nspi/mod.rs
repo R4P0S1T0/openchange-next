@@ -152,6 +152,15 @@ const NSPI_UNICODE_STRINGS: u32 = 0x4;
 const MAX_TAGS: u32 = 100_000;
 const MAPI_E_TOO_COMPLEX: u32 = 0x8004_0117;
 const MAPI_E_NO_SUPPORT: u32 = 0x8004_0102;
+/// Rows x columns of one reply: the claimed counts multiply, so each is not enough alone.
+const MAX_CELLS: usize = 200_000;
+/// Names in one ResolveNames or DNToMId.
+const MAX_NAMES: usize = 1000;
+
+/// Rows that fit in one reply with `columns` columns.
+fn budget_rows(columns: usize) -> usize {
+    MAX_CELLS / columns.max(1)
+}
 
 /// `count` items of `size` bytes each must fit in what is left: no allocation from a claimed count.
 fn check_count(r: &Reader<'_>, count: u32, size: usize) -> Result<usize, u32> {
@@ -293,6 +302,9 @@ fn dn_to_mid(gal: &gal::Snapshot, body: &[u8]) -> Result<Vec<u8>, u32> {
     if r.u8()? != 0 {
         let count = r.u32()?;
         check_count(&r, count, 1)?;
+        if count as usize > MAX_NAMES {
+            return Err(BAD_BODY);
+        }
         for _ in 0..count {
             let dn = r.ascii_z()?;
             mids.push(gal.by_legacy_dn(&dn).map_or(0, |e| e.mid));
@@ -320,11 +332,12 @@ fn query_rows(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resul
     let ctx = props::Ctx { flags, server_guid };
     let (rows, new_stat): (Vec<Option<&gal::Entry>>, Stat) = if explicit.is_empty() {
         let pos = seek(gal, &stat);
-        let end = pos
-            .saturating_add(row_count as usize)
-            .min(gal.entries().len());
+        let count = (row_count as usize).min(budget_rows(columns.len()));
+        let end = pos.saturating_add(count).min(gal.entries().len());
         let rows = gal.entries()[pos..end].iter().map(Some).collect();
         (rows, stat_at(gal, &stat, end))
+    } else if explicit.len() > budget_rows(columns.len()) {
+        return Err(BAD_BODY);
     } else {
         (explicit.iter().map(|&m| gal.by_mid(m)).collect(), stat)
     };
@@ -352,8 +365,13 @@ fn get_props(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Result
     let tags = read_opt_tags(&mut r)?.unwrap_or_else(|| props::USER_TAGS.to_vec());
     r.aux()?;
     let mut out = Vec::new();
+    let code_page = if stat.code_page == 0 {
+        1252
+    } else {
+        stat.code_page
+    };
     let Some(e) = gal.by_mid(stat.current_rec) else {
-        put(&mut out, &[0, props::MAPI_E_NOT_FOUND]);
+        put(&mut out, &[0, props::MAPI_E_NOT_FOUND, code_page]);
         out.push(0);
         return Ok(out);
     };
@@ -367,7 +385,7 @@ fn get_props(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Result
     let complete = props::push_value_list(&mut list, &values);
     put(
         &mut out,
-        &[0, if complete { 0 } else { EC_WARN_WITH_ERRORS }],
+        &[0, if complete { 0 } else { EC_WARN_WITH_ERRORS }, code_page],
     );
     out.push(0xFF);
     out.extend(list);
@@ -395,6 +413,9 @@ fn resolve_names(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Re
     if r.u8()? != 0 {
         let count = r.u32()?;
         check_count(&r, count, 2)?;
+        if count as usize > MAX_NAMES.min(budget_rows(columns.len())) {
+            return Err(BAD_BODY);
+        }
         for _ in 0..count {
             names.push(utf16_z(&mut r)?);
         }
@@ -461,17 +482,14 @@ fn get_matches(gal: &gal::Snapshot, body: &[u8], server_guid: &[u8; 16]) -> Resu
     let row_count = r.u32()?;
     let columns = read_opt_tags(&mut r)?.unwrap_or_else(|| props::USER_TAGS.to_vec());
     r.aux()?;
+    let row_count = (row_count as usize).min(budget_rows(columns.len()));
     let rows: Vec<&gal::Entry> = match filter {
-        Some(Some(prefix)) => gal
-            .matching(&prefix)
-            .into_iter()
-            .take(row_count as usize)
-            .collect(),
+        Some(Some(prefix)) => gal.matching(&prefix).into_iter().take(row_count).collect(),
         // No filter: the table is the CurrentRec object alone (MS-OXNSPI 3.1.4.1.10).
         _ => gal
             .by_mid(stat.current_rec)
             .into_iter()
-            .take(row_count as usize)
+            .take(row_count)
             .collect(),
     };
     let ctx = props::Ctx {
@@ -969,9 +987,10 @@ mod tests {
         b.push(0xFF);
         b.extend(le(&[2, 0x39FE_001F, 0x6666_0003, 0]));
         let body = call(&srv, &c, "GetProps", &b);
+        // StatusCode, ErrorCode, CodePage, HasPropertyValues (2.2.5.7.2).
         assert_eq!(
-            &body[..9],
-            &[&le(&[0, EC_WARN_WITH_ERRORS])[..], &[0xFF]].concat()[..]
+            &body[..13],
+            &[&le(&[0, EC_WARN_WITH_ERRORS, 1252])[..], &[0xFF]].concat()[..]
         );
         assert!(body
             .windows(10)
@@ -980,8 +999,8 @@ mod tests {
         b.extend(stat(0xDEAD, 0));
         b.extend([0, 0, 0, 0, 0]);
         assert_eq!(
-            &call(&srv, &c, "GetProps", &b)[..9],
-            &[&le(&[0, 0x8004_010F])[..], &[0]].concat()[..]
+            &call(&srv, &c, "GetProps", &b)[..13],
+            &[&le(&[0, 0x8004_010F, 1252])[..], &[0]].concat()[..]
         );
     }
 
@@ -1227,5 +1246,30 @@ mod tests {
             &call(&srv, &c, "GetMatches", &other)[..8],
             &le(&[0, MAPI_E_TOO_COMPLEX])[..]
         );
+    }
+
+    #[test]
+    fn test_reply_budget() {
+        let (srv, c) = bound(None);
+        let columns = vec![0x0FFF_0102; 1000];
+        // 2000 explicit MIds x 1000 columns: refused before any row is built.
+        let body = query_rows_body(&stat(0, 0), &[0x100011; 2000], 0, &columns);
+        assert_eq!(
+            run(handle(&srv, nspi("QueryRows", &body, Some(&c)))).response_code,
+            12
+        );
+        // A table read is cut to the budget instead; the STAT lets the client page on.
+        let wide = vec![0x3001_001F; 100_000];
+        let body = query_rows_body(&stat(0, 0), &[], u32::MAX, &wide);
+        let reply = call(&srv, &c, "QueryRows", &body);
+        let mut r = Reader(&reply[8..]);
+        let st = read_opt_stat(&mut r).unwrap().unwrap();
+        assert_eq!(st.num_pos as usize, MAX_CELLS / wide.len());
+        let names: Vec<&str> = vec!["a"; MAX_NAMES + 1];
+        let rep = run(handle(
+            &srv,
+            nspi("ResolveNames", &resolve_body(&names), Some(&c)),
+        ));
+        assert_eq!(rep.response_code, 12);
     }
 }
