@@ -1857,7 +1857,7 @@ $(OC_EMSMDB_TEST)/smb.conf:
 clean::
 	rm -rf $(OC_EMSMDB_TEST)
 
-bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs) $(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) libmapistore.$(SHLIBEXT).$(LIBMAPISTORE_SO_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION))
+bin/openchange-mapihttpd: Cargo.toml Cargo.lock mapihttpd/Cargo.toml $(wildcard mapihttpd/src/*.rs mapihttpd/src/*/*.rs) $(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) libmapiproxy.$(SHLIBEXT).$(LIBMAPIPROXY_SO_VERSION) libmapistore.$(SHLIBEXT).$(LIBMAPISTORE_SO_VERSION) libmapiserver.$(SHLIBEXT).$(LIBMAPISERVER_SO_VERSION))
 	LD_LIBRARY_PATH=$(CURDIR):$(CURDIR)/mapiproxy:$(CURDIR)/mapiproxy/servers:$(LD_LIBRARY_PATH) \
 		$(if $(OC_MAPIHTTP),OC_EMSMDB_LIBDIR=$(CURDIR)/mapiproxy/servers) $(CARGO) build --offline --locked --release $(if $(OC_MAPIHTTP),--features c-backend)
 	mkdir -p bin
