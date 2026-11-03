@@ -254,6 +254,36 @@ for read-only connects (directory mode 0660 for the service group).
 The first attempt from a second Windows host never reached the VM until its
 client configuration was corrected; the cause was not recorded.
 
+## M2c lab result (2026-11-03)
+
+Branch `m2c` (plan `docs/plans/2026-11-03-m2c-native-store.md`), openchangedb
+and mapistore indexing on MariaDB, no mapistore backend. `make
+check-oc-emsmdb` passed on the VM. Classic Microsoft 365 Outlook 16.0.19127
+with a new profile (cached mode left on) **opened the mailbox**: status bar
+"Connected to: Microsoft Exchange", "All folders are up to date", the server
+folder tree (Inbox, Drafts, Sent Items, Deleted Items, Outbox, Junk E-mail,
+RSS Feeds, Search Folders) and no local data file. Hierarchy ICS
+(SyncConfigure, upload state, FastTransfer GetBuffer) succeeded; Outlook
+created its own folders (Sync Issues tree) with RopCreateFolder.
+
+Fixed during the run, each with a test: inverted mapistore `run_init`
+status, GlobalCount over-read, mailbox fids in the public range, the MySQL
+URL (with password) written to the log, unescaped SQL and NULL locale in the
+MySQL backend, missing address templates (RopGetAddressTypes, "could not
+open the information store"), unchecked fid allocation that stored the
+mailbox root as fid 0 (provisioning then duplicated the special folders on
+every logon), and RopCreateFolder requiring a backend (now native).
+
+Known gaps, not blocking the open:
+
+- Folders and mail from Dovecot are not visible (M3).
+- Message uploads from the cache (`RopSyncImportMessageChange`, 0x72) answer
+  MAPI_E_NO_SUPPORT: native folders do not store messages (M4/M5).
+- One table QueryRows runs SQL with an unknown column (MySQL 1054); not yet
+  traced.
+- Many `Unsupported property tag` notices from openchangedb (warnings only).
+- NSPI is still Bind-only (M2b); Outlook waits about 90 s on it before Connect.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
