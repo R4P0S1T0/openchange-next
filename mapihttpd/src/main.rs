@@ -3,6 +3,7 @@
 mod auth;
 mod autodiscover;
 mod emsmdb;
+mod nspi;
 // Request handling uses the backend from Task 5; until then only the tests use it.
 #[cfg_attr(not(test), allow(dead_code))]
 mod backend;
@@ -329,6 +330,7 @@ fn main() -> ExitCode {
                 service: args.dovecot_service,
             },
             sessions: SessionTable::new(Duration::from_secs(args.session_idle_seconds)),
+            nspi: nspi::State::new(Duration::from_secs(args.session_idle_seconds)),
             backend,
             notification_wait: Duration::from_secs(args.notification_wait_seconds),
             autodiscover: autodiscover::Settings {

@@ -4,6 +4,7 @@ use crate::auth::{parse_authorization, AuthResult, Authenticator, BasicCredentia
 use crate::autodiscover;
 use crate::backend::Backend;
 use crate::emsmdb;
+use crate::nspi;
 use crate::session::{SessionGuard, SessionTable};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ pub const MAX_BODY: usize = 16 * 1024 * 1024;
 pub struct Server<A: Authenticator, B: Backend> {
     pub auth: A,
     pub sessions: SessionTable,
+    pub nspi: nspi::State,
     pub autodiscover: autodiscover::Settings,
     pub backend: B,
     /// How long NotificationWait waits for an event (3.2.2).
@@ -94,11 +96,19 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     if !ctype.to_ascii_lowercase().contains("application/mapi-http") {
         return Err(reply(req, 200, 4));
     }
-    // NSPI request types arrive with that endpoint.
+    // Each endpoint has its own Session Contexts: a cookie from one is unknown to the other.
+    let is_nspi = is_path(nspi::PATH);
+    let sessions = if is_nspi {
+        &srv.nspi.sessions
+    } else {
+        &srv.sessions
+    };
     let needs_session = match request_type {
         "PING" => false,
-        "Connect" if is_path("/mapi/emsmdb/") => false,
-        "Execute" | "Disconnect" | "NotificationWait" if is_path("/mapi/emsmdb/") => true,
+        "Connect" if !is_nspi => false,
+        "Execute" | "Disconnect" | "NotificationWait" if !is_nspi => true,
+        "Bind" if is_nspi => false,
+        t if is_nspi && nspi::SESSION_TYPES.contains(&t) => true,
         _ => return Err(reply(req, 200, 5)),
     };
     let (user, password) = basic_credentials(req)?;
@@ -107,12 +117,11 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     }
     if needs_session {
         // The session's credential hash stands in for the authenticator (decision 4).
-        let hash = srv.sessions.credential_hash(&user, &password);
+        let hash = sessions.credential_hash(&user, &password);
         let session = if request_type == "NotificationWait" {
-            srv.sessions
-                .begin_notification(req.cookie, hash, Instant::now())
+            sessions.begin_notification(req.cookie, hash, Instant::now())
         } else {
-            srv.sessions.begin(req.cookie, hash, Instant::now())
+            sessions.begin(req.cookie, hash, Instant::now())
         };
         return match session {
             Ok(guard) => Ok(Admitted::Session(guard)),
@@ -121,15 +130,15 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     }
     // PING with a live cookie keeps the session alive (3.1.5.3); otherwise authenticate.
     if request_type == "PING" {
-        let hash = srv.sessions.credential_hash(&user, &password);
-        if let Some(touched) = srv.sessions.touch(req.cookie, hash, Instant::now()) {
+        let hash = sessions.credential_hash(&user, &password);
+        if let Some(touched) = sessions.touch(req.cookie, hash, Instant::now()) {
             return Ok(Admitted::Session(touched));
         }
     }
     let canonical = authenticate(srv, req, &user, &password).await?;
     Ok(Admitted::User {
         user: canonical,
-        cred_hash: srv.sessions.credential_hash(&user, &password),
+        cred_hash: sessions.credential_hash(&user, &password),
     })
 }
 
@@ -172,6 +181,10 @@ pub async fn handle_body<A: Authenticator, B: Backend>(
         (Some("Connect"), Admitted::User { user, cred_hash }) => {
             return emsmdb::connect(srv, req, user, cred_hash).await
         }
+        (Some("Bind"), Admitted::User { cred_hash, .. }) => {
+            return nspi::bind(srv, req, cred_hash).await
+        }
+        (Some("Unbind"), Admitted::Session(s)) => nspi::unbind(req, s),
         (Some("Execute"), Admitted::Session(s)) => emsmdb::execute(srv, req, &s).await,
         (Some("Disconnect"), Admitted::Session(s)) => emsmdb::disconnect(srv, req, s).await,
         (Some("NotificationWait"), Admitted::Session(s)) => {
@@ -277,6 +290,7 @@ pub(crate) mod tests {
         Server {
             auth: FakeAuth::default(),
             sessions: SessionTable::new(Duration::from_secs(1800)),
+            nspi: nspi::State::new(Duration::from_secs(1800)),
             autodiscover: settings(),
             backend: FakeBackend::default(),
             notification_wait: Duration::from_secs(300),

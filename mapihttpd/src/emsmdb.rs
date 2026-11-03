@@ -8,7 +8,7 @@ use crate::session::SessionGuard;
 use std::time::Instant;
 
 /// X-ResponseCode "Invalid Request Body" (2.2.3.3.3).
-const BAD_BODY: u32 = 12;
+pub(crate) const BAD_BODY: u32 = 12;
 /// pcmsPollsMax, pcRetry, pcmsRetryDelay of the RPC path (dcesrv_exchange_emsmdb.h).
 const POLLS_MAX: u32 = 60_000;
 const RETRY_COUNT: u32 = 6;
@@ -19,10 +19,10 @@ const MAX_ROP_OUT: std::ops::RangeInclusive<u32> = 8..=0x40000;
 /// Flags Last, Size and SizeActual 0, as 2.2.4.1.3 note <2> has current servers send.
 const FAILURE_AUX: [u8; 8] = [0, 0, 4, 0, 0, 0, 0, 0];
 
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], u32> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], u32> {
         if n > self.0.len() {
             return Err(BAD_BODY);
         }
@@ -31,24 +31,28 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
 
-    fn u16(&mut self) -> Result<u16, u32> {
+    pub(crate) fn u8(&mut self) -> Result<u8, u32> {
+        Ok(self.take(1)?[0])
+    }
+
+    pub(crate) fn u16(&mut self) -> Result<u16, u32> {
         let b = self.take(2)?;
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
-    fn u32(&mut self) -> Result<u32, u32> {
+    pub(crate) fn u32(&mut self) -> Result<u32, u32> {
         let b = self.take(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     /// A size field followed by that many bytes.
-    fn sized(&mut self) -> Result<&'a [u8], u32> {
+    pub(crate) fn sized(&mut self) -> Result<&'a [u8], u32> {
         let n = self.u32()?;
         self.take(usize::try_from(n).map_err(|_| BAD_BODY)?)
     }
 
     /// A NUL-terminated ASCII string.
-    fn ascii_z(&mut self) -> Result<String, u32> {
+    pub(crate) fn ascii_z(&mut self) -> Result<String, u32> {
         let len = self.0.iter().position(|&b| b == 0).ok_or(BAD_BODY)?;
         let s = self.take(len)?;
         self.take(1)?;
@@ -59,7 +63,7 @@ impl<'a> Reader<'a> {
     }
 
     /// AuxiliaryBufferSize and AuxiliaryBuffer: walked for well-formedness, then dropped.
-    fn aux(&mut self) -> Result<Vec<u16>, u32> {
+    pub(crate) fn aux(&mut self) -> Result<Vec<u16>, u32> {
         walk_aux(self.sized()?)
     }
 }
@@ -108,7 +112,7 @@ fn parse_connect(body: &[u8], username: String) -> Result<(ConnectParams, Vec<u1
     Ok((params, r.aux()?))
 }
 
-fn put(out: &mut Vec<u8>, words: &[u32]) {
+pub(crate) fn put(out: &mut Vec<u8>, words: &[u32]) {
     for w in words {
         out.extend_from_slice(&w.to_le_bytes());
     }
@@ -122,7 +126,7 @@ fn failure_body(status: u32) -> Vec<u8> {
     out
 }
 
-fn with_body(req: &MapiRequest<'_>, body: Vec<u8>) -> MapiReply {
+pub(crate) fn with_body(req: &MapiRequest<'_>, body: Vec<u8>) -> MapiReply {
     let mut rep = reply(req, 200, 0);
     rep.body = body;
     rep
@@ -235,6 +239,8 @@ pub async fn notification_wait<A: Authenticator, B: Backend>(
 
 /// Drops idle Session Contexts and their backend sessions.
 pub async fn sweep<A: Authenticator, B: Backend>(srv: &Server<A, B>, now: Instant) {
+    // NSPI sessions hold no backend state.
+    srv.nspi.sessions.expire(now);
     for id in srv.sessions.expire(now) {
         srv.backend.disconnect(id).await;
     }
@@ -244,10 +250,10 @@ pub async fn sweep<A: Authenticator, B: Backend>(srv: &Server<A, B>, now: Instan
 mod tests {
     use super::*;
     use crate::backend::{Call, Connected, MAPI_E_LOGON_FAILED};
+    use crate::request::handle;
     use crate::request::tests::{
         connect as new_session, ping, run, server, TestServer, CLIENT_INFO,
     };
-    use crate::request::{format_reply, handle};
     use std::time::Duration;
 
     const CAPTURE: &str = "connect-m365-16.0.19127.20800.bin";
@@ -340,21 +346,6 @@ mod tests {
             let ok = rep.response_code == 12 || is_failure_body(&rep.body);
             assert!(ok && rep.http_status == 200, "length {n}");
         }
-    }
-
-    #[test]
-    fn test_bind_real_capture() {
-        let body = fixture("nspi-bind-m365-16.0.19127.20800.bin");
-        let req = MapiRequest {
-            path: "/mapi/nspi/",
-            ..post("Bind", &body, None)
-        };
-        let rep = run(handle(&server(), req));
-        assert_eq!((rep.http_status, rep.response_code), (200, 5));
-        assert_eq!(rep.request_type.as_deref(), Some("Bind"));
-        let out = format_reply(&rep, 1, "Thu, 30 Oct 2026 11:30:11 GMT");
-        assert!(out.starts_with(b"PROCESSING\r\nDONE\r\nX-ResponseCode: 5\r\n"));
-        assert!(out.ends_with(b"\r\n\r\n"));
     }
 
     #[test]
