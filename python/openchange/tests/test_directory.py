@@ -112,6 +112,14 @@ class DirectoryTests(unittest.TestCase):
         directory.write_directory(self.path, ORG, OU, [ALICE])
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o660)
 
+    def test_dn_special_addresses(self):
+        # Legal mailbox addresses with DN special characters must not break the whole sync.
+        odd = ["a+b=c@example.invalid", '"a,b;<c>"@example.invalid', "a\\b#c@example.invalid"]
+        directory.write_directory(self.path, ORG, OU, [Mailbox(e, "", True) for e in odd] + [ALICE])
+        db = self.open()
+        for email in odd + ["alice@example.invalid"]:
+            self.assertEqual(str(self.user(db, email)["sAMAccountName"]), email)
+
     def test_display_name_fallback(self):
         directory.write_directory(self.path, ORG, OU, [Mailbox("carol@example.invalid", "  ", True)])
         self.assertEqual(str(self.user(self.open(), "carol@example.invalid")["displayName"]), "carol@example.invalid")

@@ -59,7 +59,7 @@ def fetch_mailboxes(conn):
 
 
 def _entry(db, dn, **attrs):
-    msg = ldb.Message(ldb.Dn(db, dn))
+    msg = ldb.Message(dn if isinstance(dn, ldb.Dn) else ldb.Dn(db, dn))
     for name, value in attrs.items():
         msg[name] = ldb.MessageElement(value, ldb.FLAG_MOD_ADD, name)
     db.add(msg)
@@ -75,7 +75,9 @@ def _populate(db, org, ou, mailboxes):
     _entry(db, "CN=%s,CN=Administrative Groups,%s" % (ou, org_dn),
            objectClass=["top", "msExchAdminGroup"], cn=ou, msExchDefaultAdminGroup="TRUE")
     for box in mailboxes:
-        _entry(db, "CN=%s,%s" % (ldb.binary_encode(box.email), USERS_DN),
+        dn = ldb.Dn(db, "CN=placeholder," + USERS_DN)
+        dn.set_component(0, "CN", box.email)  # DN escaping: addresses may hold + = , ; " < > \\
+        _entry(db, dn,
                objectClass=["top", "person", "organizationalPerson", "user"],
                sAMAccountName=box.email, mail=box.email,
                displayName=box.name.strip() or box.email,
