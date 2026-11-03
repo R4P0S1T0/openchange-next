@@ -48,6 +48,26 @@ static struct ldb_context *samdb_init(TALLOC_CTX *owner, struct loadparm_context
 	const char *url;
 	char *error = NULL;
 	if (ev == NULL) return NULL;
+	url = lpcfg_parm_string(lp_ctx, NULL, "mapiproxy", "directory_url");
+	if (url != NULL) {
+		/* Plain LDB generated from PostfixAdmin: no Samba rootdse module, so publish its @ROOTDSE contexts. */
+		const char * const names[] = { "defaultNamingContext", "configurationNamingContext", NULL };
+		struct ldb_result *res = NULL;
+		struct ldb_dn *dn;
+		int i;
+		samdb_ctx = ldb_init(owner, ev);
+		if (samdb_ctx == NULL || ldb_connect(samdb_ctx, url, LDB_FLG_RDONLY, NULL) != LDB_SUCCESS ||
+		    ldb_search(samdb_ctx, samdb_ctx, &res, ldb_dn_new(samdb_ctx, samdb_ctx, "@ROOTDSE"),
+			       LDB_SCOPE_BASE, names, NULL) != LDB_SUCCESS || res->count != 1) goto directory_failure;
+		for (i = 0; names[i] != NULL; i++) {
+			dn = ldb_msg_find_attr_as_dn(samdb_ctx, samdb_ctx, res->msgs[0], names[i]);
+			if (dn == NULL || ldb_set_opaque(samdb_ctx, names[i], dn) != LDB_SUCCESS) goto directory_failure;
+		}
+		return samdb_ctx;
+	directory_failure:
+		talloc_free(samdb_ctx);
+		return NULL;
+	}
 	url = lpcfg_parm_string(lp_ctx, NULL, "dcerpc_mapiproxy", "samdb_url");
 	if (url == NULL) return samdb_connect(owner, ev, lp_ctx, system_session(lp_ctx), NULL, 0);
 	if (samdb_connect_url(owner, ev, lp_ctx, system_session(lp_ctx),

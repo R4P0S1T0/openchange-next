@@ -102,6 +102,45 @@ static int test_connect_without_samdb(const char *conf)
     return 0;
 }
 
+/* mapiproxy:directory_url names a plain LDB; it is opened without Samba's SamDB modules. */
+static int test_directory_ldb_opens(const char *conf)
+{
+    TALLOC_CTX *mem = talloc_new(NULL);
+    struct loadparm_context *lp = loadparm_init(mem);
+    struct ldb_context *ldb;
+    struct ldb_message *msg;
+    struct ldb_result *res;
+    struct emsmdbp_context *ctx;
+    const char *url;
+    CHECK(mem && lp && lpcfg_load(lp, conf));
+    url = lpcfg_parm_string(lp, NULL, "mapiproxy", "directory_url");
+    CHECK(url != NULL);
+    ldb = ldb_init(mem, NULL);
+    CHECK(ldb && ldb_connect(ldb, url, 0, NULL) == LDB_SUCCESS);
+    msg = ldb_msg_new(mem);
+    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "@ROOTDSE")));
+    CHECK(ldb_msg_add_string(msg, "defaultNamingContext", "DC=openchange") == 0 &&
+        ldb_msg_add_string(msg, "configurationNamingContext", "CN=Configuration,DC=openchange") == 0);
+    CHECK(ldb_add(ldb, msg) == LDB_SUCCESS);
+    msg = ldb_msg_new(mem);
+    CHECK(msg && (msg->dn = ldb_dn_new(msg, ldb, "CN=alice@example.invalid,CN=Users,DC=openchange")));
+    CHECK(ldb_msg_add_string(msg, "objectClass", "user") == 0 &&
+        ldb_msg_add_string(msg, "sAMAccountName", "alice@example.invalid") == 0);
+    CHECK(ldb_add(ldb, msg) == LDB_SUCCESS);
+    talloc_free(ldb);
+
+    ctx = __real_emsmdbp_init(lp, "alice@example.invalid", oc_db_ctx);
+    CHECK(ctx != NULL);
+    CHECK(ldb_get_default_basedn(ctx->samdb_ctx) && ldb_get_config_basedn(ctx->samdb_ctx));
+    CHECK(strcmp(ldb_dn_get_linearized(ldb_get_default_basedn(ctx->samdb_ctx)), "DC=openchange") == 0);
+    CHECK(strcmp(ldb_dn_get_linearized(ldb_get_config_basedn(ctx->samdb_ctx)), "CN=Configuration,DC=openchange") == 0);
+    CHECK(ldb_search(ctx->samdb_ctx, mem, &res, ldb_get_default_basedn(ctx->samdb_ctx), LDB_SCOPE_SUBTREE,
+        NULL, "sAMAccountName=alice@example.invalid") == LDB_SUCCESS && res->count == 1);
+    talloc_free(ctx);
+    talloc_free(mem);
+    return 0;
+}
+
 static int test_connect_fails_closed(void)
 {
     oc_emsmdb_session *session = NULL;
@@ -149,7 +188,7 @@ int main(int argc, char **argv)
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
     talloc_enable_null_tracking();
     if (seed_openchangedb(argv[1]) || test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
-        test_connect_fails_closed() || test_execute()) return 1;
+        test_directory_ldb_opens(argv[1]) || test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, fail-closed connect and bounded execute: OK\n");
     return 0;

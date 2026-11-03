@@ -1836,19 +1836,21 @@ OC_EMSMDB_TEST = bin/oc-emsmdb-test
 
 # liboc_emsmdb must not need a DCE/RPC call; only libmapiproxy may pull libdcerpc-server.
 .PHONY: check-oc-emsmdb
-check-oc-emsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
+check-oc-emsmdb: setup/mapistore/mapistore_namedprops.ldif libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 	! nm -D --undefined-only mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) | grep dcesrv_
+	rm -f $(OC_EMSMDB_TEST)/directory.ldb
 	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 
 bin/oc-emsmdb: testsuite/modernization/oc_emsmdb_smoke.c mapiproxy/servers/default/emsmdb/oc_emsmdb.c mapiproxy/servers/default/emsmdb/oc_emsmdb.h mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -Wl,--wrap=emsmdbp_init mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) $(EMSMDB_PROVIDER_LIBS) $(LIBS) $(SAMBASERVER_LIBS)
 
-# SamDB points at a missing directory, so connect fails before any directory lookup.
+# The directory LDB does not exist until the test creates it, so the first connects fail before any lookup.
 $(OC_EMSMDB_TEST)/smb.conf:
 	mkdir -p $(OC_EMSMDB_TEST)/private
-	printf '[global]\n\trealm = example.invalid\n\tprivate dir = %s\n\tmapiproxy:openchangedb = ldb://\n\tdcerpc_mapiproxy:samdb_url = tdb://%s/missing/sam.ldb\n' \
-		'$(CURDIR)/$(OC_EMSMDB_TEST)/private' '$(CURDIR)/$(OC_EMSMDB_TEST)' > $@
+	rm -f $(OC_EMSMDB_TEST)/directory.ldb
+	printf '[global]\n\trealm = example.invalid\n\tprivate dir = %s\n\tmapiproxy:openchangedb = ldb://\n\tdcerpc_mapiproxy:samdb_url = tdb://%s/missing/sam.ldb\n\tmapiproxy:directory_url = tdb://%s/directory.ldb\n\tnamedproperties:ldb_url = %s/private/named_properties.ldb\n\tnamedproperties:ldb_data = %s/setup/mapistore\n' \
+		'$(CURDIR)/$(OC_EMSMDB_TEST)/private' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)/$(OC_EMSMDB_TEST)' '$(CURDIR)' > $@
 
 clean::
 	rm -rf $(OC_EMSMDB_TEST)
