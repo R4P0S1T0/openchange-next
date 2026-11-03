@@ -23,17 +23,25 @@
 #include "libmapi/libmapi_private.h"
 #include "imap_backend.h"
 
-/* Process-wide settings, read once by init() from smb.conf. */
+/* Process-wide settings, read once by init() from smb.conf; `broken` when options are set but
+   unusable (a wrong password file mode, a non-loopback host). */
 static struct imap_settings *settings;
+static bool broken;
 
 _PUBLIC_ const struct imap_settings *imap_backend_settings(void)
 {
 	return settings;
 }
 
-_PUBLIC_ void imap_backend_set_settings(const struct imap_settings *s)
+_PUBLIC_ void imap_backend_set_state(const struct imap_settings *s, bool is_broken)
 {
 	settings = (struct imap_settings *) s;
+	broken = is_broken;
+}
+
+_PUBLIC_ bool imap_backend_broken(void)
+{
+	return broken;
 }
 
 static enum mapistore_error imap_init(void)
@@ -41,11 +49,17 @@ static enum mapistore_error imap_init(void)
 	if (settings) {
 		return MAPISTORE_SUCCESS;
 	}
-	settings = imap_settings_load(NULL, mapistore_backend_lp_ctx());
-	/* A failed init would fail every logon (mapistore_backend_run_init): without settings the
-	   backend stays loaded and offers no folders. */
+	struct loadparm_context *lp = mapistore_backend_lp_ctx();
+
+	settings = imap_settings_load(NULL, lp);
+	/* A failed init would fail every logon (mapistore_backend_run_init): the backend stays loaded.
+	   Unconfigured, it offers no folders; configured but unusable, listing fails so provisioning
+	   keeps the IMAP folders it knows (an empty list would drop them). */
 	if (!settings) {
-		OC_DEBUG(0, "IMAP backend: not configured; IMAP folders are not offered\n");
+		broken = lp && (lpcfg_parm_string(lp, NULL, "mapistore", "imap_master_password_file") ||
+				lpcfg_parm_string(lp, NULL, "mapistore", "imap_tunnel") ||
+				lpcfg_parm_string(lp, NULL, "mapistore", "imap_host"));
+		OC_DEBUG(0, "IMAP backend: %s; IMAP folders are not offered\n", broken ? "configuration unusable" : "not configured");
 	}
 	return MAPISTORE_SUCCESS;
 }

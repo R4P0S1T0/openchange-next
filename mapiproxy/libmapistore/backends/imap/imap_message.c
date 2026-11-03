@@ -44,9 +44,6 @@ _PUBLIC_ char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len)
 	char			*out;
 	size_t			i = 0, n = 0;
 
-	if (len > MAX_HEADER_TEXT) {
-		len = MAX_HEADER_TEXT;
-	}
 	out = talloc_array(mem_ctx, char, len * 3 + 1);
 	if (!out) {
 		return NULL;
@@ -94,11 +91,11 @@ _PUBLIC_ char *imap_decode_header(TALLOC_CTX *mem_ctx, const char *raw)
 	}
 	/* Only encoded words need decoding; libetpan's conversion drops invalid raw bytes silently. */
 	if (strstr(raw, "=?") && mailmime_encoded_phrase_parse("utf-8", raw, strlen(raw), &idx, "utf-8", &decoded) == MAILIMF_NO_ERROR && decoded) {
-		out = imap_utf8_clean(mem_ctx, decoded, strlen(decoded));
+		out = imap_utf8_clean(mem_ctx, decoded, MIN(strlen(decoded), MAX_HEADER_TEXT));
 		free(decoded);
 		return out;
 	}
-	return imap_utf8_clean(mem_ctx, raw, strlen(raw));
+	return imap_utf8_clean(mem_ctx, raw, MIN(strlen(raw), MAX_HEADER_TEXT));
 }
 
 static time_t date_to_time(int year, int month, int day, int hour, int min, int sec, int zone)
@@ -149,7 +146,7 @@ static char *address_text(TALLOC_CTX *mem_ctx, const struct mailimap_address *a,
 	}
 	name = talloc_asprintf(mem_ctx, "%s%s%s", a->ad_mailbox_name, a->ad_host_name ? "@" : "",
 			       a->ad_host_name ? a->ad_host_name : "");
-	return name ? imap_utf8_clean(mem_ctx, name, strlen(name)) : NULL;
+	return name ? imap_utf8_clean(mem_ctx, name, MIN(strlen(name), MAX_HEADER_TEXT)) : NULL;
 }
 
 /* PidTagDisplayTo/Cc: the recipients' names (their address when unnamed), joined by "; ". */
@@ -336,7 +333,7 @@ static enum mapistore_error fetch_rows(TALLOC_CTX *mem_ctx, struct imap_folder *
 		if (ft) mailimap_fetch_type_free(ft);
 		return conn ? MAPISTORE_ERR_NO_MEMORY : MAPISTORE_ERR_CONN_REFUSED;
 	}
-	r = mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result);
+	r = imap_conn_check(conn, mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result));
 	mailimap_fetch_type_free(ft);
 	if (r != MAILIMAP_NO_ERROR) {
 		return MAPISTORE_ERR_NOT_FOUND;
@@ -362,6 +359,8 @@ static enum mapistore_error fetch_rows(TALLOC_CTX *mem_ctx, struct imap_folder *
 			}
 		}
 		if (row->uid == 0) {
+			/* An unsolicited FETCH (a flag change) without UID: not a row, and not the next one's. */
+			memset(row, 0, sizeof *row);
 			continue;
 		}
 		uri = imap_message_uri(rows, f, uidvalidity, row->uid);
@@ -731,7 +730,7 @@ static char *fetch_body(TALLOC_CTX *mem_ctx, struct imap_conn *conn, uint32_t ui
 		if (set) mailimap_set_free(set);
 		return NULL;
 	}
-	if (mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result) == MAILIMAP_NO_ERROR) {
+	if (imap_conn_check(conn, mailimap_uid_fetch(imap_conn_session(conn), set, ft, &result)) == MAILIMAP_NO_ERROR) {
 		for (it = clist_begin(result); it && !out; it = clist_next(it)) {
 			const struct mailimap_msg_att *att = clist_content(it);
 

@@ -98,7 +98,9 @@ static char *decode_segment(TALLOC_CTX *mem_ctx, const char *s, size_t len, char
 			}
 			hi = hexval(s[i + 1]);
 			lo = hexval(s[i + 2]);
-			if (hi < 0 || lo < 0 || (hi == 0 && lo == 0) || (char) (hi << 4 | lo) == delimiter) {
+			/* No control bytes (an IMAP line break would end the command) and no delimiter. */
+			if (hi < 0 || lo < 0 || (hi << 4 | lo) < 0x20 || (hi << 4 | lo) == 0x7F ||
+			    (char) (hi << 4 | lo) == delimiter) {
 				talloc_free(out);
 				return NULL;
 			}

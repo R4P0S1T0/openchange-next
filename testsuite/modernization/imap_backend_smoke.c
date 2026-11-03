@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,6 +244,12 @@ static int test_settings_password_file(void)
     CHECK(strcmp(s->master_user, "openchange") == 0 && s->tunnel == NULL);
     if (write_file(path, "", 0600)) return 1;
     CHECK(imap_settings_load(root, lp) == NULL); /* empty */
+    /* STARTTLS does not verify certificates: the master password stays on loopback (M3). */
+    if (write_file(path, "s3cret\n", 0600)) return 1;
+    CHECK(lpcfg_set_cmdline(lp, "mapistore:imap_host", "192.0.2.1"));
+    CHECK(imap_settings_load(root, lp) == NULL);
+    CHECK(lpcfg_set_cmdline(lp, "mapistore:imap_host", "::1"));
+    CHECK(imap_settings_load(root, lp) != NULL);
     return 0;
 }
 
@@ -264,6 +271,7 @@ static int test_mailbox_name_round_trip(void)
     CHECK(imap_uri_parse(root, "imap://u/P/Sub/", '.', &user, &mailbox) == 0 && strcmp(mailbox, "P.Sub") == 0);
     CHECK(imap_uri_parse(root, "imap://u/a%2/", '/', &user, &mailbox) != 0);
     CHECK(imap_uri_parse(root, "imap://u/a%00b/", '/', &user, &mailbox) != 0);
+    CHECK(imap_uri_parse(root, "imap://u/a%0D%0Ab/", '/', &user, &mailbox) != 0); /* no IMAP line breaks */
     CHECK(imap_uri_parse(root, "imap://u//", '/', &user, &mailbox) != 0);
     CHECK(imap_uri_parse(root, "sogo://u/INBOX/", '/', &user, &mailbox) != 0);
     CHECK(strcmp(imap_display_name(root, "Caf&AOk-", '/'), "Caf\xc3\xa9") == 0);
@@ -437,11 +445,11 @@ static int test_imap_down_is_an_error(void)
     struct imap_settings down = tunnel;
     struct mapistore_contexts_list *list = NULL;
     down.tunnel = "/nonexistent/imap";
-    imap_backend_set_settings(&down);
+    imap_backend_set_state(&down, false);
     CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_ERR_CONN_REFUSED);
-    imap_backend_set_settings(NULL);
+    imap_backend_set_state(NULL, false);
     CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_SUCCESS && list == NULL);
-    imap_backend_set_settings(&tunnel);
+    imap_backend_set_state(&tunnel, false);
     return 0;
 }
 
@@ -696,11 +704,55 @@ static int test_oversize_message_notice(void)
     struct mapistore_property_data d[6];
     uint32_t count = 9;
     small.max_message_size = 100;
-    imap_backend_set_settings(&small);
+    imap_backend_set_state(&small, false);
     if (open_message("Projects", 1, &msg, d)) return 1;
     CHECK(d[0].error == 0 && strstr(d[0].data, "too large") != NULL && d[1].error == MAPISTORE_ERR_NOT_FOUND);
     CHECK(imap_message_get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count == 0);
-    imap_backend_set_settings(&tunnel);
+    imap_backend_set_state(&tunnel, false);
+    return 0;
+}
+
+/* Configured but unusable (password file mode, typo): an error, never an empty list that would
+   make provisioning drop every IMAP folder. */
+static int test_broken_config_is_an_error(void)
+{
+    struct mapistore_contexts_list *list = NULL;
+    imap_backend_set_state(NULL, true);
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_ERR_CONN_REFUSED);
+    imap_backend_set_state(&tunnel, false);
+    return 0;
+}
+
+/* Bodies are not cut at the header limit. */
+static int test_large_body_complete(void)
+{
+    struct imap_conn *conn = imap_conn_open(root, &tunnel, "alice@example.invalid");
+    char *big = talloc_asprintf(root, "From: x@example.invalid\r\nSubject: Big\r\n\r\n");
+    void *msg;
+    struct mapistore_property_data d[6];
+    size_t i;
+    CHECK(conn && big);
+    for (i = 0; i < 2000; i++) big = talloc_asprintf_append_buffer(big, "line %04zu of a long body\r\n", i);
+    CHECK(mailimap_create(imap_conn_session(conn), "Big") == MAILIMAP_NO_ERROR);
+    if (append(imap_conn_session(conn), "Big", big)) return 1;
+    if (open_message("Big", 0, &msg, d)) return 1;
+    CHECK(d[0].error == 0 && strlen(d[0].data) == 2000 * strlen("line 0000 of a long body\r\n"));
+    CHECK(mailimap_delete(imap_conn_session(conn), "Big") == MAILIMAP_NO_ERROR);
+    talloc_free(conn);
+    return 0;
+}
+
+/* Dovecot restarted under a live session: the next call reconnects instead of failing for good. */
+static int test_reconnect_after_drop(void)
+{
+    struct imap_folder *inbox = context_for("INBOX");
+    struct imap_conn *conn;
+    uint32_t count = 0;
+    CHECK(inbox != NULL && (conn = imap_context_conn(inbox->ctx)) != NULL);
+    CHECK(imap_conn_pid(conn) > 0 && kill(imap_conn_pid(conn), SIGKILL) == 0);
+    waitpid(imap_conn_pid(conn), NULL, 0);
+    imap_folder_get_child_count(inbox, MAPISTORE_MESSAGE_TABLE, &count); /* fails: the server is gone */
+    CHECK(imap_folder_get_child_count(inbox, MAPISTORE_MESSAGE_TABLE, &count) == MAPISTORE_SUCCESS && count == 2);
     return 0;
 }
 
@@ -727,12 +779,13 @@ int main(int argc, char **argv)
     fidx.next = 0x2000;
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
         test_username_is_checked() || test_settings_password_file() || test_mailbox_name_round_trip() ||
-        (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_create_context_without_namespace() || test_uri_user_must_match() ||
+        (imap_backend_set_state(&tunnel, false), 0) || test_list_contexts_roles() || test_create_context_without_namespace() || test_uri_user_must_match() ||
         test_hierarchy_table_rows() || test_folder_properties() || test_create_root_folder_not_found() ||
         test_imap_down_is_an_error() || test_message_table_columns() || test_message_ids_stable() ||
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
-        test_oversize_message_notice() || test_backend_registers()) {
+        test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
+        test_reconnect_after_drop() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

@@ -22,6 +22,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include <talloc.h>
 
 /* Where and how to reach Dovecot (smb.conf mapistore:imap_*). */
@@ -74,6 +75,10 @@ int imap_status(struct imap_conn *conn, const char *name, struct imap_status *st
 char imap_conn_delimiter(struct imap_conn *conn);
 /* False once the server or the stream has gone away. */
 bool imap_conn_alive(struct imap_conn *conn);
+/* Passes a libetpan result through, marking the connection dead on a stream error. */
+int imap_conn_check(struct imap_conn *conn, int r);
+/* The tunnel child, or -1 (tests). */
+pid_t imap_conn_pid(struct imap_conn *conn);
 
 /* libetpan session of an open connection (for the fetch code). */
 struct mailimap *imap_conn_session(struct imap_conn *conn);

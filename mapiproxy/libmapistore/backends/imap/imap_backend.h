@@ -132,8 +132,9 @@ int imap_uri_parse(TALLOC_CTX *mem_ctx, const char *uri, char delimiter, char **
 /* The leaf of `mailbox`, modified UTF-7 decoded to UTF-8 (raw when malformed). */
 char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter);
 
-/* Replaces the settings (tests; NULL = not configured). */
-void imap_backend_set_settings(const struct imap_settings *settings);
+/* Replaces the settings (tests; NULL with !broken = not configured). */
+void imap_backend_set_state(const struct imap_settings *settings, bool broken);
+bool imap_backend_broken(void);
 
 /* Sets the context, folder, table, message and properties operations. */
 void imap_backend_fill(struct mapistore_backend *backend);

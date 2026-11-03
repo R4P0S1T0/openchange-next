@@ -38,6 +38,7 @@ extern char **environ;
 
 struct imap_conn {
 	mailimap	*imap;
+	bool		dead;		/* a command hit a stream error: reconnect */
 	pid_t		tunnel_pid;
 	char		delimiter;	/* hierarchy delimiter, from LIST "" "" */
 };
@@ -62,6 +63,8 @@ static int imap_conn_destructor(struct imap_conn *conn)
 	}
 	return 0;
 }
+
+static bool is_loopback(const char *host);
 
 static char *read_password(TALLOC_CTX *mem_ctx, const char *path)
 {
@@ -119,6 +122,13 @@ _PUBLIC_ struct imap_settings *imap_settings_load(TALLOC_CTX *mem_ctx, struct lo
 		return NULL;
 	}
 	s->port = port;
+	/* mailimap_socket_starttls does not verify the server certificate, so the master password
+	   only goes to a loopback Dovecot in M3. */
+	if (!s->tunnel && !is_loopback(s->host)) {
+		OC_DEBUG(0, "IMAP backend: mapistore:imap_host must be a loopback address\n");
+		talloc_free(s);
+		return NULL;
+	}
 	s->max_message_size = lpcfg_parm_ulong(lp_ctx, NULL, "mapistore", "imap_max_message_size", 32 * 1024 * 1024);
 	if (!s->tunnel) {
 		password_file = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "imap_master_password_file");
@@ -290,7 +300,20 @@ _PUBLIC_ char imap_conn_delimiter(struct imap_conn *conn)
 
 _PUBLIC_ bool imap_conn_alive(struct imap_conn *conn)
 {
-	return conn && conn->imap && conn->imap->imap_stream;
+	return conn && !conn->dead && conn->imap && conn->imap->imap_stream;
+}
+
+_PUBLIC_ int imap_conn_check(struct imap_conn *conn, int r)
+{
+	if (conn && (r == MAILIMAP_ERROR_STREAM || r == MAILIMAP_ERROR_CONNECTION_REFUSED)) {
+		conn->dead = true;
+	}
+	return r;
+}
+
+_PUBLIC_ pid_t imap_conn_pid(struct imap_conn *conn)
+{
+	return conn ? conn->tunnel_pid : -1;
 }
 
 _PUBLIC_ struct mailimap *imap_conn_session(struct imap_conn *conn)
@@ -343,7 +366,7 @@ _PUBLIC_ int imap_list(struct imap_conn *conn, TALLOC_CTX *mem_ctx, struct imap_
 	if (!conn || !mailboxes || !count) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
-	if (mailimap_list(conn->imap, "", "*", &result) != MAILIMAP_NO_ERROR) {
+	if (imap_conn_check(conn, mailimap_list(conn->imap, "", "*", &result)) != MAILIMAP_NO_ERROR) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
 	out = talloc_array(mem_ctx, struct imap_mailbox, clist_count(result) ? clist_count(result) : 1);
@@ -380,7 +403,7 @@ _PUBLIC_ int imap_examine(struct imap_conn *conn, const char *name, struct imap_
 	if (!conn || !name || !status) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
-	if (mailimap_examine(conn->imap, name) != MAILIMAP_NO_ERROR) {
+	if (imap_conn_check(conn, mailimap_examine(conn->imap, name)) != MAILIMAP_NO_ERROR) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
 	sel = conn->imap->imap_selection_info;
@@ -416,7 +439,7 @@ _PUBLIC_ int imap_status(struct imap_conn *conn, const char *name, struct imap_s
 		mailimap_status_att_list_free(atts);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
-	r = mailimap_status(conn->imap, name, atts, &result);
+	r = imap_conn_check(conn, mailimap_status(conn->imap, name, atts, &result));
 	mailimap_status_att_list_free(atts);
 	if (r != MAILIMAP_NO_ERROR || !result) {
 		return MAPISTORE_ERR_NOT_FOUND;

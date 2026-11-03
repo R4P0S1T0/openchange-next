@@ -197,7 +197,7 @@ _PUBLIC_ enum mapistore_error imap_list_contexts(const char *username, struct in
 
 	*listp = NULL;
 	if (!settings) {
-		return MAPISTORE_SUCCESS;
+		return imap_backend_broken() ? MAPISTORE_ERR_CONN_REFUSED : MAPISTORE_SUCCESS;
 	}
 	conn = imap_conn_open(mem_ctx, settings, username);
 	if (!conn) {
