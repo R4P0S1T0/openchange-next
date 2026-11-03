@@ -34,6 +34,12 @@ BASE_DN = "DC=openchange"
 USERS_DN = "CN=Users," + BASE_DN
 CONFIG_DN = "CN=Configuration," + BASE_DN
 
+# Address templates per locale, as setup/AD/oc_provision_configuration_org.ldif provisions them;
+# RopGetAddressTypes returns these types for the session's LCID.
+ADDRESS_TYPES = ["EX", "SMTP", "CCMAIL", "MSA", "MS", "x400"]
+TEMPLATE_LCIDS = ("401 402 403 404 405 406 407 408 409 40b 40c 40d 40e 410 411 412 413 414 415 416 418 419 "
+                  "41a 41b 41d 41e 41f 422 424 425 426 427 42d 804 816 81a c0a c0c").split()
+
 QUERY = ("SELECT m.username, m.name, (m.active = 1 AND d.active = 1) "
          "FROM mailbox m JOIN domain d ON d.domain = m.domain")
 
@@ -74,6 +80,12 @@ def _populate(db, org, ou, mailboxes):
     _entry(db, org_dn, objectClass=["top", "msExchOrganizationContainer"], cn=org)
     _entry(db, "CN=%s,CN=Administrative Groups,%s" % (ou, org_dn),
            objectClass=["top", "msExchAdminGroup"], cn=ou, msExchDefaultAdminGroup="TRUE")
+    _entry(db, "CN=Addressing," + org_dn, objectClass=["top", "container"], cn="Addressing")
+    templates = "CN=Address-Templates,CN=Addressing," + org_dn
+    _entry(db, templates, objectClass=["top", "container"], cn="Address-Templates", msExchTemplateRDNs=TEMPLATE_LCIDS)
+    for lcid in TEMPLATE_LCIDS:
+        _entry(db, "CN=%s,%s" % (lcid, templates), objectClass=["top", "container"], cn=lcid,
+               msExchTemplateRDNs=ADDRESS_TYPES)
     for box in mailboxes:
         dn = ldb.Dn(db, "CN=placeholder," + USERS_DN)
         dn.set_component(0, "CN", box.email)  # DN escaping: addresses may hold + = , ; " < > \\

@@ -120,6 +120,17 @@ class DirectoryTests(unittest.TestCase):
         for email in odd + ["alice@example.invalid"]:
             self.assertEqual(str(self.user(db, email)["sAMAccountName"]), email)
 
+    def test_address_templates(self):
+        # RopGetAddressTypes reads CN=<lcid hex>,CN=ADDRESS-TEMPLATES,CN=ADDRESSING under the organization.
+        directory.write_directory(self.path, ORG, OU, [ALICE])
+        org_dn = "CN=First Organization,CN=Microsoft Exchange,CN=Services,CN=Configuration,DC=openchange"
+        res = self.open().search(base="CN=ADDRESS-TEMPLATES,CN=ADDRESSING," + org_dn, scope=ldb.SCOPE_SUBTREE,
+                                 expression="(CN=416)", attrs=["msExchTemplateRDNs"])
+        self.assertEqual(len(res), 1)
+        self.assertEqual([str(v) for v in res[0]["msExchTemplateRDNs"]], ["EX", "SMTP", "CCMAIL", "MSA", "MS", "x400"])
+        self.assertEqual(len(self.open().search(base="CN=ADDRESS-TEMPLATES,CN=ADDRESSING," + org_dn,
+                                                scope=ldb.SCOPE_ONELEVEL, expression="(objectClass=container)")), 38)
+
     def test_display_name_fallback(self):
         directory.write_directory(self.path, ORG, OU, [Mailbox("carol@example.invalid", "  ", True)])
         self.assertEqual(str(self.user(self.open(), "carol@example.invalid")["displayName"]), "carol@example.invalid")
