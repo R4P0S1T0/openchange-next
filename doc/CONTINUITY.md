@@ -16,8 +16,10 @@ or trigger further CI during this pause.
   informational warnings; no suppressions.
 - Do not redo Tasks 1–7. M1 lab acceptance ran on 2026-11-03 with Microsoft
   365 Outlook (partial; see the MODERNIZATION.md section of that date). Still
-  open: Outlook 2016/2019 and the c-backend build on the VM. Next is M2's
-  directory/identity work.
+  open: Outlook 2016/2019. M2a (directory + successful Connect, branch `m2a`)
+  ran in the lab on 2026-11-03: Connect succeeds, RopLogon fails for lack of a
+  mailbox backend. Next: M2c (minimal store so the profile opens), then M2b
+  (NSPI over MAPI/HTTP).
   Real Connect remains deliberately fail-closed until M2.
 - Preserve existing worktrees, ignored evidence and the untracked draft plan.
 

@@ -220,6 +220,40 @@ Still open for M1: Outlook 2016 or 2019 (and 2013 SP1 if licensed), the
 from the same client never reached the VM; the next one did. The cause was not
 confirmed; the client proxy issue in [MAPIHTTP.md](MAPIHTTP.md) is the likely one.
 
+## M2a lab result (2026-11-03)
+
+Branch `m2a` (plan `docs/plans/2026-11-03-m2a-directory-connect.md`) on the
+same lab VM, now with the **C backend** (`--enable-mapihttp`, native build on
+the VM): `make check-oc-emsmdb check-emsmdb check-asyncemsmdb check-mapihttp`
+passed there (C smoke tests, 85 Rust tests without and with `c-backend`),
+the C Connect paths also under ASan/UBSan; both Python suites passed.
+
+Setup: `openchange_directory_sync` every 60 s from a column-restricted,
+read-only MariaDB account; `mapiproxy:directory_url` in a dedicated smb.conf;
+openchangedb created with the project's `OpenChangeDB.setup/add_server/
+add_public_folders` (no SamDB). The daemon and `liboc_emsmdb` were copied by
+hand (no install rule before M7).
+
+Observed with classic Microsoft 365 Outlook 16.0.19127 and a new profile:
+
+- Autodiscover returned the directory LegacyDN (`.../cn=teste-ec0903c6`).
+- Connect succeeded (StatusCode 0, `MapiContext` cookie, display name from
+  PostfixAdmin); each Connect was preceded by exactly one 401 challenge and
+  **no 401 preceded any Execute** (Task 0 finding 1 answered: the session
+  cookie and Basic credentials are reused).
+- Outlook created the profile window, but RopLogon (`0xFE`) failed in mailbox
+  provisioning: with no mapistore backend there is no fallback context
+  (`emsmdbp_provisioning.c`, MAPI_E_DISK_ERROR). Outlook then looped
+  Connect/Execute/Disconnect (about 50 cycles) and showed a local data file.
+  This is the expected M2a limit; M2c adds the store.
+- NSPI Bind still answers code 5 (M2b).
+
+Found and fixed during the run: mapistore refused to initialize without any
+backend (blocking Connect), and ldb's tdb backend opens files read-write even
+for read-only connects (directory mode 0660 for the service group).
+The first attempt from a second Windows host never reached the VM until its
+client configuration was corrected; the cause was not recorded.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
