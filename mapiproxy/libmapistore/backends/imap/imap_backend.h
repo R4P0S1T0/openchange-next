@@ -27,6 +27,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include "gen_ndr/exchange.h"
 
 struct mapistore_backend;
@@ -45,6 +46,22 @@ enum imap_object_type {
 };
 
 struct imap_folder;
+
+/* One message of a message table, from UID FETCH (ENVELOPE FLAGS RFC822.SIZE INTERNALDATE BODYSTRUCTURE). */
+struct imap_message_row {
+	uint32_t	uid;
+	uint32_t	size;
+	time_t		internal;	/* INTERNALDATE: delivery */
+	time_t		date;		/* Date: header */
+	bool		seen, flagged, answered, draft, has_attachments;
+	char		*subject;	/* UTF-8, decoded */
+	char		*from_name;
+	char		*from_address;
+	char		*display_to;
+	char		*display_cc;
+	char		*message_id;
+	uint64_t	mid;
+};
 
 struct imap_context {
 	char			*username;	/* the session's user; the only mailbox ever opened */
@@ -69,6 +86,7 @@ struct imap_table {
 	uint32_t			row_count;
 	char				**children;	/* folder table */
 	struct imap_message_row		*rows;		/* message table */
+	uint32_t			uidvalidity;	/* of the mailbox when the rows were read */
 };
 
 /* Entry point dlopen()ed by mapistore_backend_init. */
@@ -117,6 +135,11 @@ uint8_t *imap_bool(TALLOC_CTX *mem_ctx, bool v);
 uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v);
 
 /* imap_message.c */
+char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len);
+char *imap_decode_header(TALLOC_CTX *mem_ctx, const char *raw);
+char *imap_message_uri(TALLOC_CTX *mem_ctx, struct imap_folder *f, uint32_t uidvalidity, uint32_t uid);
+void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, const struct imap_folder *f,
+		     enum MAPITAGS tag);
 enum mapistore_error imap_message_table_load(struct imap_table *t);
 enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
 				      struct mapistore_property_data *data);

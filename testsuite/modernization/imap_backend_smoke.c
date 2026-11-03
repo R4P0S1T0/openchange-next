@@ -53,6 +53,38 @@ static const char second_message[] =
     "\r\n"
     "Second body.\r\n";
 
+static const char latin1_message[] =
+    "From: =?ISO-8859-1?Q?Jos=E9?= <jose@example.invalid>\r\n"
+    "To: Alice <alice@example.invalid>, bob@example.invalid\r\n"
+    "Cc: Carol <carol@example.invalid>\r\n"
+    "Subject: =?ISO-8859-1?Q?Ol=E1?=\r\n"
+    "Date: Mon, 02 Nov 2026 09:30:00 +0000\r\n"
+    "MIME-Version: 1.0\r\n"
+    "Content-Type: text/plain; charset=ISO-8859-1\r\n"
+    "Content-Transfer-Encoding: quoted-printable\r\n"
+    "\r\n"
+    "Ol=E1, tudo bem?\r\n";
+
+static const char attachment_message[] =
+    "From: Ana <ana@example.invalid>\r\n"
+    "To: Alice <alice@example.invalid>\r\n"
+    "Subject: With attachment\r\n"
+    "Date: Tue, 03 Nov 2026 12:00:00 -0300\r\n"
+    "MIME-Version: 1.0\r\n"
+    "Content-Type: multipart/mixed; boundary=\"b1\"\r\n"
+    "\r\n"
+    "--b1\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "\r\n"
+    "<p>See <b>attached</b>.</p>\r\n"
+    "--b1\r\n"
+    "Content-Type: application/octet-stream; name=\"report.bin\"\r\n"
+    "Content-Disposition: attachment; filename=\"report.bin\"\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    "AAECAwQ=\r\n"
+    "--b1--\r\n";
+
 static int write_file(const char *path, const char *text, mode_t mode)
 {
     FILE *f = fopen(path, "w");
@@ -111,6 +143,13 @@ static int populate(void)
     CHECK(mailimap_create(imap, "Projects") == MAILIMAP_NO_ERROR);
     CHECK(mailimap_create(imap, "Projects/Sub") == MAILIMAP_NO_ERROR);
     if (append(imap, "INBOX", plain_message) || append(imap, "INBOX", second_message)) return 1;
+    {
+        struct mailimap_flag_list *seen = mailimap_flag_list_new_empty();
+        CHECK(seen && mailimap_flag_list_add(seen, mailimap_flag_new_seen()) == MAILIMAP_NO_ERROR);
+        CHECK(mailimap_append(imap, "Projects", seen, NULL, latin1_message, strlen(latin1_message)) == MAILIMAP_NO_ERROR);
+        mailimap_flag_list_free(seen);
+    }
+    if (append(imap, "Projects", attachment_message)) return 1;
     talloc_free(conn);
     return 0;
 }
@@ -374,6 +413,100 @@ static int test_imap_down_is_an_error(void)
     return 0;
 }
 
+static enum MAPITAGS message_columns[] = { PidTagSubject, PidTagSenderName, PidTagSenderSmtpAddress,
+    PidTagDisplayTo, PidTagDisplayCc, PidTagMessageDeliveryTime, PidTagMessageSize, PidTagMessageFlags,
+    PidTagHasAttachments, PidTagMessageClass, PidTagMid, PidTagClientSubmitTime, PidTagInternetMessageId };
+#define N_MESSAGE_COLUMNS (sizeof message_columns / sizeof message_columns[0])
+
+static int message_rows(const char *mailbox, void **tablep, uint32_t *count)
+{
+    void *folder = context_for(mailbox);
+    CHECK(folder != NULL);
+    CHECK(imap_folder_open_table(folder, root, MAPISTORE_MESSAGE_TABLE, 3, tablep, count) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_set_columns(*tablep, N_MESSAGE_COLUMNS, message_columns) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+/* 2026-11-02 09:30:00 UTC as FILETIME (100 ns since 1601). */
+#define NOV2_0930 ((uint64_t) (1793611800LL + 11644473600LL) * 10000000ULL)
+
+static uint64_t filetime(const struct mapistore_property_data *d)
+{
+    const struct FILETIME *ft = d->data;
+    return ((uint64_t) ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+}
+
+static int test_message_table_columns(void)
+{
+    void *table;
+    struct mapistore_property_data *r;
+    uint32_t count = 0, flags;
+    CHECK(!message_rows("Projects", &table, &count) && count == 2);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(r[0].error == 0 && strcmp(r[0].data, "Ol\xc3\xa1") == 0);
+    CHECK(r[1].error == 0 && strcmp(r[1].data, "Jos\xc3\xa9") == 0);
+    CHECK(r[2].error == 0 && strcmp(r[2].data, "jose@example.invalid") == 0);
+    CHECK(r[3].error == 0 && strcmp(r[3].data, "Alice; bob@example.invalid") == 0);
+    CHECK(r[4].error == 0 && strcmp(r[4].data, "Carol") == 0);
+    CHECK(r[5].error == 0 && filetime(&r[5]) != 0);               /* INTERNALDATE: the time of the APPEND */
+    CHECK(r[6].error == 0 && *(uint32_t *) r[6].data == strlen(latin1_message));
+    flags = *(uint32_t *) r[7].data;
+    CHECK(r[7].error == 0 && (flags & 0x1) && !(flags & 0x10)); /* MSGFLAG_READ, no MSGFLAG_HASATTACH */
+    CHECK(r[8].error == 0 && *(uint8_t *) r[8].data == 0);
+    CHECK(r[9].error == 0 && strcmp(r[9].data, "IPM.Note") == 0);
+    CHECK(r[10].error == 0 && (*(uint64_t *) r[10].data & 0xFFFF) == 1);
+    CHECK(r[11].error == 0 && filetime(&r[11]) == NOV2_0930);    /* Date: header */
+    CHECK(r[12].error == MAPISTORE_ERR_NOT_FOUND);                /* no Message-ID header */
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 1, &r) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(r[0].data, "With attachment") == 0);
+    flags = *(uint32_t *) r[7].data;
+    CHECK(!(flags & 0x1) && (flags & 0x10) && *(uint8_t *) r[8].data == 1);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 2, &r) == MAPISTORE_ERR_NOT_FOUND);
+    return 0;
+}
+
+static int test_message_ids_stable(void)
+{
+    void *table, *again;
+    struct mapistore_property_data *r;
+    uint32_t count;
+    uint64_t mid;
+    CHECK(!message_rows("INBOX", &table, &count) && count == 2);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    mid = *(uint64_t *) r[10].data;
+    CHECK(r[12].error == 0 && strcmp(r[12].data, "<plain@example.invalid>") == 0);
+    CHECK(!message_rows("INBOX", &again, &count));
+    CHECK(imap_table_get_row(again, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(*(uint64_t *) r[10].data == mid);
+    return 0;
+}
+
+/* A mailbox deleted and recreated in webmail has a new UIDVALIDITY: its messages get new MIDs. */
+static int test_uidvalidity_change_new_mids(void)
+{
+    struct imap_conn *conn = imap_conn_open(root, &tunnel, "alice@example.invalid");
+    mailimap *imap = imap_conn_session(conn);
+    void *table;
+    struct mapistore_property_data *r;
+    uint32_t count;
+    uint64_t before;
+    CHECK(conn != NULL);
+    CHECK(mailimap_create(imap, "Temp") == MAILIMAP_NO_ERROR);
+    if (append(imap, "Temp", plain_message)) return 1;
+    CHECK(!message_rows("Temp", &table, &count) && count == 1);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    before = *(uint64_t *) r[10].data;
+    CHECK(mailimap_delete(imap, "Temp") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap, "Temp") == MAILIMAP_NO_ERROR);
+    if (append(imap, "Temp", plain_message)) return 1;
+    CHECK(!message_rows("Temp", &table, &count) && count == 1);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(*(uint64_t *) r[10].data != before);
+    CHECK(mailimap_delete(imap, "Temp") == MAILIMAP_NO_ERROR);
+    talloc_free(conn);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -399,7 +532,8 @@ int main(int argc, char **argv)
         test_username_is_checked() || test_settings_password_file() || test_mailbox_name_round_trip() ||
         (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_uri_user_must_match() ||
         test_hierarchy_table_rows() || test_folder_properties() || test_create_root_folder_not_found() ||
-        test_imap_down_is_an_error() || test_backend_registers()) {
+        test_imap_down_is_an_error() || test_message_table_columns() || test_message_ids_stable() ||
+        test_uidvalidity_change_new_mids() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);
