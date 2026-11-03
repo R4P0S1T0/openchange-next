@@ -346,6 +346,17 @@ static int test_list_contexts_roles(void)
     return 0;
 }
 
+/* mapistore_add_context strips "imap://" before calling create_context. */
+static int test_create_context_without_namespace(void)
+{
+    void *folder = NULL;
+    CHECK(imap_create_context(root, &conn_info, &ictx, "alice%40example.invalid/INBOX/", &folder) == MAPISTORE_SUCCESS);
+    CHECK(folder != NULL && strcmp(((struct imap_folder *) folder)->mailbox, "INBOX") == 0);
+    folder = NULL;
+    CHECK(imap_create_context(root, &conn_info, &ictx, "bob%40example.invalid/INBOX/", &folder) == MAPISTORE_ERR_DENIED);
+    return 0;
+}
+
 static int test_uri_user_must_match(void)
 {
     void *folder = NULL;
@@ -716,7 +727,7 @@ int main(int argc, char **argv)
     fidx.next = 0x2000;
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
         test_username_is_checked() || test_settings_password_file() || test_mailbox_name_round_trip() ||
-        (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_uri_user_must_match() ||
+        (imap_backend_set_settings(&tunnel), 0) || test_list_contexts_roles() || test_create_context_without_namespace() || test_uri_user_must_match() ||
         test_hierarchy_table_rows() || test_folder_properties() || test_create_root_folder_not_found() ||
         test_imap_down_is_an_error() || test_message_table_columns() || test_message_ids_stable() ||
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||

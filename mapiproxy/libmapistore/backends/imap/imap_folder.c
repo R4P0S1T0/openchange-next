@@ -248,6 +248,13 @@ _PUBLIC_ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct ma
 	if (!conn_info || !conn_info->username || !ictx || !uri) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
+	/* mapistore_add_context hands over the URI without its "imap://" namespace. */
+	if (strncmp(uri, IMAP_NAMESPACE, strlen(IMAP_NAMESPACE)) != 0) {
+		uri = talloc_asprintf(mem_ctx, IMAP_NAMESPACE "%s", uri);
+		if (!uri) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+	}
 	if (imap_uri_parse(mem_ctx, uri, '/', &user, &mailbox) != 0) {
 		return MAPISTORE_ERR_INVALID_URI;
 	}
