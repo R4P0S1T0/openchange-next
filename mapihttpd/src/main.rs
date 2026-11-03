@@ -207,6 +207,7 @@ struct Args {
     external_host: String,
     org: String,
     ou: String,
+    directory_snapshot: PathBuf,
 }
 
 /// A positive number of seconds.
@@ -222,6 +223,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut port, mut socket, mut service, mut idle) = (None, None, "openchange".to_owned(), 1800);
     let (mut wait, mut smb_conf) = (300, None);
     let mut host = None;
+    let mut snapshot = PathBuf::from("/var/lib/openchange/directory.tsv");
     let mut org = "First Organization".to_owned();
     let mut ou = "Exchange Administrative Group (FYDIBOHF23SPDLT)".to_owned();
     while let Some(flag) = args.next() {
@@ -255,6 +257,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--external-host" => host = Some(value),
             "--org" => org = value,
             "--ou" => ou = value,
+            "--directory-snapshot" => snapshot = PathBuf::from(value),
             _ => return Err(format!("unknown option: {flag}")),
         }
     }
@@ -268,6 +271,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         external_host: host.ok_or("--external-host is required")?,
         org,
         ou,
+        directory_snapshot: snapshot,
     })
 }
 
@@ -324,20 +328,24 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        let autodiscover_settings = autodiscover::Settings {
+            external_host: args.external_host,
+            org: args.org,
+            ou: args.ou,
+        };
         let srv = Arc::new(Server {
             auth: DovecotAuthenticator {
                 socket: args.dovecot_socket,
                 service: args.dovecot_service,
             },
             sessions: SessionTable::new(Duration::from_secs(args.session_idle_seconds)),
-            nspi: nspi::State::new(Duration::from_secs(args.session_idle_seconds)),
+            nspi: nspi::State::new(
+                Duration::from_secs(args.session_idle_seconds),
+                nspi::gal::Gal::new(args.directory_snapshot, autodiscover_settings.clone()),
+            ),
             backend,
             notification_wait: Duration::from_secs(args.notification_wait_seconds),
-            autodiscover: autodiscover::Settings {
-                external_host: args.external_host,
-                org: args.org,
-                ou: args.ou,
-            },
+            autodiscover: autodiscover_settings,
         });
         let sweeper = srv.clone();
         tokio::spawn(async move {
@@ -445,6 +453,7 @@ mod tests {
                 external_host: "mail.example.invalid".into(),
                 org: "First Organization".into(),
                 ou: "Exchange Administrative Group (FYDIBOHF23SPDLT)".into(),
+                directory_snapshot: "/var/lib/openchange/directory.tsv".into(),
             })
         );
         let full = args(&[

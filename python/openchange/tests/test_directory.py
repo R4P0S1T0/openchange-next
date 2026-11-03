@@ -161,6 +161,23 @@ class DirectoryTests(unittest.TestCase):
         self.user(self.open(), "alice@example.invalid")
         self.assertEqual(os.listdir(self.tmp.name), ["directory.ldb"])
 
+    def test_snapshot_lines(self):
+        snap = os.path.join(self.tmp.name, "directory.tsv")
+        odd = Mailbox("tab@example.invalid", " Tab\tand\nnewline ", True)
+        directory.write_snapshot(snap, [ALICE, odd, Mailbox("blank@example.invalid", "", True)])
+        with open(snap, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "alice@example.invalid\tAlice Example\n"
+                                       "tab@example.invalid\tTab and newline\n"
+                                       "blank@example.invalid\tblank@example.invalid\n")
+        self.assertEqual(os.stat(snap).st_mode & 0o777, 0o640)
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["directory.tsv"])
+
+    def test_inactive_not_in_snapshot(self):
+        snap = os.path.join(self.tmp.name, "directory.tsv")
+        directory.write_snapshot(snap, [ALICE, BOB])
+        with open(snap, encoding="utf-8") as f:
+            self.assertNotIn("bob@", f.read())
+
 
 if __name__ == "__main__":
     unittest.main()

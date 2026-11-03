@@ -15,6 +15,7 @@ pub const PATH: &str = "/autodiscover/autodiscover.xml";
 pub const MAX_BODY: usize = 64 * 1024;
 
 /// Identity strings of the deployment (decision 8).
+#[derive(Clone)]
 pub struct Settings {
     pub external_host: String,
     pub org: String,
@@ -52,12 +53,7 @@ pub fn handle_body<A: Authenticator, B: Backend>(
 ) -> MapiReply {
     let same = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
     let s = &srv.autodiscover;
-    let legacy_dn = format!(
-        "/o={}/ou={}/cn=Recipients/cn={}",
-        s.org,
-        s.ou,
-        nickname(user)
-    );
+    let legacy_dn = legacy_dn(s, user);
     // A LegacyDN takes precedence over EMailAddress (3.2.5).
     let own = match requested(req.body) {
         Some((Some(dn), _)) => same(&dn, &legacy_dn),
@@ -207,9 +203,14 @@ fn requested(body: &[u8]) -> Option<(Option<String>, Option<String>)> {
     (dn.is_some() || address.is_some()).then_some((dn, address))
 }
 
+/// The mailbox LegacyDN, as the directory (python/openchange/directory.py) writes it.
+pub fn legacy_dn(s: &Settings, address: &str) -> String {
+    format!("/o={}/ou={}/cn=Recipients/cn={}", s.org, s.ou, nickname(address))
+}
+
 /// Directory mailNickname (openchange_directory_sync): the lower-cased local part with bytes
 /// outside `[a-z0-9._-]` as `_`, then `-` and the first 8 hex digits of SHA-256 of the address.
-fn nickname(address: &str) -> String {
+pub fn nickname(address: &str) -> String {
     let address = address.to_lowercase();
     let local: String = address
         .split('@')

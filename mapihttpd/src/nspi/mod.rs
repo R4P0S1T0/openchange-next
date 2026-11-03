@@ -1,6 +1,8 @@
 //! Address book endpoint request bodies (MS-OXCMAPIHTTP 2.2.5), served from the directory
 //! snapshot. Little-endian, no alignment; every read is bounds-checked and fails with code 12.
 
+pub mod gal;
+
 use crate::auth::Authenticator;
 use crate::backend::Backend;
 use crate::emsmdb::{put, with_body, Reader};
@@ -15,15 +17,17 @@ pub const SESSION_TYPES: &[&str] = &["Unbind"];
 
 pub struct State {
     pub sessions: SessionTable,
+    pub gal: gal::Gal,
     server_guid: [u8; 16],
 }
 
 impl State {
-    pub fn new(idle: Duration) -> Self {
+    pub fn new(idle: Duration, gal: gal::Gal) -> Self {
         let mut server_guid = [0u8; 16];
         getrandom::getrandom(&mut server_guid).expect("getrandom failed");
         State {
             sessions: SessionTable::for_path(idle, PATH),
+            gal,
             server_guid,
         }
     }

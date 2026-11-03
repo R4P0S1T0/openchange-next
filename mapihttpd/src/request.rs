@@ -290,7 +290,7 @@ pub(crate) mod tests {
         Server {
             auth: FakeAuth::default(),
             sessions: SessionTable::new(Duration::from_secs(1800)),
-            nspi: nspi::State::new(Duration::from_secs(1800)),
+            nspi: nspi::State::new(Duration::from_secs(1800), crate::nspi::gal::Gal::preloaded(crate::nspi::gal::tests::snapshot())),
             autodiscover: settings(),
             backend: FakeBackend::default(),
             notification_wait: Duration::from_secs(300),

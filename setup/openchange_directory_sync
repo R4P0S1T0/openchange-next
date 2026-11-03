@@ -27,6 +27,8 @@ parser.add_argument("--mysql-defaults", required=True,
 parser.add_argument("--org", required=True, help="organization, same as openchange-mapihttpd --org")
 parser.add_argument("--ou", required=True, help="administrative group, same as openchange-mapihttpd --ou")
 parser.add_argument("--output", required=True, help="directory LDB path (mapiproxy:directory_url)")
+parser.add_argument("--snapshot", help="NSPI snapshot path (openchange-mapihttpd --directory-snapshot); "
+                    "default: directory.tsv beside --output")
 args = parser.parse_args()
 
 import MySQLdb  # noqa: E402 (keeps --help usable without the module)
@@ -39,6 +41,7 @@ try:
     finally:
         conn.close()
     directory.write_directory(args.output, args.org, args.ou, mailboxes)
+    directory.write_snapshot(args.snapshot or os.path.join(os.path.dirname(args.output), "directory.tsv"), mailboxes)
 except Exception as e:
     # MySQLdb errors carry no credentials; print only the error class and code.
     print("openchange_directory_sync: failed: %s %s" % (type(e).__name__, e.args[:1]), file=sys.stderr)

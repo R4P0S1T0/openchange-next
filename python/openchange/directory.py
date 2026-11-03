@@ -125,3 +125,26 @@ def write_directory(path, org, ou, mailboxes):
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def write_snapshot(path, mailboxes):
+    """Active mailboxes as "address TAB display name" lines for the NSPI service; replaced atomically."""
+    lines = []
+    for box in mailboxes:
+        if box.active:
+            name = " ".join((box.name or "").split()) or box.email  # no TAB/newline inside a field
+            lines.append("%s\t%s\n" % (box.email, name))
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".directory-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.chmod(tmp, 0o640)
+        try:
+            os.chown(tmp, -1, grp.getgrnam("openchange").gr_gid)
+        except (KeyError, PermissionError):
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
