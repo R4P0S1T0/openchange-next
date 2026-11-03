@@ -412,6 +412,47 @@ static int test_provision_fallback_after_native(void)
     return 0;
 }
 
+/* A backend offering the Drafts role (IMAP \Drafts) takes over the native special folder, keeping its ID. */
+static enum mapistore_error drafts_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                            struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "fakedr://drafts/");
+    entry->name = talloc_strdup(entry, "Drafts");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_DRAFTS_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_provision_backend_takes_over_drafts(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t ipm, before, after;
+    char *uri = NULL;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, "alice@example.invalid", EMSMDBP_TOP_INFORMATION_STORE, &ipm) == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, "alice@example.invalid", ipm, "Drafts", &before) == MAPI_E_SUCCESS);
+    oc_emsmdb_disconnect(session);
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "fakedr"; fake.backend.description = "test"; fake.backend.namespace = "fakedr://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = drafts_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, "alice@example.invalid", ipm, "Drafts", &after) == MAPI_E_SUCCESS);
+    CHECK(after == before);
+    CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", after, &uri, true)
+        == MAPI_E_SUCCESS && uri && strcmp(uri, "fakedr://drafts/") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 /* A backend that cannot reach its store (Dovecot down) must not fail logon or drop folders. */
 static bool store_down;
 static enum mapistore_error flaky_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
@@ -563,6 +604,7 @@ int main(int argc, char **argv)
         test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
+        test_provision_backend_takes_over_drafts() ||
         test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

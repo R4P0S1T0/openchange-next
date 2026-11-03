@@ -649,7 +649,25 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 	for (i = 0; i < PROVISIONING_SPECIAL_FOLDERS_SIZE; i++) {
 		current_folder = special_folders + i;
 		ret = openchangedb_get_folder_property(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_folder->entryid_property, mailbox_fid, (void **) &entryId);
-		if (ret != MAPI_E_SUCCESS) {
+		if (ret == MAPI_E_SUCCESS) {
+			/* Already provisioned: a backend that now offers the role (IMAP \Drafts) takes the folder
+			   over and it keeps its ID, as the system folders do above. */
+			char *existing_uri = NULL;
+
+			current_entry = main_entries[current_folder->role];
+			if (current_entry && current_entry->url &&
+			    openchangedb_get_fid_by_name(emsmdbp_ctx->oc_ctx, username, ipm_fid, current_folder->name, &current_fid) == MAPI_E_SUCCESS) {
+				openchangedb_get_mapistoreURI(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_fid, &existing_uri, true);
+				if (!existing_uri || strcmp(existing_uri, current_entry->url) != 0) {
+					if (openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, current_entry->url) != MAPI_E_SUCCESS) {
+						goto error;
+					}
+					register_backend_folder(emsmdbp_ctx, username, current_entry->url, current_fid);
+				}
+			}
+			continue;
+		}
+		{
 			property_row.cValues = 2;
 			property_row.lpProps[0].ulPropTag = PR_DISPLAY_NAME_UNICODE;
 
