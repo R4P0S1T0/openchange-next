@@ -53,7 +53,8 @@ _PUBLIC_ enum MAPISTATUS openchangedb_initialize(TALLOC_CTX *mem_ctx,
 		retval = MAPI_E_NOT_INITIALIZED;
 		oc_log(OC_LOG_ERROR, "No OpenChangeDB backend specified, please provision.");
 	} else if (strncmp(openchangedb_backend, "mysql:", strlen("mysql:")) == 0) {
-		oc_log(OC_LOG_ERROR, "Using MySQL backend for openchangedb: %s", openchangedb_backend);
+		/* The URL carries the database password: never log it. */
+		oc_log(OC_LOG_INFO, "Using MySQL backend for openchangedb");
 		retval = openchangedb_mysql_initialize(mem_ctx, lp_ctx, oc_ctx);
 	} else if (strncmp(openchangedb_backend, "ldb:", strlen("ldb:")) == 0) {
 		oc_log(OC_LOG_INFO, "Using ldb backend for openchangedb");
@@ -61,7 +62,7 @@ _PUBLIC_ enum MAPISTATUS openchangedb_initialize(TALLOC_CTX *mem_ctx,
 						     lpcfg_private_dir(lp_ctx),
 						     oc_ctx);
 	} else {
-		oc_log(OC_LOG_ERROR, "Unknown backend in URI %s", openchangedb_backend);
+		oc_log(OC_LOG_ERROR, "Unknown openchangedb backend (expected mysql: or ldb:)");
 		retval = MAPI_E_NOT_FOUND;
 	}
 

@@ -153,7 +153,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_add(struct mapistore_context *m
 		mapistore_indexing_mysql_init(mstore_ctx, username, indexing_url,
 					      &ictx->ctx);
 	} else {
-		OC_DEBUG(0, "ERROR unknown indexing url %s", indexing_url);
+		OC_DEBUG(0, "ERROR unknown indexing url scheme (the URL may carry a password and is not logged)");
 		return MAPISTORE_ERROR;
 	}
 

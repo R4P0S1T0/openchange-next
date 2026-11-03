@@ -47,6 +47,36 @@ static bool untouched(const uint8_t *p, size_t from, size_t to)
     return true;
 }
 
+/* Connection strings carry passwords: openchangedb must never log them, whatever the outcome. */
+static int test_openchangedb_url_not_logged(void)
+{
+    const char *urls[] = { "mysql://u:s3cret-marker@127.0.0.1:1/db", "bogus://u:s3cret-marker@host/db" };
+    char path[] = "/tmp/oc-emsmdb-log-XXXXXX", buf[8192];
+    int fd = mkstemp(path), saved_err = dup(2), saved_out = dup(1);
+    size_t i, n;
+    FILE *f;
+    CHECK(fd >= 0 && saved_err >= 0 && saved_out >= 0);
+    for (i = 0; i < 2; i++) {
+        TALLOC_CTX *mem = talloc_new(NULL);
+        struct loadparm_context *lp = loadparm_init(mem);
+        struct openchangedb_context *db = NULL;
+        CHECK(mem && lp && lpcfg_set_cmdline(lp, "mapiproxy:openchangedb", urls[i]));
+        fflush(stdout); fflush(stderr);
+        dup2(fd, 2); dup2(fd, 1);
+        (void)openchangedb_initialize(mem, lp, &db);
+        fflush(stdout); fflush(stderr);
+        dup2(saved_err, 2); dup2(saved_out, 1);
+        talloc_free(mem);
+    }
+    f = fopen(path, "r");
+    CHECK(f != NULL);
+    n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f); unlink(path); close(fd); close(saved_err); close(saved_out);
+    CHECK(strstr(buf, "s3cret-marker") == NULL);
+    return 0;
+}
+
 static int test_disconnect_null(void) { oc_emsmdb_disconnect(NULL); return 0; }
 
 static int test_execute_null_session(void)
@@ -395,7 +425,7 @@ int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
     talloc_enable_null_tracking();
-    if (test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
+    if (test_openchangedb_url_not_logged() || test_disconnect_null() || test_execute_null_session() || test_connect_without_samdb(argv[1]) ||
         test_directory_ldb_opens(argv[1]) ||
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
