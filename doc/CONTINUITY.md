@@ -14,8 +14,10 @@ or trigger further CI during this pause.
 - Security updates are authorized and vendored: bytes 1.11.1, quick-xml 0.41.0,
   Debian 13 / Rust 1.85 retained. Audit: zero vulnerabilities, two documented
   informational warnings; no suppressions.
-- Do not redo Tasks 1–7. Next is M1 lab acceptance with real Dovecot/nginx/
-  Outlook on a disposable VM, followed by M2's directory/identity work.
+- Do not redo Tasks 1–7. M1 lab acceptance ran on 2026-11-03 with Microsoft
+  365 Outlook (partial; see the MODERNIZATION.md section of that date). Still
+  open: Outlook 2016/2019 and the c-backend build on the VM. Next is M2's
+  directory/identity work.
   Real Connect remains deliberately fail-closed until M2.
 - Preserve existing worktrees, ignored evidence and the untracked draft plan.
 

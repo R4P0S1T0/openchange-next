@@ -186,6 +186,40 @@ Outlook 2016/2019/2013 SP1 still need lab validation. NotificationWait currently
 returns no events after its timeout, and reconnect cleanup waits for the idle
 sweeper. Never run these checks or deployment examples against production.
 
+## M1 lab acceptance (2026-11-03, partial)
+
+Run on the disposable lab VM (Debian 13.7, real Postfix/Dovecot 2.4.1/SOGo/
+PostfixAdmin replica with test accounts only, nginx with a trusted certificate)
+against `main` at `5cf02005`. This lab run used a **Rust-only build, without
+`c-backend`**: in M1 both variants refuse Connect with `MAPI_E_LOGON_FAILED`,
+so the native library was not built on the VM. `cargo test --offline --locked`
+passed there (83 tests); `make check-mapihttp` was not run on the VM.
+
+Setup: service on 127.0.0.1:8080 as a dedicated `openchange` account, a
+dedicated Dovecot auth-client listener (`openchange-auth`, mode 0600) instead of
+widening `auth-client`, nginx routing `/autodiscover/autodiscover.xml` and
+`/mapi/` to it, and an access log without query strings, Authorization,
+cookies or bodies.
+
+Client: classic Microsoft 365 Outlook 16.0.19127 (Windows NT 10.0, Pro), new
+profile for a lab test account. Observed, from the nginx log:
+
+- Autodiscover: two 401 Basic challenges, then 200 after the password prompt;
+  the response carried `mapiHttp` with the lab URLs. Dovecot returned the full
+  email address as the canonical user, as Autodiscover assumes.
+- NSPI: six Bind requests reached `/mapi/nspi/` (M1 answers code 5).
+- EMSMDB: 24 Connect attempts in about one second, each as a 401 challenge
+  followed by an authenticated 200 carrying the well-formed Connect failure
+  body (`0x80040111`). Outlook then reported that it could not open the
+  profile, as decision 5 expects before M2.
+- No Execute was sent (no session exists), so the 401-before-Execute count
+  remains open for M2. The build matches Task 0's capture, so no new fixture.
+
+Still open for M1: Outlook 2016 or 2019 (and 2013 SP1 if licensed), the
+`c-backend` build on the VM, and `make check-mapihttp` there. A first attempt
+from the same client never reached the VM; the next one did. The cause was not
+confirmed; the client proxy issue in [MAPIHTTP.md](MAPIHTTP.md) is the likely one.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
