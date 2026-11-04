@@ -94,9 +94,12 @@ subscriptions hide it; SOGo in the lab does not set
 that setting would change webmail for everyone, and a visible Outbox shows
 a message that did not leave.
 
-Sent copy: the existing `oxomsg_mapistore_handle_message_relocation`
-(PidTagSentMailSvrEID, PidTagDeleteAfterSubmit) decides the destination;
-the backend performs it as `UID MOVE`.
+Sent copy: the backend files the exact bytes it sent with `UID MOVE`
+Outbox→Sent (the `\Sent` SPECIAL-USE mailbox), or expunges them when
+PidTagDeleteAfterSubmit is set. emsmdb's
+`oxomsg_mapistore_handle_message_relocation` would create and re-compose a
+second message; after a successful submit the message no longer reports
+PidTagTargetEntryId/PidTagSentMailSvrEID, so it does nothing.
 
 Change numbers: after a write the folder state string changes, so the next
 sync echoes the change back to Outlook (it already has it; harmless). M5
