@@ -1,6 +1,6 @@
 # M4: IMAP writes and sending from Outlook — design
 
-Date: 2026-11-04. Status: approved in conversation, pending written review.
+Date: 2026-11-04. Status: approved in conversation; reviewed 2026-11-04 (lab facts below).
 Roadmap: `doc/MODERNIZATION.md` M4 ("Writes: send through submission 587,
 move, delete, flags"). Builds on the M3 read-only IMAP mapistore backend
 (libetpan, Dovecot master user `openchange` on loopback).
@@ -70,6 +70,7 @@ folder and message under it; without it those mids turn into ghosts.
 | Shift+Delete, empty Deleted Items (RopDeleteMessages, ICS ImportDeletes, hard or soft) | `delete_message` | `UID STORE +FLAGS (\Deleted)`, `UID EXPUNGE <uid>` |
 | Read/unread (RopSetReadFlags, ICS ImportReadStateChanges) | `set_read_flag` | `\Seen` |
 | Follow-up flag (PidTagFlagStatus 2 / cleared) | `set_properties` + `save` | `\Flagged` |
+| Reply / forward (PidTagLastVerbExecuted 102-103 / 104) | `set_properties` + `save` | `\Answered` / `$Forwarded` |
 | Other property edits on received mail | `save` | ignored (logged at level 5), success |
 | New or edited draft (Drafts) | `create_message`/`open_message`, `set_properties`, `modify_recipients`, attachments, `save` | `APPEND` new version; then `\Deleted` + `UID EXPUNGE` the old; the mid is re-pointed to the new URI |
 | Send (RopSubmitMessage on a message in Outbox) | `submit` | `APPEND` to `Outbox` (on save), SMTP, then `UID MOVE` Outbox→Sent, or expunge when PidTagDeleteAfterSubmit |
@@ -77,10 +78,25 @@ folder and message under it; without it those mids turn into ghosts.
 | Rename / move folder | `set_properties` (PidTagDisplayName), `move_folder` | `RENAME`; `update_uri_prefix` |
 | Delete folder | `delete` | `DELETE`, only when empty of messages and subfolders (Outlook deletes children first); default folders refused |
 
+Which messages are re-rendered: only those with MSGFLAG_UNSENT (drafts and
+messages waiting in Outbox), wherever they sit. Any other message is
+received mail: `save` writes its flags and nothing else, so received mail
+is never rewritten.
+
+Cross-store moves (an IMAP message to an openchangedb-only folder, or back)
+are refused with MAPI_E_NO_SUPPORT; the message stays where it was.
+
 Outbox: an IMAP mailbox named `Outbox`, created on first logon and left
-unsubscribed so webmail does not list it; provisioned like the other
-default folders (M3 takeover). It holds a message only between upload and
-send.
+unsubscribed; provisioned like the other default folders (M3 takeover). It
+holds a message only between upload and send. IMAP clients that honour
+subscriptions hide it; SOGo in the lab does not set
+`SOGoMailShowSubscribedFoldersOnly` and may list it. Accepted: changing
+that setting would change webmail for everyone, and a visible Outbox shows
+a message that did not leave.
+
+Sent copy: the existing `oxomsg_mapistore_handle_message_relocation`
+(PidTagSentMailSvrEID, PidTagDeleteAfterSubmit) decides the destination;
+the backend performs it as `UID MOVE`.
 
 Change numbers: after a write the folder state string changes, so the next
 sync echoes the change back to Outlook (it already has it; harmless). M5
@@ -126,5 +142,12 @@ replaces this.
   webmail; send to a lab account and to an external-looking address (SMTP
   egress is blocked, so delivery is checked in the Postfix queue/log
   without addresses); DKIM-Signature present; spoofed From refused.
-- Lab precondition (Task 0): Postfix's Dovecot SASL accepts
-  `<user>*openchange` and reports the target user for the login map.
+## Lab facts (checked 2026-11-04)
+
+- Submission 587 (STARTTLS mandatory) accepts AUTH as `<user>*openchange`
+  with the master password; MAIL FROM the user's own address: RCPT 250;
+  MAIL FROM another lab account: RCPT 553 (`reject_sender_login_mismatch`
+  applies to the target user). EHLO offers SIZE, 8BITMIME, SMTPUTF8,
+  PIPELINING.
+- Dovecot offers MOVE, UIDPLUS, SPECIAL-USE, LIST-EXTENDED, CONDSTORE and
+  QRESYNC (the last two are for M5).
