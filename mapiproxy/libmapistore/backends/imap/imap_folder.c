@@ -23,6 +23,7 @@
 #include "mapiproxy/libmapistore/mapistore_errors.h"
 #include "libmapi/libmapi_private.h"
 #include "utils/dlinklist.h"
+#include "mapiproxy/libmapiproxy/libmapiproxy.h"
 #include "imap_backend.h"
 
 /* One IMAP connection per user, shared by that user's contexts. The C worker that
@@ -265,6 +266,13 @@ _PUBLIC_ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct ma
 	ctx = context_new(mem_ctx, conn_info->username, ictx);
 	if (!ctx) {
 		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	ctx->oc_ctx = conn_info->oc_ctx;
+	ctx->replica_guid = conn_info->replica_guid;
+	if (ctx->oc_ctx) {
+		uint16_t repl_id;
+
+		openchangedb_get_MailboxReplica(ctx->oc_ctx, ctx->username, &repl_id, &ctx->replica_guid);
 	}
 	/* URIs are built with the server's delimiter; '/' was only a guess for the user part. */
 	if (imap_context_delimiter(ctx) != '/' && imap_uri_parse(ctx, uri, imap_context_delimiter(ctx), &user, &mailbox) != 0) {
@@ -536,6 +544,124 @@ _PUBLIC_ uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v)
 	return p;
 }
 
+/* A change kept per object URI for the life of the process (bounded by the objects shown). */
+struct change {
+	struct change	*prev, *next;
+	char		*key;		/* user, then URI */
+	char		*state;
+	uint64_t	cn;
+	time_t		when;
+};
+static struct change *changes;
+
+static enum mapistore_error openchangedb_cn(struct imap_context *ctx, uint64_t *cn)
+{
+	if (!ctx->oc_ctx) {
+		return MAPISTORE_ERR_NOT_INITIALIZED;
+	}
+	return openchangedb_get_new_changeNumber(ctx->oc_ctx, ctx->username, cn) == MAPI_E_SUCCESS
+		? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+}
+static imap_cn_source cn_source = openchangedb_cn;
+
+_PUBLIC_ void imap_backend_set_cn_source(imap_cn_source source)
+{
+	cn_source = source ? source : openchangedb_cn;
+}
+
+_PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state,
+						 uint64_t *cn, time_t *when)
+{
+	struct change		*c;
+	char			*key = talloc_asprintf(NULL, "%s\n%s", ctx->username, uri);
+	enum mapistore_error	ret;
+
+	if (!key || !state) {
+		talloc_free(key);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (c = changes; c && strcmp(c->key, key) != 0; c = c->next);
+	if (c && strcmp(c->state, state) == 0) {
+		talloc_free(key);
+		*cn = c->cn;
+		*when = c->when;
+		return MAPISTORE_SUCCESS;
+	}
+	ret = cn_source(ctx, cn);
+	if (ret != MAPISTORE_SUCCESS) {
+		talloc_free(key);
+		return ret;
+	}
+	if (!c) {
+		c = talloc_zero(NULL, struct change);
+		if (!c) {
+			talloc_free(key);
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		c->key = talloc_steal(c, key);
+		DLIST_ADD(changes, c);
+	} else {
+		talloc_free(key);
+	}
+	talloc_free(c->state);
+	c->state = talloc_strdup(c, state);
+	c->cn = *cn;
+	c->when = time(NULL);
+	*when = c->when;
+	return c->state ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+}
+
+/* XID of a change: the replica GUID (NDR) and the 6 low bytes of cn >> 16, as oxcfxics_make_gid. */
+static struct Binary_r *change_key(TALLOC_CTX *mem_ctx, const struct GUID *g, uint64_t cn, bool sized)
+{
+	struct Binary_r	*b = talloc_zero(mem_ctx, struct Binary_r);
+	uint8_t		*p;
+	uint64_t	id = (cn >> 16) & 0x0000FFFFFFFFFFFFULL;
+	int		i;
+
+	if (!b || !(b->lpb = talloc_array(b, uint8_t, 23))) {
+		return NULL;
+	}
+	p = b->lpb;
+	if (sized) {
+		*p++ = 22; /* PredecessorChangeList: one SizedXid */
+	}
+	for (i = 0; i < 4; i++) *p++ = (g->time_low >> (8 * i)) & 0xFF;
+	for (i = 0; i < 2; i++) *p++ = (g->time_mid >> (8 * i)) & 0xFF;
+	for (i = 0; i < 2; i++) *p++ = (g->time_hi_and_version >> (8 * i)) & 0xFF;
+	memcpy(p, g->clock_seq, 2);
+	p += 2;
+	memcpy(p, g->node, 6);
+	p += 6;
+	for (i = 0; i < 6; i++, id >>= 8) *p++ = id & 0xFF;
+	b->cb = sized ? 23 : 22;
+	return b;
+}
+
+static struct FILETIME *change_time(TALLOC_CTX *mem_ctx, time_t t)
+{
+	struct FILETIME	*ft = talloc(mem_ctx, struct FILETIME);
+	uint64_t	nt = ((uint64_t) t + 11644473600ULL) * 10000000ULL;
+
+	if (ft) {
+		ft->dwLowDateTime = (uint32_t) nt;
+		ft->dwHighDateTime = (uint32_t) (nt >> 32);
+	}
+	return ft;
+}
+
+_PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when,
+				 enum MAPITAGS tag)
+{
+	switch (tag) {
+	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
+	case PidTagChangeKey:			return change_key(mem_ctx, &ctx->replica_guid, cn, false);
+	case PidTagPredecessorChangeList:	return change_key(mem_ctx, &ctx->replica_guid, cn, true);
+	case PidTagLastModificationTime:	return change_time(mem_ctx, when);
+	default:				return NULL;
+	}
+}
+
 /* Folder properties (plan Decision 6); STATUS is asked only when a count is wanted. */
 _PUBLIC_ enum mapistore_error imap_folder_properties(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint16_t count,
 						     enum MAPITAGS *tags, struct mapistore_property_data *data)
@@ -553,6 +679,25 @@ _PUBLIC_ enum mapistore_error imap_folder_properties(struct imap_folder *f, TALL
 		d->data = NULL;
 		d->error = MAPISTORE_ERR_NOT_FOUND;
 		switch (tags[i]) {
+		case PidTagChangeNumber:
+		case PidTagChangeKey:
+		case PidTagPredecessorChangeList:
+		case PidTagLastModificationTime:
+			if (!have_status && !status_failed) {
+				status_failed = imap_status(imap_context_conn(f->ctx), f->mailbox, &st) != MAPISTORE_SUCCESS;
+				have_status = !status_failed;
+			}
+			if (have_status) {
+				char *uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
+				char *state = talloc_asprintf(mem_ctx, "%u:%u:%u:%u", st.uidvalidity, st.messages, st.unseen, st.uidnext);
+				uint64_t cn;
+				time_t when;
+
+				if (uri && state && imap_change_number(f->ctx, uri, state, &cn, &when) == MAPISTORE_SUCCESS) {
+					set(d, imap_change_value(mem_ctx, f->ctx, cn, when, tags[i]));
+				}
+			}
+			break;
 		case PidTagContentCount:
 		case PidTagContentUnreadCount:
 			if (!have_status && !status_failed) {

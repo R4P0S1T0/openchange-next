@@ -67,6 +67,7 @@ struct imap_folder;
 /* One message of a message table, from UID FETCH (ENVELOPE FLAGS RFC822.SIZE INTERNALDATE BODYSTRUCTURE). */
 struct imap_message_row {
 	uint32_t	uid;
+	uint32_t	uidvalidity;
 	uint32_t	size;
 	time_t		internal;	/* INTERNALDATE: delivery */
 	time_t		date;		/* Date: header */
@@ -93,9 +94,13 @@ struct imap_message {
 	uint32_t		attachment_count;
 };
 
+struct openchangedb_context;
+
 struct imap_context {
 	char			*username;	/* the session's user; the only mailbox ever opened */
 	struct indexing_context	*ictx;
+	struct openchangedb_context *oc_ctx;	/* change numbers come from openchangedb */
+	struct GUID		replica_guid;	/* of the mailbox, for change keys */
 	struct shared_conn	*shared;
 	struct imap_folder	*root;
 };
@@ -166,6 +171,14 @@ enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_ctx, uint
 uint32_t *imap_long(TALLOC_CTX *mem_ctx, uint32_t v);
 uint8_t *imap_bool(TALLOC_CTX *mem_ctx, bool v);
 uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v);
+
+/* Change numbers (ICS): one per object URI, renewed when the object's state string changes. */
+typedef enum mapistore_error (*imap_cn_source)(struct imap_context *ctx, uint64_t *cn);
+void imap_backend_set_cn_source(imap_cn_source source);
+enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state, uint64_t *cn,
+					time_t *when);
+/* PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList or PidTagLastModificationTime of a change. */
+void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when, enum MAPITAGS tag);
 
 /* imap_message.c */
 char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len);

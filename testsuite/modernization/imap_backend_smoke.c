@@ -319,7 +319,8 @@ static enum mapistore_error fi_allocate(struct indexing_context *c, const char *
     return MAPISTORE_SUCCESS;
 }
 
-static struct mapistore_connection_info conn_info = { .username = "alice@example.invalid" };
+static struct mapistore_connection_info conn_info = { .username = "alice@example.invalid",
+    .replica_guid = { .time_low = 0x11223344, .time_mid = 0x5566, .time_hi_and_version = 0x7788 } };
 
 static void *context_for(const char *mailbox)
 {
@@ -758,6 +759,57 @@ static int test_reconnect_after_drop(void)
     return 0;
 }
 
+static uint64_t next_cn = 0x5000;
+static enum mapistore_error fake_cn(struct imap_context *ctx, uint64_t *cn)
+{
+    *cn = (exchange_globcnt(next_cn++) << 16) | 0x0001;
+    return MAPISTORE_SUCCESS;
+}
+
+/* ICS (cached mode) aborts without PidTagChangeNumber on folders, and without the change number,
+   change key and predecessor list on messages (oxcfxics.c). */
+static int test_change_numbers(void)
+{
+    enum MAPITAGS tags[] = { PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList, PidTagLastModificationTime };
+    struct mapistore_property_data d[6], again[4], *r; /* open_message fills 6 */
+    struct imap_folder *folder;
+    void *table, *msg;
+    const struct Binary_r *key, *pcl;
+    uint64_t folder_cn, message_cn;
+    uint32_t count;
+    imap_backend_set_cn_source(fake_cn);
+    CHECK((folder = context_for("Projects")) != NULL);
+    CHECK(imap_properties_get(folder, root, 4, tags, d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == 0 && d[1].error == 0 && d[2].error == 0 && d[3].error == 0);
+    folder_cn = *(uint64_t *) d[0].data;
+    key = d[1].data;
+    pcl = d[2].data;
+    CHECK((folder_cn & 0xFFFF) == 1 && key->cb == 22 && pcl->cb == 23 && pcl->lpb[0] == 22);
+    CHECK(memcmp(key->lpb, "\x44\x33\x22\x11\x66\x55\x88\x77", 8) == 0); /* replica GUID, NDR */
+    CHECK(memcmp(pcl->lpb + 1, key->lpb, 22) == 0);
+    CHECK(imap_properties_get(context_for("Projects"), root, 4, tags, again) == MAPISTORE_SUCCESS);
+    CHECK(*(uint64_t *) again[0].data == folder_cn); /* unchanged folder, same change number */
+    /* Messages carry their own, stable while their flags do not change. */
+    CHECK(imap_folder_open_table(folder, root, MAPISTORE_MESSAGE_TABLE, 4, &table, &count) == MAPISTORE_SUCCESS && count == 2);
+    CHECK(imap_table_set_columns(table, 4, tags) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(r[0].error == 0 && r[1].error == 0 && r[2].error == 0);
+    message_cn = *(uint64_t *) r[0].data;
+    CHECK(message_cn != folder_cn && ((const struct Binary_r *) r[1].data)->cb == 22);
+    CHECK(open_message("Projects", 0, &msg, d) == 0);
+    CHECK(imap_properties_get(msg, root, 4, tags, again) == MAPISTORE_SUCCESS);
+    CHECK(again[0].error == 0 && *(uint64_t *) again[0].data == message_cn);
+    /* New mail in the folder changes the folder's change number. */
+    {
+        struct imap_conn *conn = imap_conn_open(root, &tunnel, "alice@example.invalid");
+        CHECK(conn && !append(imap_conn_session(conn), "Projects", second_message));
+        CHECK(imap_properties_get(context_for("Projects"), root, 4, tags, again) == MAPISTORE_SUCCESS);
+        CHECK(*(uint64_t *) again[0].data != folder_cn);
+        talloc_free(conn);
+    }
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -787,7 +839,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_change_numbers() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

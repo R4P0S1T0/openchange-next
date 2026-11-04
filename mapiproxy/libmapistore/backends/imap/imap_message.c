@@ -363,6 +363,7 @@ static enum mapistore_error fetch_rows(TALLOC_CTX *mem_ctx, struct imap_folder *
 			memset(row, 0, sizeof *row);
 			continue;
 		}
+		row->uidvalidity = uidvalidity;
 		uri = imap_message_uri(rows, f, uidvalidity, row->uid);
 		if (!uri || imap_fmid_for_uri(f->ctx, uri, &row->mid) != MAPISTORE_SUCCESS) {
 			mailimap_fetch_list_free(result);
@@ -429,9 +430,22 @@ static char *dup_or_empty(TALLOC_CTX *mem_ctx, const char *s)
 _PUBLIC_ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, const struct imap_folder *f,
 			      enum MAPITAGS tag)
 {
-	uint32_t flags;
+	uint32_t	flags;
+	uint64_t	cn;
+	time_t		when;
+	char		*uri, *state;
 
 	switch (tag) {
+	case PidTagChangeNumber:
+	case PidTagChangeKey:
+	case PidTagPredecessorChangeList:
+		/* A message changes, for ICS, when its flags do (the content of an IMAP message is fixed). */
+		uri = imap_message_uri(mem_ctx, (struct imap_folder *) f, row->uidvalidity, row->uid);
+		state = talloc_asprintf(mem_ctx, "%d%d%d%d", row->seen, row->flagged, row->answered, row->draft);
+		if (!uri || !state || imap_change_number(f->ctx, uri, state, &cn, &when) != MAPISTORE_SUCCESS) {
+			return NULL;
+		}
+		return imap_change_value(mem_ctx, f->ctx, cn, when, tag);
 	case PidTagSubject:
 	case PidTagNormalizedSubject:
 	case PidTagConversationTopic:

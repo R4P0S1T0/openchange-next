@@ -439,6 +439,10 @@ _PUBLIC_ int imap_status(struct imap_conn *conn, const char *name, struct imap_s
 		mailimap_status_att_list_free(atts);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
+	/* STATUS of the mailbox this session has open reports its view of it: NOOP brings the view up to date. */
+	if (conn->imap->imap_state == MAILIMAP_STATE_SELECTED) {
+		imap_conn_check(conn, mailimap_noop(conn->imap));
+	}
 	r = imap_conn_check(conn, mailimap_status(conn->imap, name, atts, &result));
 	mailimap_status_att_list_free(atts);
 	if (r != MAILIMAP_NO_ERROR || !result) {

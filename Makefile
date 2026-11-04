@@ -998,9 +998,9 @@ $(MAPISTORE_IMAP_OBJS): $(wildcard mapiproxy/libmapistore/backends/imap/*.h)
 
 mapistore_imap: $(MAPISTORE_IMAP_SO)
 
-$(MAPISTORE_IMAP_SO): $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+$(MAPISTORE_IMAP_SO): $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
 
 mapistore_imap-install:
 	$(INSTALL) -d $(DESTDIR)$(libdir)/mapistore_backends
@@ -1017,7 +1017,7 @@ mapistore_imap-clean:
 DOVECOT_IMAP ?= /usr/lib/dovecot/imap
 bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
+	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
 
 .PHONY: check-imap-backend
 check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
