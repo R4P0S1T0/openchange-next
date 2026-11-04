@@ -343,6 +343,38 @@ static enum mapistore_error mapistore_op_defaults_generate_uri(TALLOC_CTX *mem_c
 	return MAPISTORE_ERR_NOT_IMPLEMENTED;
 }
 
+/* Nothing to preload: bodies are read when a message is opened. */
+static enum mapistore_error mapistore_op_defaults_preload_message_bodies(void *folder_object,
+									 enum mapistore_table_type table_type,
+									 const struct UI8Array_r *mids)
+{
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error mapistore_op_defaults_move_folder(void *folder_object, void *target_folder,
+							      TALLOC_CTX *mem_ctx, const char *new_name)
+{
+	OC_DEBUG(3, "default backend implementation\n");
+	return MAPISTORE_ERR_NOT_IMPLEMENTED;
+}
+
+static enum mapistore_error mapistore_op_defaults_copy_folder(void *folder_object, void *target_folder,
+							      TALLOC_CTX *mem_ctx, bool recursive,
+							      const char *new_name)
+{
+	OC_DEBUG(3, "default backend implementation\n");
+	return MAPISTORE_ERR_NOT_IMPLEMENTED;
+}
+
+static enum mapistore_error mapistore_op_defaults_create_embedded_message(void *attachment_object,
+									  TALLOC_CTX *mem_ctx,
+									  void **message_object,
+									  struct mapistore_message **msg)
+{
+	OC_DEBUG(3, "default backend implementation\n");
+	return MAPISTORE_ERR_NOT_IMPLEMENTED;
+}
+
 extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_backend *backend)
 {
 	/* Sanity checks */
@@ -369,6 +401,9 @@ extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_bac
 	backend->folder.create_message = mapistore_op_defaults_create_message;
 	backend->folder.delete_message = mapistore_op_defaults_delete_message;
 	backend->folder.move_copy_messages = mapistore_op_defaults_move_copy_messages;
+	backend->folder.move_folder = mapistore_op_defaults_move_folder;
+	backend->folder.copy_folder = mapistore_op_defaults_copy_folder;
+	backend->folder.preload_message_bodies = mapistore_op_defaults_preload_message_bodies;
 	backend->folder.get_deleted_fmids = mapistore_op_defaults_get_deleted_fmids;
 	backend->folder.get_child_count = mapistore_op_defaults_get_child_count;
 	backend->folder.open_table = mapistore_op_defaults_open_table;
@@ -384,6 +419,7 @@ extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_bac
 	backend->message.create_attachment = mapistore_op_defaults_create_attachment;
 	backend->message.get_attachment_table = mapistore_op_defaults_get_attachment_table;
 	backend->message.open_embedded_message = mapistore_op_defaults_open_embedded_message;
+	backend->message.create_embedded_message = mapistore_op_defaults_create_embedded_message;
 
 	/* oxctabl operations */
 	backend->table.get_available_properties = mapistore_op_defaults_get_available_properties;

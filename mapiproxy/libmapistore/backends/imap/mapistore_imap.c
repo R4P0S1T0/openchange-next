@@ -69,6 +69,7 @@ _PUBLIC_ enum mapistore_error mapistore_init_backend(void)
 	struct mapistore_backend	backend;
 	enum mapistore_error		retval;
 
+	memset(&backend, 0, sizeof backend);
 	retval = mapistore_backend_init_defaults(&backend);
 	if (retval != MAPISTORE_SUCCESS) {
 		return retval;

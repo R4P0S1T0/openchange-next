@@ -810,6 +810,21 @@ static int test_change_numbers(void)
     return 0;
 }
 
+/* Every operation gets a default: emsmdb calls preload_message_bodies during cached-mode sync,
+   and an unset pointer in a stack-allocated backend crashed the daemon. */
+static int test_defaults_cover_every_operation(void)
+{
+    struct mapistore_backend b;
+    memset(&b, 0xA5, sizeof b);
+    CHECK(mapistore_backend_init_defaults(&b) == MAPISTORE_SUCCESS);
+    CHECK((void *) b.folder.preload_message_bodies != (void *) 0xA5A5A5A5A5A5A5A5ULL);
+    CHECK((void *) b.folder.move_folder != (void *) 0xA5A5A5A5A5A5A5A5ULL);
+    CHECK((void *) b.folder.copy_folder != (void *) 0xA5A5A5A5A5A5A5A5ULL);
+    CHECK((void *) b.message.create_embedded_message != (void *) 0xA5A5A5A5A5A5A5A5ULL);
+    CHECK(b.folder.preload_message_bodies(NULL, MAPISTORE_MESSAGE_TABLE, NULL) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -839,7 +854,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_change_numbers() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_change_numbers() || test_defaults_cover_every_operation() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);
