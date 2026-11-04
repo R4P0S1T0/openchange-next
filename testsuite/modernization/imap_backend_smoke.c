@@ -759,6 +759,54 @@ static int test_reconnect_after_drop(void)
     return 0;
 }
 
+/* Outlook sorts (by delivery time) and restricts (unread only, ICS change numbers) before
+   QueryRows; without them the table answered nothing. */
+static int test_sort_and_restrict(void)
+{
+    enum MAPITAGS cols[] = { PidTagSubject };
+    struct SSortOrder asc = { PidTagSubject, TABLE_SORT_ASCEND }, desc = { PidTagSubject, TABLE_SORT_DESCEND };
+    struct SSortOrderSet by_subject = { .cSorts = 1, .aSort = &asc };
+    struct mapi_SRestriction unread = { .rt = RES_BITMASK };
+    struct mapi_SRestriction has_id = { .rt = RES_EXIST };
+    struct mapi_SRestriction prefix = { .rt = RES_CONTENT };
+    struct mapistore_property_data *r;
+    void *table;
+    uint32_t count;
+    uint8_t status = 0xFF;
+    CHECK(imap_folder_open_table(context_for("Projects"), root, MAPISTORE_MESSAGE_TABLE, 6, &table, &count) == MAPISTORE_SUCCESS && count == 2);
+    CHECK(imap_table_set_columns(table, 1, cols) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_set_sort_order(table, &by_subject, &status) == MAPISTORE_SUCCESS && status == 0);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(r[0].data, "Ol\xc3\xa1") == 0);
+    by_subject.aSort = &desc;
+    CHECK(imap_table_set_sort_order(table, &by_subject, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(r[0].data, "With attachment") == 0);
+    /* "Unread": MSGFLAG_READ clear. */
+    unread.res.resBitmask.relMBR = BMR_EQZ;
+    unread.res.resBitmask.ulPropTag = PidTagMessageFlags;
+    unread.res.resBitmask.ulMask = 0x1;
+    CHECK(imap_table_set_restrictions(table, &unread, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 1);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(r[0].data, "With attachment") == 0);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 1, &r) == MAPISTORE_ERR_NOT_FOUND);
+    has_id.res.resExist.ulPropTag = PidTagInternetMessageId;
+    CHECK(imap_table_set_restrictions(table, &has_id, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 0);
+    prefix.res.resContent.fuzzy = 0x00010002; /* FL_PREFIX | FL_IGNORECASE */
+    prefix.res.resContent.ulPropTag = PidTagSubject;
+    prefix.res.resContent.lpProp.ulPropTag = PidTagSubject;
+    prefix.res.resContent.lpProp.value.lpszW = "with";
+    CHECK(imap_table_set_restrictions(table, &prefix, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 1);
+    CHECK(imap_table_set_restrictions(table, NULL, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 2);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &r) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(r[0].data, "With attachment") == 0); /* the sort order stays */
+    return 0;
+}
+
 static uint64_t next_cn = 0x5000;
 static enum mapistore_error fake_cn(struct imap_context *ctx, uint64_t *cn)
 {
@@ -892,7 +940,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_sort_and_restrict() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

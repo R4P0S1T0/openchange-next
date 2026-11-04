@@ -1016,6 +1016,7 @@ _PUBLIC_ enum mapistore_error imap_message_get_attachment_table(void *object, TA
 	t->message = m;
 	t->table_type = MAPISTORE_ATTACHMENT_TABLE;
 	t->row_count = m->attachment_count;
+	t->view = NULL; /* attachments are neither sorted nor restricted */
 	*tablep = t;
 	*row_count = t->row_count;
 	return MAPISTORE_SUCCESS;

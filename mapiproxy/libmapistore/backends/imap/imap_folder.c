@@ -415,6 +415,23 @@ _PUBLIC_ enum mapistore_error imap_folder_get_child_count(void *object, enum map
 	}
 }
 
+/* All rows, in load order. */
+static enum mapistore_error view_reset(struct imap_table *t)
+{
+	uint32_t i;
+
+	talloc_free(t->view);
+	t->view = talloc_array(t, uint32_t, t->row_count ? t->row_count : 1);
+	if (!t->view) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < t->row_count; i++) {
+		t->view[i] = i;
+	}
+	t->view_count = t->row_count;
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ enum mapistore_error imap_folder_open_table(void *object, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
 						     uint32_t handle_id, void **table, uint32_t *row_count)
 {
@@ -442,12 +459,15 @@ _PUBLIC_ enum mapistore_error imap_folder_open_table(void *object, TALLOC_CTX *m
 	default:
 		break;
 	}
+	if (ret == MAPISTORE_SUCCESS) {
+		ret = view_reset(t);
+	}
 	if (ret != MAPISTORE_SUCCESS) {
 		talloc_free(t);
 		return ret;
 	}
 	*table = t;
-	*row_count = t->row_count;
+	*row_count = t->view_count;
 	return MAPISTORE_SUCCESS;
 }
 
@@ -474,7 +494,7 @@ _PUBLIC_ enum mapistore_error imap_table_get_row_count(void *object, enum mapist
 	if (!t || t->type != IMAP_OBJ_TABLE || !count) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
-	*count = t->row_count;
+	*count = t->view ? t->view_count : t->row_count;
 	return MAPISTORE_SUCCESS;
 }
 
@@ -487,6 +507,12 @@ _PUBLIC_ enum mapistore_error imap_table_get_row(void *object, TALLOC_CTX *mem_c
 
 	if (!t || t->type != IMAP_OBJ_TABLE || !data) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (t->view) {
+		if (row >= t->view_count) {
+			return MAPISTORE_ERR_NOT_FOUND;
+		}
+		row = t->view[row];
 	}
 	if (row >= t->row_count) {
 		return MAPISTORE_ERR_NOT_FOUND;
@@ -512,6 +538,280 @@ _PUBLIC_ enum mapistore_error imap_table_get_row(void *object, TALLOC_CTX *mem_c
 	default:
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
+}
+
+/* One property of raw row `row`, or NULL. */
+static void *table_value(TALLOC_CTX *mem_ctx, struct imap_table *t, uint32_t row, enum MAPITAGS tag)
+{
+	struct mapistore_property_data	d = { NULL, MAPISTORE_ERR_NOT_FOUND };
+	struct imap_folder		*child;
+
+	switch (t->table_type) {
+	case MAPISTORE_MESSAGE_TABLE:
+		return imap_row_value(mem_ctx, &t->rows[row], t->folder, tag);
+	case MAPISTORE_FOLDER_TABLE:
+		child = folder_new(mem_ctx, t->folder->ctx, t->children[row]);
+		if (child) {
+			child->parent_fid = t->folder->fid;
+			imap_folder_properties(child, mem_ctx, 1, &tag, &d);
+		}
+		return d.error == MAPISTORE_SUCCESS ? d.data : NULL;
+	case MAPISTORE_ATTACHMENT_TABLE:
+		imap_attachment_properties(&t->message->attachments[row], mem_ctx, 1, &tag, &d);
+		return d.error == MAPISTORE_SUCCESS ? d.data : NULL;
+	default:
+		return NULL;
+	}
+}
+
+/* <0, 0, >0 for values of property type `type`; strings case-insensitive. */
+static int compare_values(uint16_t type, const void *a, const void *b)
+{
+	switch (type) {
+	case PT_LONG: {
+		uint32_t x = *(const uint32_t *) a, y = *(const uint32_t *) b;
+		return x < y ? -1 : x > y;
+	}
+	case PT_I8: {
+		uint64_t x = *(const uint64_t *) a, y = *(const uint64_t *) b;
+		return x < y ? -1 : x > y;
+	}
+	case PT_BOOLEAN:
+		return (int) *(const uint8_t *) a - (int) *(const uint8_t *) b;
+	case PT_SYSTIME: {
+		const struct FILETIME *x = a, *y = b;
+		uint64_t u = ((uint64_t) x->dwHighDateTime << 32) | x->dwLowDateTime;
+		uint64_t v = ((uint64_t) y->dwHighDateTime << 32) | y->dwLowDateTime;
+		return u < v ? -1 : u > v;
+	}
+	case PT_UNICODE:
+	case PT_STRING8:
+		return strcasecmp(a, b);
+	case PT_BINARY: {
+		const struct Binary_r *x = a, *y = b;
+		int c = memcmp(x->lpb, y->lpb, x->cb < y->cb ? x->cb : y->cb);
+		return c ? c : (x->cb < y->cb ? -1 : x->cb > y->cb);
+	}
+	default:
+		return 0;
+	}
+}
+
+/* The value a restriction compares against, as table_value returns it. */
+static const void *restriction_value(const struct mapi_SPropValue *p, struct Binary_r *bin)
+{
+	switch (p->ulPropTag & 0xFFFF) {
+	case PT_LONG:		return &p->value.l;
+	case PT_I8:		return &p->value.d;
+	case PT_BOOLEAN:	return &p->value.b;
+	case PT_SYSTIME:	return &p->value.ft;
+	case PT_UNICODE:	return p->value.lpszW;
+	case PT_STRING8:	return p->value.lpszA;
+	case PT_BINARY:
+		bin->cb = p->value.bin.cb;
+		bin->lpb = p->value.bin.lpb;
+		return bin;
+	default:		return NULL;
+	}
+}
+
+static bool contains(const char *hay, const char *needle, uint32_t fuzzy)
+{
+	size_t hl = strlen(hay), nl = strlen(needle), i;
+	bool icase = fuzzy & 0x00010000;	/* FL_IGNORECASE */
+
+	switch (fuzzy & 0xFFFF) {
+	case 0:	/* FL_FULLSTRING */
+		return (icase ? strcasecmp(hay, needle) : strcmp(hay, needle)) == 0;
+	case 2:	/* FL_PREFIX */
+		return nl <= hl && (icase ? strncasecmp(hay, needle, nl) : strncmp(hay, needle, nl)) == 0;
+	default: /* FL_SUBSTRING */
+		for (i = 0; i + nl <= hl; i++) {
+			if ((icase ? strncasecmp(hay + i, needle, nl) : strncmp(hay + i, needle, nl)) == 0) {
+				return true;
+			}
+		}
+		return nl == 0;
+	}
+}
+
+/* Whether raw row `row` matches `r`. Unsupported restrictions match (and are logged): showing
+   a row too many beats an empty table. */
+static bool matches(TALLOC_CTX *mem_ctx, struct imap_table *t, uint32_t row, const struct mapi_SRestriction *r, int depth)
+{
+	struct Binary_r	bin;
+	const void	*want;
+	void		*have;
+	uint16_t	i;
+	int		c;
+
+	if (!r || depth > 16) {
+		return true;
+	}
+	switch (r->rt) {
+	case RES_AND:
+		for (i = 0; i < r->res.resAnd.cRes; i++) {
+			if (!matches(mem_ctx, t, row, (const struct mapi_SRestriction *) &r->res.resAnd.res[i], depth + 1)) return false;
+		}
+		return true;
+	case RES_OR:
+		for (i = 0; i < r->res.resOr.cRes; i++) {
+			if (matches(mem_ctx, t, row, (const struct mapi_SRestriction *) &r->res.resOr.res[i], depth + 1)) return true;
+		}
+		return r->res.resOr.cRes == 0;
+	case RES_EXIST:
+		return table_value(mem_ctx, t, row, r->res.resExist.ulPropTag) != NULL;
+	case RES_BITMASK:
+		have = table_value(mem_ctx, t, row, r->res.resBitmask.ulPropTag);
+		if (!have || (r->res.resBitmask.ulPropTag & 0xFFFF) != PT_LONG) {
+			return r->res.resBitmask.relMBR == BMR_EQZ;
+		}
+		return ((*(uint32_t *) have & r->res.resBitmask.ulMask) == 0) == (r->res.resBitmask.relMBR == BMR_EQZ);
+	case RES_CONTENT:
+		have = table_value(mem_ctx, t, row, r->res.resContent.ulPropTag);
+		want = restriction_value(&r->res.resContent.lpProp, &bin);
+		if (!have || !want) {
+			return false;
+		}
+		return contains(have, want, r->res.resContent.fuzzy);
+	case RES_PROPERTY:
+		have = table_value(mem_ctx, t, row, r->res.resProperty.ulPropTag);
+		want = restriction_value(&r->res.resProperty.lpProp, &bin);
+		if (!want) {
+			break;
+		}
+		if (!have) {
+			return r->res.resProperty.relop == 5; /* RELOP_NE */
+		}
+		c = compare_values(r->res.resProperty.ulPropTag & 0xFFFF, have, want);
+		switch (r->res.resProperty.relop) {
+		case 0: return c < 0;	/* RELOP_LT */
+		case 1: return c <= 0;	/* RELOP_LE */
+		case 2: return c > 0;	/* RELOP_GT */
+		case 3: return c >= 0;	/* RELOP_GE */
+		case 4: return c == 0;	/* RELOP_EQ */
+		case 5: return c != 0;	/* RELOP_NE */
+		default: break;
+		}
+		break;
+	default:
+		break;
+	}
+	OC_DEBUG(3, "IMAP backend: restriction type %u not supported; rows are not filtered by it\n", r->rt);
+	return true;
+}
+
+struct sort_key {
+	uint32_t	row;
+	void		**values;
+};
+
+static const struct SSortOrder	*sort_spec;
+static uint16_t			sort_spec_count;
+
+static int sort_cmp(const void *a, const void *b)
+{
+	const struct sort_key	*x = a, *y = b;
+	uint16_t		i;
+
+	for (i = 0; i < sort_spec_count; i++) {
+		const void *u = x->values[i], *v = y->values[i];
+		int c = (!u || !v) ? (u ? 1 : v ? -1 : 0) : compare_values(sort_spec[i].ulPropTag & 0xFFFF, u, v);
+
+		if (c) {
+			return sort_spec[i].ulOrder == TABLE_SORT_DESCEND ? -c : c;
+		}
+	}
+	return x->row < y->row ? -1 : x->row > y->row; /* stable */
+}
+
+static enum mapistore_error view_sort(struct imap_table *t)
+{
+	TALLOC_CTX	*tmp;
+	struct sort_key	*keys;
+	uint32_t	i;
+	uint16_t	k;
+
+	if (!t->sort_count || t->view_count < 2) {
+		return MAPISTORE_SUCCESS;
+	}
+	tmp = talloc_new(NULL);
+	keys = talloc_array(tmp, struct sort_key, t->view_count);
+	if (!keys) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < t->view_count; i++) {
+		keys[i].row = t->view[i];
+		keys[i].values = talloc_array(keys, void *, t->sort_count);
+		if (!keys[i].values) {
+			talloc_free(tmp);
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		for (k = 0; k < t->sort_count; k++) {
+			keys[i].values[k] = table_value(keys, t, t->view[i], t->sort[k].ulPropTag);
+		}
+	}
+	/* qsort has no context argument; the C worker runs mapistore on one thread. */
+	sort_spec = t->sort;
+	sort_spec_count = t->sort_count;
+	qsort(keys, t->view_count, sizeof keys[0], sort_cmp);
+	for (i = 0; i < t->view_count; i++) {
+		t->view[i] = keys[i].row;
+	}
+	talloc_free(tmp);
+	return MAPISTORE_SUCCESS;
+}
+
+_PUBLIC_ enum mapistore_error imap_table_set_restrictions(void *object, struct mapi_SRestriction *res, uint8_t *status)
+{
+	struct imap_table	*t = object;
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+	uint32_t		i, n = 0;
+
+	if (!t || t->type != IMAP_OBJ_TABLE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (status) {
+		*status = 0; /* TBLSTAT_COMPLETE */
+	}
+	ret = view_reset(t);
+	if (ret != MAPISTORE_SUCCESS || !res) {
+		return ret == MAPISTORE_SUCCESS ? view_sort(t) : ret;
+	}
+	tmp = talloc_new(NULL);
+	for (i = 0; i < t->row_count; i++) {
+		if (matches(tmp, t, i, res, 0)) {
+			t->view[n++] = i;
+		}
+	}
+	talloc_free(tmp);
+	t->view_count = n;
+	return view_sort(t);
+}
+
+_PUBLIC_ enum mapistore_error imap_table_set_sort_order(void *object, struct SSortOrderSet *set, uint8_t *status)
+{
+	struct imap_table *t = object;
+
+	if (!t || t->type != IMAP_OBJ_TABLE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (status) {
+		*status = 0; /* TBLSTAT_COMPLETE */
+	}
+	talloc_free(t->sort);
+	t->sort = NULL;
+	t->sort_count = 0;
+	if (set && set->cSorts && set->aSort) {
+		t->sort = talloc_memdup(t, set->aSort, sizeof(struct SSortOrder) * set->cSorts);
+		if (!t->sort) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		t->sort_count = set->cSorts;
+	}
+	return view_sort(t);
 }
 
 static void set(struct mapistore_property_data *d, void *value)
@@ -866,6 +1166,8 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;
 	backend->table.get_available_properties = imap_table_available;
+	backend->table.set_restrictions = imap_table_set_restrictions;
+	backend->table.set_sort_order = imap_table_set_sort_order;
 	backend->properties.get_properties = imap_properties_get;
 	backend->properties.get_available_properties = imap_properties_available;
 	imap_message_fill(backend);

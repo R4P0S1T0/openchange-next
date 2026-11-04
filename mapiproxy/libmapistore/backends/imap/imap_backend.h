@@ -124,6 +124,10 @@ struct imap_table {
 	struct imap_message		*message;	/* attachment table */
 	struct imap_message_row		*rows;		/* message table */
 	uint32_t			uidvalidity;	/* of the mailbox when the rows were read */
+	uint32_t			*view;		/* rows shown, in order (restriction and sort applied) */
+	uint32_t			view_count;
+	struct SSortOrder		*sort;		/* the last sort order, kept across restrictions */
+	uint16_t			sort_count;
 };
 
 /* Entry point dlopen()ed by mapistore_backend_init. */
@@ -164,6 +168,8 @@ enum mapistore_error imap_table_set_columns(void *table, uint16_t count, enum MA
 enum mapistore_error imap_table_get_row(void *table, TALLOC_CTX *mem_ctx, enum mapistore_query_type type,
 					uint32_t row, struct mapistore_property_data **data);
 enum mapistore_error imap_table_get_row_count(void *table, enum mapistore_query_type type, uint32_t *count);
+enum mapistore_error imap_table_set_restrictions(void *table, struct mapi_SRestriction *res, uint8_t *table_status);
+enum mapistore_error imap_table_set_sort_order(void *table, struct SSortOrderSet *set, uint8_t *table_status);
 enum mapistore_error imap_folder_properties(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint16_t count,
 					    enum MAPITAGS *tags, struct mapistore_property_data *data);
 enum mapistore_error imap_table_available(void *table, TALLOC_CTX *mem_ctx, struct SPropTagArray **propsp);
