@@ -375,7 +375,7 @@ static int test_uri_user_must_match(void)
 }
 
 static enum MAPITAGS hierarchy_columns[] = { PidTagFolderId, PidTagDisplayName, PidTagContentCount,
-    PidTagSubfolders, PidTagContainerClass };
+    PidTagSubfolders, PidTagContainerClass, PidTagParentFolderId };
 
 static int test_hierarchy_table_rows(void)
 {
@@ -387,13 +387,15 @@ static int test_hierarchy_table_rows(void)
     CHECK(imap_folder_get_child_count(projects, MAPISTORE_FOLDER_TABLE, &count) == MAPISTORE_SUCCESS && count == 1);
     CHECK(imap_folder_open_table(projects, root, MAPISTORE_FOLDER_TABLE, 1, &table, &count) == MAPISTORE_SUCCESS);
     CHECK(count == 1);
-    CHECK(imap_table_set_columns(table, 5, hierarchy_columns) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_set_columns(table, 6, hierarchy_columns) == MAPISTORE_SUCCESS);
     CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &row) == MAPISTORE_SUCCESS);
     CHECK(row[0].error == MAPISTORE_SUCCESS && (fid = *(uint64_t *) row[0].data) != 0);
     CHECK(row[1].error == MAPISTORE_SUCCESS && strcmp(row[1].data, "Sub") == 0);
     CHECK(row[2].error == MAPISTORE_SUCCESS && *(uint32_t *) row[2].data == 0);
     CHECK(row[3].error == MAPISTORE_SUCCESS && *(uint8_t *) row[3].data == 0);
     CHECK(row[4].error == MAPISTORE_SUCCESS && strcmp(row[4].data, "IPF.Note") == 0);
+    /* ICS hierarchy sync dereferences it for every row below the top level (oxcfxics_push_folderChange). */
+    CHECK(row[5].error == MAPISTORE_SUCCESS && *(uint64_t *) row[5].data == ((struct imap_folder *) projects)->fid);
     CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 1, &row) == MAPISTORE_ERR_NOT_FOUND);
     /* The row's folder ID opens the child; the same ID is returned on the next listing. */
     CHECK(imap_folder_open_folder(projects, root, fid, &sub) == MAPISTORE_SUCCESS && sub);

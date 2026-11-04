@@ -105,6 +105,7 @@ struct imap_folder {
 	struct imap_context	*ctx;
 	char			*mailbox;	/* modified UTF-7, as on the wire */
 	uint64_t		fid;
+	uint64_t		parent_fid;	/* 0 when the parent is not an IMAP folder of this context */
 };
 
 struct imap_table {

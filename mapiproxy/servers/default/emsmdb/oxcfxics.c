@@ -1439,13 +1439,23 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 				bin_data->lpb = (uint8_t *) "";
 			}
 			else {
-				emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, *(uint64_t *) data_pointers[sync_data->prop_index.parent_fid], &bin_data);
+				/* The rows are this folder's children: without PidTagParentFolderId, the parent is folder_object. */
+				uint64_t parent_fid = (retvals[sync_data->prop_index.parent_fid] == MAPI_E_SUCCESS && data_pointers[sync_data->prop_index.parent_fid])
+					? *(uint64_t *) data_pointers[sync_data->prop_index.parent_fid] : folder_object->object.folder->folderID;
+
+				emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, parent_fid, &bin_data);
 			}
 			query_props.aulPropTag[j] = PidTagParentSourceKey;
 			header_data_pointers[j] = bin_data;
 			j++;
 
 			/* source key */
+			if (retvals[sync_data->prop_index.eid] != MAPI_E_SUCCESS || !data_pointers[sync_data->prop_index.eid]) {
+				OC_DEBUG(1, "hierarchy sync: a subfolder row has no folder ID; skipped\n");
+				talloc_free(header_data_pointers);
+				talloc_free(data_pointers);
+				continue;
+			}
 			eid = *(uint64_t *) data_pointers[sync_data->prop_index.eid];
 			if (eid == 0x7fffffffffffffffLL) {
 				OC_DEBUG(0, "folder without a valid eid\n");
@@ -1550,8 +1560,14 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			if (synccontext->request.no_foreign_identifiers) {
 				query_props.aulPropTag[j] = PidTagParentFolderId;
 				header_data_pointers[j] = data_pointers[sync_data->prop_index.parent_fid];
-				if (retvals[sync_data->prop_index.parent_fid]) {
-					header_data_pointers[j] = talloc_zero(header_data_pointers, uint64_t);
+				if (retvals[sync_data->prop_index.parent_fid] || !data_pointers[sync_data->prop_index.parent_fid]) {
+					uint64_t *parent_fid = talloc_zero(header_data_pointers, uint64_t);
+
+					/* The rows are this folder's children (0 at the top of the synchronized tree). */
+					if (parent_fid && folder_object != topmost_folder_object) {
+						*parent_fid = folder_object->object.folder->folderID;
+					}
+					header_data_pointers[j] = parent_fid;
 				}
 				else {
 					header_data_pointers[j] = data_pointers[sync_data->prop_index.parent_fid];

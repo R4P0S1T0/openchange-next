@@ -336,6 +336,9 @@ _PUBLIC_ enum mapistore_error imap_folder_open_folder(void *parent, TALLOC_CTX *
 	if (!f) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
+	if (!strchr(mailbox + len + 1, imap_context_delimiter(ctx))) {
+		f->parent_fid = p->fid;
+	}
 	*child = f;
 	return MAPISTORE_SUCCESS;
 }
@@ -490,6 +493,7 @@ _PUBLIC_ enum mapistore_error imap_table_get_row(void *object, TALLOC_CTX *mem_c
 		if (!child) {
 			return MAPISTORE_ERR_NOT_FOUND;
 		}
+		child->parent_fid = t->folder->fid;
 		ret = imap_folder_properties(child, mem_ctx, t->column_count, t->columns, *data);
 		talloc_free(child);
 		return ret;
@@ -580,6 +584,11 @@ _PUBLIC_ enum mapistore_error imap_folder_properties(struct imap_folder *f, TALL
 			break;
 		case PidTagFolderId:
 			set(d, imap_i8(mem_ctx, f->fid));
+			break;
+		case PidTagParentFolderId:
+			if (f->parent_fid) {
+				set(d, imap_i8(mem_ctx, f->parent_fid));
+			}
 			break;
 		case PidTagAttributeHidden:
 			set(d, imap_bool(mem_ctx, false));
