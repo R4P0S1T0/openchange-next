@@ -404,6 +404,87 @@ _PUBLIC_ enum mapistore_error imap_message_table_load(struct imap_table *t)
 	return ret;
 }
 
+/* Message IDs handed out for UIDs that are gone (expunged, or moved out in another client).
+   Stateless: every UID below UIDNEXT missing from the mailbox is looked up in the indexing,
+   and emsmdb keeps only the IDs the client holds (IdsetGiven). */
+#define MAX_DELETED_LOOKUPS 5000 /* shortcut: only the newest gaps are checked, keep per-folder state if mailboxes with huge expunge histories need it */
+static enum mapistore_error get_deleted_fmids(void *folder, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
+					      uint64_t since, struct UI8Array_r **idsp, uint64_t *cnp)
+{
+	struct imap_folder	*f = folder;
+	struct imap_conn	*conn;
+	struct imap_status	st;
+	struct mailimap_search_key *key;
+	struct UI8Array_r	*ids;
+	clist			*found = NULL;
+	clistiter		*it;
+	uint8_t			*present;
+	uint32_t		uid, lookups = 0;
+	char			*uri, *state;
+	time_t			when;
+	int			r;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER || !idsp || !cnp) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	ids = talloc_zero(mem_ctx, struct UI8Array_r);
+	if (!ids) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	*idsp = ids;
+	if (type != MAPISTORE_MESSAGE_TABLE) {
+		return MAPISTORE_SUCCESS;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn || imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	present = talloc_zero_array(ids, uint8_t, st.uidnext ? st.uidnext : 1);
+	key = mailimap_search_key_new_all();
+	if (!present || !key) {
+		if (key) mailimap_search_key_free(key);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	r = imap_conn_check(conn, mailimap_uid_search(imap_conn_session(conn), NULL, key, &found));
+	mailimap_search_key_free(key);
+	if (r != MAILIMAP_NO_ERROR) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	for (it = clist_begin(found); it; it = clist_next(it)) {
+		uint32_t *u = clist_content(it);
+		if (u && *u < st.uidnext) {
+			present[*u] = 1;
+		}
+	}
+	mailimap_search_result_free(found);
+	for (uid = st.uidnext ? st.uidnext - 1 : 0; uid > 0 && lookups < MAX_DELETED_LOOKUPS; uid--) {
+		bool soft_deleted = false;
+		uint64_t mid;
+
+		if (present[uid]) {
+			continue;
+		}
+		lookups++;
+		uri = imap_message_uri(ids, f, st.uidvalidity, uid);
+		if (uri && f->ctx->ictx->get_fmid(f->ctx->ictx, f->ctx->username, uri, false, &mid, &soft_deleted) == MAPISTORE_SUCCESS) {
+			ids->lpui8 = talloc_realloc(ids, ids->lpui8, uint64_t, ids->cValues + 1);
+			if (!ids->lpui8) {
+				return MAPISTORE_ERR_NO_MEMORY;
+			}
+			ids->lpui8[ids->cValues++] = mid;
+		}
+		talloc_free(uri);
+	}
+	/* The change that carries the deletions: renewed whenever the mailbox state moves. */
+	uri = imap_uri(ids, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
+	state = talloc_asprintf(ids, "deleted %u %u %u", st.uidvalidity, st.uidnext, st.messages);
+	uri = uri ? talloc_asprintf_append_buffer(uri, "#deleted") : NULL;
+	if (!uri || !state || imap_change_number(f->ctx, uri, state, cnp, &when) != MAPISTORE_SUCCESS) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	return MAPISTORE_SUCCESS;
+}
+
 static struct FILETIME *filetime(TALLOC_CTX *mem_ctx, time_t t)
 {
 	struct FILETIME	*ft;
@@ -1055,6 +1136,7 @@ static enum mapistore_error get_attachment_table(void *message, TALLOC_CTX *mem_
 
 _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 {
+	backend->folder.get_deleted_fmids = get_deleted_fmids;
 	backend->message.get_message_data = imap_message_get_data;
 	backend->message.set_read_flag = set_read_flag;
 	backend->message.open_attachment = open_attachment;

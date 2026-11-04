@@ -695,6 +695,19 @@ static int test_expunged_mid_not_found(void)
     mailimap_store_att_flags_free(store);
     CHECK(mailimap_expunge(imap) == MAILIMAP_NO_ERROR);
     CHECK(imap_folder_open_message(folder, root, gone, false, &msg) == MAPISTORE_ERR_NOT_FOUND && msg == NULL);
+    /* ICS reports it as deleted (a move out of the folder in webmail), and only it. */
+    {
+        struct mapistore_backend b;
+        struct UI8Array_r *ids = NULL;
+        uint64_t cn = 0;
+        memset(&b, 0, sizeof b);
+        CHECK(mapistore_backend_init_defaults(&b) == MAPISTORE_SUCCESS);
+        imap_backend_fill(&b);
+        CHECK(b.folder.get_deleted_fmids(folder, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &cn) == MAPISTORE_SUCCESS);
+        CHECK(ids && ids->cValues == 1 && ids->lpui8[0] == gone && cn != 0);
+        CHECK(b.folder.get_deleted_fmids(folder, root, MAPISTORE_FOLDER_TABLE, 0, &ids, &cn) == MAPISTORE_SUCCESS);
+        CHECK(ids && ids->cValues == 0);
+    }
     CHECK(mailimap_delete(imap, "Gone") == MAILIMAP_NO_ERROR);
     talloc_free(conn);
     return 0;
@@ -956,6 +969,7 @@ int main(int argc, char **argv)
     ictx.add_fmid = fi_add_fmid;
     ictx.allocate_fmid = fi_allocate;
     fidx.next = 0x2000;
+    imap_backend_set_cn_source(fake_cn); /* no openchangedb here */
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
         test_username_is_checked() || test_settings_password_file() || test_mailbox_name_round_trip() ||
         (imap_backend_set_state(&tunnel, false), 0) || test_list_contexts_roles() || test_create_context_without_namespace() || test_uri_user_must_match() ||
