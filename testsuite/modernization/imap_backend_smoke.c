@@ -820,6 +820,35 @@ static int test_sort_and_restrict(void)
     return 0;
 }
 
+/* A client restriction whose value type disagrees with its tag, or a string restriction on a
+   binary column, is unsupported (rows pass), never a read through the wrong union member. */
+static int test_mistyped_restriction_ignored(void)
+{
+    struct mapi_SRestriction r = { .rt = RES_PROPERTY };
+    void *table;
+    uint32_t count;
+    uint8_t status = 0xFF;
+    CHECK(imap_folder_open_table(context_for("Projects"), root, MAPISTORE_MESSAGE_TABLE, 7, &table, &count) == MAPISTORE_SUCCESS && count == 2);
+    r.res.resProperty.relop = 4; /* RELOP_EQ */
+    r.res.resProperty.ulPropTag = PidTagChangeKey;
+    r.res.resProperty.lpProp.ulPropTag = PidTagMessageFlags;
+    r.res.resProperty.lpProp.value.l = 5;
+    CHECK(imap_table_set_restrictions(table, &r, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 2);
+    r.rt = RES_CONTENT;
+    r.res.resContent.fuzzy = 1; /* FL_SUBSTRING */
+    r.res.resContent.ulPropTag = PidTagChangeKey;
+    r.res.resContent.lpProp.ulPropTag = PidTagSubject;
+    r.res.resContent.lpProp.value.lpszW = "x";
+    CHECK(imap_table_set_restrictions(table, &r, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 2);
+    r.res.resContent.ulPropTag = PidTagSubject;
+    r.res.resContent.lpProp.value.lpszW = NULL;
+    CHECK(imap_table_set_restrictions(table, &r, &status) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row_count(table, MAPISTORE_PREFILTERED_QUERY, &count) == MAPISTORE_SUCCESS && count == 2);
+    return 0;
+}
+
 static uint64_t next_cn = 0x5000;
 static enum mapistore_error fake_cn(struct imap_context *ctx, uint64_t *cn)
 {
@@ -978,7 +1007,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_sort_and_restrict() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

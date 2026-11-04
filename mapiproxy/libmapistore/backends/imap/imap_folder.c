@@ -619,6 +619,11 @@ static const void *restriction_value(const struct mapi_SPropValue *p, struct Bin
 	}
 }
 
+static bool is_string_tag(uint32_t tag)
+{
+	return (tag & 0xFFFF) == PT_UNICODE || (tag & 0xFFFF) == PT_STRING8;
+}
+
 static bool contains(const char *hay, const char *needle, uint32_t fuzzy)
 {
 	size_t hl = strlen(hay), nl = strlen(needle), i;
@@ -672,18 +677,29 @@ static bool matches(TALLOC_CTX *mem_ctx, struct imap_table *t, uint32_t row, con
 		}
 		return ((*(uint32_t *) have & r->res.resBitmask.ulMask) == 0) == (r->res.resBitmask.relMBR == BMR_EQZ);
 	case RES_CONTENT:
-		have = table_value(mem_ctx, t, row, r->res.resContent.ulPropTag);
+		/* Both sides strings of the tag's type, or the value would be read as the wrong member. */
+		if (!is_string_tag(r->res.resContent.ulPropTag) ||
+		    (r->res.resContent.ulPropTag & 0xFFFF) != (r->res.resContent.lpProp.ulPropTag & 0xFFFF)) {
+			break;
+		}
 		want = restriction_value(&r->res.resContent.lpProp, &bin);
-		if (!have || !want) {
+		if (!want) {
+			break;
+		}
+		have = table_value(mem_ctx, t, row, r->res.resContent.ulPropTag);
+		if (!have) {
 			return false;
 		}
 		return contains(have, want, r->res.resContent.fuzzy);
 	case RES_PROPERTY:
-		have = table_value(mem_ctx, t, row, r->res.resProperty.ulPropTag);
+		if ((r->res.resProperty.ulPropTag & 0xFFFF) != (r->res.resProperty.lpProp.ulPropTag & 0xFFFF)) {
+			break;
+		}
 		want = restriction_value(&r->res.resProperty.lpProp, &bin);
 		if (!want) {
 			break;
 		}
+		have = table_value(mem_ctx, t, row, r->res.resProperty.ulPropTag);
 		if (!have) {
 			return r->res.resProperty.relop == 5; /* RELOP_NE */
 		}
