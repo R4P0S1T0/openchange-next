@@ -852,6 +852,14 @@ static int test_available_properties(void)
     CHECK(imap_message_open_attachment(msg, root, 0, &att) == MAPISTORE_SUCCESS);
     CHECK(imap_properties_available(att, root, &props) == MAPISTORE_SUCCESS);
     CHECK(has_tag(props, PidTagAttachDataBinary) && has_tag(props, PidTagAttachLongFilename));
+    /* ICS contents sync takes the message properties from the message table (RopSyncConfigure). */
+    {
+        void *table;
+        uint32_t count;
+        CHECK(imap_folder_open_table(context_for("INBOX"), root, MAPISTORE_MESSAGE_TABLE, 5, &table, &count) == MAPISTORE_SUCCESS);
+        CHECK(imap_table_available(table, root, &props) == MAPISTORE_SUCCESS);
+        CHECK(has_tag(props, PidTagSubject) && has_tag(props, PidTagBody) && has_tag(props, PidTagMessageClass));
+    }
     return 0;
 }
 

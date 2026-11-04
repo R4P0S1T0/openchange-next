@@ -827,6 +827,29 @@ _PUBLIC_ enum mapistore_error imap_properties_available(void *object, TALLOC_CTX
 	return MAPISTORE_SUCCESS;
 }
 
+/* Columns a table of this type can show. */
+_PUBLIC_ enum mapistore_error imap_table_available(void *object, TALLOC_CTX *mem_ctx, struct SPropTagArray **propsp)
+{
+	struct imap_table	*t = object;
+	const enum MAPITAGS	*candidates;
+	size_t			n;
+
+	if (!t || t->type != IMAP_OBJ_TABLE || !propsp) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	switch (t->table_type) {
+	case MAPISTORE_FOLDER_TABLE:	 candidates = folder_candidates; n = sizeof folder_candidates / sizeof folder_candidates[0]; break;
+	case MAPISTORE_ATTACHMENT_TABLE: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
+	default:			 candidates = message_candidates; n = sizeof message_candidates / sizeof message_candidates[0]; break;
+	}
+	*propsp = talloc_zero(mem_ctx, struct SPropTagArray);
+	if (!*propsp || !((*propsp)->aulPropTag = talloc_memdup(*propsp, candidates, n * sizeof candidates[0]))) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	(*propsp)->cValues = n;
+	return MAPISTORE_SUCCESS;
+}
+
 /* Write operations keep mapistore's defaults (MAPISTORE_ERR_NOT_IMPLEMENTED): M3 is read-only. */
 _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 {
@@ -842,6 +865,7 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->table.set_columns = imap_table_set_columns;
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;
+	backend->table.get_available_properties = imap_table_available;
 	backend->properties.get_properties = imap_properties_get;
 	backend->properties.get_available_properties = imap_properties_available;
 	imap_message_fill(backend);

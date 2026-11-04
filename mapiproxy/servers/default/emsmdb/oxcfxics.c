@@ -1590,6 +1590,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			}
 
 			synccontext->sent_objects++;
+			OC_DEBUG(5, "hierarchy sync: folder %.16"PRIx64" sent below %.16"PRIx64" (cn %.12"PRIx64")\n",
+				 eid, folder_object->object.folder->folderID, cn);
 		end_row:
 			talloc_free(header_data_pointers);
 			talloc_free(data_pointers);
