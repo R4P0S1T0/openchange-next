@@ -825,6 +825,36 @@ static int test_defaults_cover_every_operation(void)
     return 0;
 }
 
+static bool has_tag(const struct SPropTagArray *a, enum MAPITAGS tag)
+{
+    uint32_t i;
+    for (i = 0; a && i < a->cValues; i++) {
+        if (a->aulPropTag[i] == tag) return true;
+    }
+    return false;
+}
+
+/* ICS full sync and GetPropertiesAll send what get_available_properties lists: without it,
+   cached-mode Outlook receives messages with no subject, sender or body and hides them. */
+static int test_available_properties(void)
+{
+    struct SPropTagArray *props = NULL;
+    void *msg, *att;
+    struct mapistore_property_data d[6];
+    CHECK(imap_properties_available(context_for("INBOX"), root, &props) == MAPISTORE_SUCCESS);
+    CHECK(has_tag(props, PidTagDisplayName) && has_tag(props, PidTagContentCount) && has_tag(props, PidTagChangeNumber));
+    CHECK(open_message("Projects", 1, &msg, d) == 0);
+    CHECK(imap_properties_available(msg, root, &props) == MAPISTORE_SUCCESS);
+    CHECK(has_tag(props, PidTagSubject) && has_tag(props, PidTagSenderName) && has_tag(props, PidTagMessageClass));
+    CHECK(has_tag(props, PidTagBody) && has_tag(props, PidTagHtml) && has_tag(props, PidTagMessageDeliveryTime));
+    CHECK(has_tag(props, PidTagChangeNumber) && has_tag(props, PidTagChangeKey) && has_tag(props, PidTagPredecessorChangeList));
+    CHECK(!has_tag(props, PidTagInternetMessageId)); /* this message has no Message-ID header */
+    CHECK(imap_message_open_attachment(msg, root, 0, &att) == MAPISTORE_SUCCESS);
+    CHECK(imap_properties_available(att, root, &props) == MAPISTORE_SUCCESS);
+    CHECK(has_tag(props, PidTagAttachDataBinary) && has_tag(props, PidTagAttachLongFilename));
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -854,7 +884,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_change_numbers() || test_defaults_cover_every_operation() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);

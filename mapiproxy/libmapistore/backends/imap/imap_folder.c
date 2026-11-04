@@ -765,6 +765,68 @@ _PUBLIC_ enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_
 	}
 }
 
+static const enum MAPITAGS folder_candidates[] = {
+	PidTagDisplayName, PidTagContainerClass, PidTagContentCount, PidTagContentUnreadCount, PidTagSubfolders,
+	PidTagFolderType, PidTagFolderId, PidTagParentFolderId, PidTagAttributeHidden, PidTagChangeNumber,
+	PidTagChangeKey, PidTagPredecessorChangeList, PidTagLastModificationTime,
+};
+
+static const enum MAPITAGS message_candidates[] = {
+	PidTagSubject, PidTagNormalizedSubject, PidTagSubjectPrefix, PidTagConversationTopic, PidTagSenderName,
+	PidTagSenderEmailAddress, PidTagSenderSmtpAddress, PidTagSenderAddressType, PidTagSentRepresentingName,
+	PidTagSentRepresentingEmailAddress, PidTagSentRepresentingSmtpAddress, PidTagSentRepresentingAddressType,
+	PidTagDisplayTo, PidTagDisplayCc, PidTagDisplayBcc, PidTagMessageDeliveryTime, PidTagClientSubmitTime,
+	PidTagCreationTime, PidTagLastModificationTime, PidTagMessageSize, PidTagMessageFlags, PidTagRead,
+	PidTagHasAttachments, PidTagMessageClass, PidTagInternetMessageId, PidTagImportance, PidTagSensitivity,
+	PidTagPriority, PidTagIconIndex, PidTagFlagStatus, PidTagMid, PidTagFolderId, PidTagParentFolderId,
+	PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList, PidTagBody, PidTagHtml, PidTagNativeBody,
+	PidTagInternetCodepage, PidTagTransportMessageHeaders,
+};
+
+static const enum MAPITAGS attachment_candidates[] = {
+	PidTagAttachNumber, PidTagAttachMethod, PidTagAttachSize, PidTagRenderingPosition, PidTagAttachFlags,
+	PidTagAttachmentHidden, PidTagAttachLongFilename, PidTagAttachFilename, PidTagDisplayName,
+	PidTagAttachExtension, PidTagAttachMimeTag, PidTagAttachContentId, PidTagAttachDataBinary,
+};
+
+/* The candidates this object has a value for: what ICS full sync and GetPropertiesAll send. */
+_PUBLIC_ enum mapistore_error imap_properties_available(void *object, TALLOC_CTX *mem_ctx, struct SPropTagArray **propsp)
+{
+	const enum MAPITAGS		*candidates;
+	struct mapistore_property_data	*data;
+	struct SPropTagArray		*props;
+	TALLOC_CTX			*tmp;
+	uint16_t			n, i;
+	uint32_t			*type = object;
+
+	if (!object || !propsp) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	switch (*type) {
+	case IMAP_OBJ_FOLDER:	  candidates = folder_candidates; n = sizeof folder_candidates / sizeof folder_candidates[0]; break;
+	case IMAP_OBJ_MESSAGE:	  candidates = message_candidates; n = sizeof message_candidates / sizeof message_candidates[0]; break;
+	case IMAP_OBJ_ATTACHMENT: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
+	default:		  return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	tmp = talloc_new(NULL);
+	data = talloc_zero_array(tmp, struct mapistore_property_data, n);
+	props = talloc_zero(mem_ctx, struct SPropTagArray);
+	if (!tmp || !data || !props || !(props->aulPropTag = talloc_array(props, enum MAPITAGS, n)) ||
+	    imap_properties_get(object, tmp, n, (enum MAPITAGS *) candidates, data) != MAPISTORE_SUCCESS) {
+		talloc_free(tmp);
+		talloc_free(props);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < n; i++) {
+		if (data[i].error == MAPISTORE_SUCCESS) {
+			props->aulPropTag[props->cValues++] = candidates[i];
+		}
+	}
+	talloc_free(tmp);
+	*propsp = props;
+	return MAPISTORE_SUCCESS;
+}
+
 /* Write operations keep mapistore's defaults (MAPISTORE_ERR_NOT_IMPLEMENTED): M3 is read-only. */
 _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 {
@@ -781,5 +843,6 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;
 	backend->properties.get_properties = imap_properties_get;
+	backend->properties.get_available_properties = imap_properties_available;
 	imap_message_fill(backend);
 }

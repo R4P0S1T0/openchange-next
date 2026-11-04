@@ -166,6 +166,7 @@ enum mapistore_error imap_table_get_row(void *table, TALLOC_CTX *mem_ctx, enum m
 enum mapistore_error imap_table_get_row_count(void *table, enum mapistore_query_type type, uint32_t *count);
 enum mapistore_error imap_folder_properties(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint16_t count,
 					    enum MAPITAGS *tags, struct mapistore_property_data *data);
+enum mapistore_error imap_properties_available(void *object, TALLOC_CTX *mem_ctx, struct SPropTagArray **propsp);
 enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,
 					 struct mapistore_property_data *data);
 uint32_t *imap_long(TALLOC_CTX *mem_ctx, uint32_t v);
