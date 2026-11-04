@@ -1184,8 +1184,10 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
 			else {
 				cn = 0;
 			}
+			int deleted_before = sync_data->deleted_eid_set->count;
+
 			if (!mapistore_folder_get_deleted_fmids(emsmdbp_ctx->mstore_ctx, contextID, folder_object->backend_object, mem_ctx, sync_data->table_type, cn, &deleted_eids, &cn)) {
-				for (i = 0; i < deleted_eids->cValues; i++) {
+				for (i = 0; deleted_eids && i < deleted_eids->cValues; i++) {
                                         if (IDSET_includes_guid_glob(synccontext->idset_given, &sync_data->replica_guid, (deleted_eids->lpui8[i] >> 16) & 0x0000ffffffffffff)) {
                                                 RAWIDSET_push_guid_glob(sync_data->deleted_eid_set, &sync_data->replica_guid, (deleted_eids->lpui8[i] >> 16) & 0x0000ffffffffffff);
                                         } else {
@@ -1194,7 +1196,8 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
                                                          deleted_eids->lpui8[i]);
                                         }
 				}
-				if (sync_data->deleted_eid_set->count > 0) {
+				/* The normal and FAI passes share deleted_eid_set: only this pass's deletions carry its cn. */
+				if (sync_data->deleted_eid_set->count > deleted_before && ((cn >> 16) & 0x0000ffffffffffff)) {
 					RAWIDSET_push_guid_glob(sync_data->cnset_seen, &sync_data->replica_guid, (cn >> 16) & 0x0000ffffffffffff);
 				}
 			}
@@ -2291,12 +2294,6 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 		goto end;
 	}
 
-	if (!emsmdbp_is_mapistore(synccontext_object->parent_object)) {
-		OC_DEBUG(5, "  cannot create message on non-mapistore object\n");
-		mapi_repl->error_code = MAPI_E_NO_SUPPORT;
-		goto end;
-	}
-
 	/* The type of messages handled in the collector contexts must be specified in order for the transfer state operations to work properly */
 	if (request->ImportFlag & ImportFlag_Associated) {
 		synccontext_object->object.synccontext->request.fai = true;
@@ -2320,7 +2317,12 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	ret = emsmdbp_object_message_open(message_object_handle, emsmdbp_ctx, synccontext_object->parent_object, folderID, messageID, true, &message_object, &msg);
 	if (ret == MAPISTORE_ERR_NOT_FOUND) {
 		message_object = emsmdbp_object_message_init(message_object_handle, emsmdbp_ctx, messageID, synccontext_object->parent_object);
-		if (mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object)) {
+		/* openchangedb folders (Sync Issues, Local Failures) take Outlook's sync logs as RopCreateMessage does:
+		   refused, each upload failure logs another message and the upload loop starves every download. */
+		if (!emsmdbp_is_mapistore(synccontext_object->parent_object)
+		    ? openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
+						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPI_E_SUCCESS
+		    : mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPISTORE_SUCCESS) {
 			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
 			OC_DEBUG(5, "could not open nor create mapistore message\n");
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
