@@ -42,6 +42,18 @@
 
    \return allocate mapistore context on success, otherwise NULL
  */
+/* The configuration of the last mapistore_init, for backends whose init() reads their own options. */
+static struct loadparm_context *backend_lp_ctx;
+
+/**
+   \details Return the loadparm context mapistore was initialised with, so a backend's
+   init() can read its smb.conf options (NULL before the first mapistore_init).
+ */
+_PUBLIC_ struct loadparm_context *mapistore_backend_lp_ctx(void)
+{
+	return backend_lp_ctx;
+}
+
 _PUBLIC_ struct mapistore_context *mapistore_init(TALLOC_CTX *mem_ctx, struct loadparm_context *lp_ctx, const char *path)
 {
 	int				retval;
@@ -83,6 +95,7 @@ _PUBLIC_ struct mapistore_context *mapistore_init(TALLOC_CTX *mem_ctx, struct lo
 		return NULL;
 	}
 
+	backend_lp_ctx = lp_ctx;
 	retval = mapistore_backend_init(mstore_ctx, path);
 	if (retval != MAPISTORE_SUCCESS) {
 		OC_DEBUG(0, "mapistore_backend_init: %s", mapistore_errstr(retval));

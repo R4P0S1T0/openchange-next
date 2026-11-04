@@ -328,15 +328,19 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 	bool					exists, reminders_created;
 	void					*backend_object, *backend_table, *backend_message;
 	char	 				*organization_name, *group_name;
+	bool					store_unreachable;
 
 	mem_ctx = talloc_new(NULL);
 	OPENCHANGE_RETVAL_IF(!mem_ctx, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 
 	/* Retrieve list of folders from backends */
 	retval = mapistore_list_contexts_for_user(emsmdbp_ctx->mstore_ctx, username, mem_ctx, &contexts_list);
-	if (retval != MAPISTORE_SUCCESS) {
-		talloc_free(mem_ctx);
-		return MAPI_E_DISK_ERROR;
+	store_unreachable = (retval != MAPISTORE_SUCCESS);
+	if (store_unreachable) {
+		/* A backend that cannot reach its store (IMAP server down) lists nothing: keep every
+		   folder it owns instead of deleting them, and log on with what openchangedb holds. */
+		OC_DEBUG(1, "mapistore contexts unavailable (%s); keeping the existing folders\n", mapistore_errstr(retval));
+		contexts_list = NULL;
 	}
 
 	/* Fix mapistore uris in returned entries */
@@ -359,7 +363,8 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 	openchangedb_transaction_start(emsmdbp_ctx->oc_ctx);
 
 	/* Retrieve list of existing entries */
-	ret = openchangedb_get_MAPIStoreURIs(emsmdbp_ctx->oc_ctx, username, mem_ctx, &existing_uris);
+	ret = store_unreachable ? MAPI_E_NOT_FOUND
+		: openchangedb_get_MAPIStoreURIs(emsmdbp_ctx->oc_ctx, username, mem_ctx, &existing_uris);
 	if (ret == MAPI_E_SUCCESS) {
 		for (i = 0; i < existing_uris->cValues; i++) {
 			/* OC_DEBUG(5, ("checking entry '%s'\n", existing_uris->lppszW[i])); */
@@ -644,7 +649,25 @@ FolderId: 0x67ca828f02000001      Display Name: "                        ";  Con
 	for (i = 0; i < PROVISIONING_SPECIAL_FOLDERS_SIZE; i++) {
 		current_folder = special_folders + i;
 		ret = openchangedb_get_folder_property(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_folder->entryid_property, mailbox_fid, (void **) &entryId);
-		if (ret != MAPI_E_SUCCESS) {
+		if (ret == MAPI_E_SUCCESS) {
+			/* Already provisioned: a backend that now offers the role (IMAP \Drafts) takes the folder
+			   over and it keeps its ID, as the system folders do above. */
+			char *existing_uri = NULL;
+
+			current_entry = main_entries[current_folder->role];
+			if (current_entry && current_entry->url &&
+			    openchangedb_get_fid_by_name(emsmdbp_ctx->oc_ctx, username, ipm_fid, current_folder->name, &current_fid) == MAPI_E_SUCCESS) {
+				openchangedb_get_mapistoreURI(mem_ctx, emsmdbp_ctx->oc_ctx, username, current_fid, &existing_uri, true);
+				if (!existing_uri || strcmp(existing_uri, current_entry->url) != 0) {
+					if (openchangedb_set_mapistoreURI(emsmdbp_ctx->oc_ctx, username, current_fid, current_entry->url) != MAPI_E_SUCCESS) {
+						goto error;
+					}
+					register_backend_folder(emsmdbp_ctx, username, current_entry->url, current_fid);
+				}
+			}
+			continue;
+		}
+		{
 			property_row.cValues = 2;
 			property_row.lpProps[0].ulPropTag = PR_DISPLAY_NAME_UNICODE;
 

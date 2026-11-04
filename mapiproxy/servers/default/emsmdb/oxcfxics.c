@@ -604,7 +604,13 @@ static void oxcfxics_push_messageChange_recipients(struct emsmdbp_context *emsmd
 			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
 
 			for (j = 0; j < msg->columns->cValues; j++) {
-				if (recipient->data[j] == NULL) {
+				enum MAPITAGS tag = msg->columns->aulPropTag[j];
+
+				/* Already written above: a property twice in one recipient makes Outlook drop the message. */
+				if (recipient->data[j] == NULL || tag == PidTagRowid || tag == PidTagRecipientType ||
+				    (email_idx != (uint32_t) -1 && recipient->data[email_idx] &&
+				     (tag == PidTagAddressType || tag == PidTagEmailAddress)) ||
+				    (cn_idx != (uint32_t) -1 && recipient->data[cn_idx] && tag == PidTagDisplayName)) {
 					retvals[j] = MAPI_E_NOT_FOUND;
 				}
 				else {
@@ -1178,8 +1184,10 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
 			else {
 				cn = 0;
 			}
+			int deleted_before = sync_data->deleted_eid_set->count;
+
 			if (!mapistore_folder_get_deleted_fmids(emsmdbp_ctx->mstore_ctx, contextID, folder_object->backend_object, mem_ctx, sync_data->table_type, cn, &deleted_eids, &cn)) {
-				for (i = 0; i < deleted_eids->cValues; i++) {
+				for (i = 0; deleted_eids && i < deleted_eids->cValues; i++) {
                                         if (IDSET_includes_guid_glob(synccontext->idset_given, &sync_data->replica_guid, (deleted_eids->lpui8[i] >> 16) & 0x0000ffffffffffff)) {
                                                 RAWIDSET_push_guid_glob(sync_data->deleted_eid_set, &sync_data->replica_guid, (deleted_eids->lpui8[i] >> 16) & 0x0000ffffffffffff);
                                         } else {
@@ -1188,7 +1196,8 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
                                                          deleted_eids->lpui8[i]);
                                         }
 				}
-				if (sync_data->deleted_eid_set->count > 0) {
+				/* The normal and FAI passes share deleted_eid_set: only this pass's deletions carry its cn. */
+				if (sync_data->deleted_eid_set->count > deleted_before && ((cn >> 16) & 0x0000ffffffffffff)) {
 					RAWIDSET_push_guid_glob(sync_data->cnset_seen, &sync_data->replica_guid, (cn >> 16) & 0x0000ffffffffffff);
 				}
 			}
@@ -1439,13 +1448,23 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 				bin_data->lpb = (uint8_t *) "";
 			}
 			else {
-				emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, *(uint64_t *) data_pointers[sync_data->prop_index.parent_fid], &bin_data);
+				/* The rows are this folder's children: without PidTagParentFolderId, the parent is folder_object. */
+				uint64_t parent_fid = (retvals[sync_data->prop_index.parent_fid] == MAPI_E_SUCCESS && data_pointers[sync_data->prop_index.parent_fid])
+					? *(uint64_t *) data_pointers[sync_data->prop_index.parent_fid] : folder_object->object.folder->folderID;
+
+				emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, parent_fid, &bin_data);
 			}
 			query_props.aulPropTag[j] = PidTagParentSourceKey;
 			header_data_pointers[j] = bin_data;
 			j++;
 
 			/* source key */
+			if (retvals[sync_data->prop_index.eid] != MAPI_E_SUCCESS || !data_pointers[sync_data->prop_index.eid]) {
+				OC_DEBUG(1, "hierarchy sync: a subfolder row has no folder ID; skipped\n");
+				talloc_free(header_data_pointers);
+				talloc_free(data_pointers);
+				continue;
+			}
 			eid = *(uint64_t *) data_pointers[sync_data->prop_index.eid];
 			if (eid == 0x7fffffffffffffffLL) {
 				OC_DEBUG(0, "folder without a valid eid\n");
@@ -1550,8 +1569,14 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			if (synccontext->request.no_foreign_identifiers) {
 				query_props.aulPropTag[j] = PidTagParentFolderId;
 				header_data_pointers[j] = data_pointers[sync_data->prop_index.parent_fid];
-				if (retvals[sync_data->prop_index.parent_fid]) {
-					header_data_pointers[j] = talloc_zero(header_data_pointers, uint64_t);
+				if (retvals[sync_data->prop_index.parent_fid] || !data_pointers[sync_data->prop_index.parent_fid]) {
+					uint64_t *parent_fid = talloc_zero(header_data_pointers, uint64_t);
+
+					/* The rows are this folder's children (0 at the top of the synchronized tree). */
+					if (parent_fid && folder_object != topmost_folder_object) {
+						*parent_fid = folder_object->object.folder->folderID;
+					}
+					header_data_pointers[j] = parent_fid;
 				}
 				else {
 					header_data_pointers[j] = data_pointers[sync_data->prop_index.parent_fid];
@@ -1574,6 +1599,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			}
 
 			synccontext->sent_objects++;
+			OC_DEBUG(5, "hierarchy sync: folder %.16"PRIx64" sent below %.16"PRIx64" (cn %.12"PRIx64")\n",
+				 eid, folder_object->object.folder->folderID, cn);
 		end_row:
 			talloc_free(header_data_pointers);
 			talloc_free(data_pointers);
@@ -2267,12 +2294,6 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 		goto end;
 	}
 
-	if (!emsmdbp_is_mapistore(synccontext_object->parent_object)) {
-		OC_DEBUG(5, "  cannot create message on non-mapistore object\n");
-		mapi_repl->error_code = MAPI_E_NO_SUPPORT;
-		goto end;
-	}
-
 	/* The type of messages handled in the collector contexts must be specified in order for the transfer state operations to work properly */
 	if (request->ImportFlag & ImportFlag_Associated) {
 		synccontext_object->object.synccontext->request.fai = true;
@@ -2296,7 +2317,12 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	ret = emsmdbp_object_message_open(message_object_handle, emsmdbp_ctx, synccontext_object->parent_object, folderID, messageID, true, &message_object, &msg);
 	if (ret == MAPISTORE_ERR_NOT_FOUND) {
 		message_object = emsmdbp_object_message_init(message_object_handle, emsmdbp_ctx, messageID, synccontext_object->parent_object);
-		if (mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object)) {
+		/* openchangedb folders (Sync Issues, Local Failures) take Outlook's sync logs as RopCreateMessage does:
+		   refused, each upload failure logs another message and the upload loop starves every download. */
+		if (!emsmdbp_is_mapistore(synccontext_object->parent_object)
+		    ? openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
+						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPI_E_SUCCESS
+		    : mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPISTORE_SUCCESS) {
 			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
 			OC_DEBUG(5, "could not open nor create mapistore message\n");
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
@@ -2611,11 +2637,13 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportDeletes(TALLOC_CTX *mem_ctx,
 			ret = oxcfxics_fmid_from_source_key(emsmdbp_ctx, owner, object_array->bin + i, &objectID);
 			if (ret == MAPISTORE_SUCCESS) {
 				ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, contextID, synccontext_object->parent_object->backend_object, objectID, delete_type);
-				if (ret == MAPISTORE_SUCCESS) {
-					object_ids[i] = objectID;
-				} else {
+				if (ret != MAPISTORE_SUCCESS) {
+					/* The message stays in the backend, so its index record must stay too, or it can no longer be opened. */
 					OC_DEBUG(5, "message deletion failed for fmid: 0x%.16"PRIx64"\n", objectID);
+					mapi_repl->error_code = mapistore_error_to_mapi(ret);
+					continue;
 				}
+				object_ids[i] = objectID;
 				ret = mapistore_indexing_record_del_mid(emsmdbp_ctx->mstore_ctx, contextID, owner, objectID, delete_type);
 				if (ret != MAPISTORE_SUCCESS) {
 					OC_DEBUG(5, "message deletion of index record failed for fmid: 0x%.16"PRIx64"\n", objectID);

@@ -584,6 +584,11 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSaveChangesMessage(TALLOC_CTX *mem_ctx,
 	case false:
 		retval = openchangedb_message_save(emsmdbp_ctx->oc_ctx, object->backend_object, flags);
 		OC_DEBUG(0, "openchangedb_save_message: retval = 0x%x\n", retval);
+		if (retval != MAPI_E_SUCCESS) {
+			/* Not saved: a success reply would lose the client's message. */
+			mapi_repl->error_code = retval;
+			goto end;
+		}
 		break;
 	case true:
                 contextID = emsmdbp_get_contextID(object);

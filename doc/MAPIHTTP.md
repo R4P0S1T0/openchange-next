@@ -228,6 +228,34 @@ snapshot generation, so a MId from an older snapshot never names another
 mailbox. Names, addresses and search strings are never logged. The bodies
 Outlook sent are fixtures in `testsuite/modernization/mapihttp/`.
 
+## IMAP mail folders (M3)
+
+`mapistore_imap.so` (built when `libetpan-dev` is present; `--disable-imap-backend`
+to skip) is installed in `$(libdir)/mapistore_backends` and shows the user's
+Dovecot mailbox, read-only. smb.conf `[global]`:
+
+| Option | Default / purpose |
+| --- | --- |
+| `mapistore:imap_master_password_file` | Required (or `imap_tunnel`); 0600 file with the Dovecot master user's password |
+| `mapistore:imap_master_user` | `openchange`; logs in as `<user>*<master>` (`auth_master_user_separator = *`) |
+| `mapistore:imap_host` / `imap_port` | `127.0.0.1` / `143`; STARTTLS is required for any non-loopback host |
+| `mapistore:imap_max_message_size` | `33554432`; larger messages open with a notice instead of their body |
+| `mapistore:imap_tunnel` | A command speaking PREAUTH IMAP on stdio with `$USER` set (tests: Dovecot's `imap` binary) |
+
+Dovecot needs a master passdb restricted to loopback, for example a
+`passwd-file` `/etc/dovecot/master-users` (0640 root:dovecot) with
+`openchange:{SHA512-CRYPT}…::::::allow_nets=127.0.0.1/32,::1/128` and
+`passdb openchange-master { driver = passwd-file; master = yes; passwd_file_path = /etc/dovecot/master-users }`.
+
+INBOX, `\Drafts`, `\Sent` and `\Trash` take over Outlook's Inbox, Drafts,
+Sent Items and Deleted Items (their folder IDs are kept); every other
+top-level mailbox appears under the mailbox root with its subfolders.
+`\Noselect`, `\NonExistent` and `\All` mailboxes are not shown. Messages are
+listed from one UID FETCH per folder open and opened with `BODY.PEEK[]`, so
+reading in Outlook never marks a message read on the server (M4). If Dovecot
+cannot be reached, logon still succeeds with the folders already known. No
+subject, address, body or password is logged.
+
 ## Validation limits
 
 Unit tests use fake backends, in-memory HTTP streams and a local fake Dovecot

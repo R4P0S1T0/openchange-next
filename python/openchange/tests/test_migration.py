@@ -128,6 +128,20 @@ class MigrationDBTests(unittest.TestCase):
                 self.assertTrue(manager.migrate(app, 0))
                 self.assertIsNone(manager.version(app))
 
+    def test_message_property_values_hold_bodies(self):
+        # Outlook uploads its sync logs into openchangedb folders; their bodies exceed 512 bytes.
+        MigrationManager.migrations = self.builtin_migrations
+        manager = MigrationManager(self.db, self.db_name, 'test_migrations')
+        manager.migrate('openchangedb')
+        cur = self.db.cursor()
+        cur.execute('USE `{}`'.format(self.db_name))
+        cur.execute("INSERT INTO messages SET message_type='systemMessage'")
+        cur.execute('INSERT INTO messages_properties (message_id, name, value) VALUES (%s, %s, %s)',
+                    (cur.lastrowid, 'PidTagBody', 'x' * 70000))
+        cur.execute('SELECT LENGTH(value) FROM messages_properties')
+        self.assertEqual(cur.fetchone()[0], 70000)
+        cur.close()
+
     def named_properties_manager(self, version):
         MigrationManager.migrations = self.builtin_migrations
         manager = MigrationManager(self.db, self.db_name, 'test_migrations')

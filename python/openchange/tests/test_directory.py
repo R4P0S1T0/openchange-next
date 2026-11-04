@@ -106,6 +106,8 @@ class DirectoryTests(unittest.TestCase):
         group = db.search(base="CN=%s,CN=Administrative Groups,%s" % (OU, org_dn), scope=ldb.SCOPE_BASE)[0]
         self.assertIn("msExchAdminGroup", [str(v) for v in group["objectClass"]])
         self.assertEqual(str(group["msExchDefaultAdminGroup"]), "TRUE")
+        # emsmdb reads it for every openchangedb message (mapiserver_get_administrative_group_legacyexchangedn).
+        self.assertEqual(str(group["legacyExchangeDN"]), "/o=%s/ou=%s" % (ORG, OU))
 
     def test_file_mode(self):
         # ldb's tdb backend opens O_RDWR even when asked for read-only: the service group needs write.

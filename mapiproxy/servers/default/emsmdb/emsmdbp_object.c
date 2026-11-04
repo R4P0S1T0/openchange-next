@@ -2180,6 +2180,11 @@ _PUBLIC_ void **emsmdbp_object_table_get_row_props(TALLOC_CTX *mem_ctx, struct e
 			if (mapistore_folder) {
 				/* a hack to avoid fetching dynamic fields from openchange.ldb */
 				switch (table->properties[i]) {
+				/* The backend's change, so ICS resends a provisioned folder (Inbox) when its store changes. */
+				case PidTagChangeNumber:
+				case PidTagChangeKey:
+				case PidTagPredecessorChangeList:
+				case PidTagLastModificationTime:
 				case PidTagParentFolderId:
 				case PR_CONTENT_COUNT:
 				case PidTagAssociatedContentCount:
@@ -2656,7 +2661,8 @@ _PUBLIC_ enum mapistore_error emsmdbp_object_message_open(TALLOC_CTX *mem_ctx, s
 	case false:
 		/* system/special folder */
 		message_object = emsmdbp_object_message_init(mem_ctx, emsmdbp_ctx, messageID, folder_object);
-		ret = openchangedb_message_open(mem_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID, &message_object->backend_object, (void **)msgp);
+		/* A MAPISTATUS: callers test for MAPISTORE_ERR_NOT_FOUND. */
+		ret = mapi_error_to_mapistore(openchangedb_message_open(mem_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID, &message_object->backend_object, (void **)msgp));
 		if (ret != MAPISTORE_SUCCESS) {
 			printf("Invalid openchangedb message\n");
 			talloc_free(message_object);
@@ -3114,7 +3120,9 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 			data_pointers[i] = obj_count;
 			retval = MAPI_E_SUCCESS;
 		}
-		else if (properties->aulPropTag[i] == PidTagLocalCommitTimeMax || properties->aulPropTag[i] == PR_RIGHTS || properties->aulPropTag[i] == PR_ACCESS || properties->aulPropTag[i] == PR_ACCESS_LEVEL || properties->aulPropTag[i] == PidTagRights || properties->aulPropTag[i] == PidTagAccessControlListData || properties->aulPropTag[i] == PidTagExtendedACLData) {
+		else if (properties->aulPropTag[i] == PidTagChangeNumber || properties->aulPropTag[i] == PidTagChangeKey ||
+			 properties->aulPropTag[i] == PidTagPredecessorChangeList || properties->aulPropTag[i] == PidTagLastModificationTime ||
+			 properties->aulPropTag[i] == PidTagLocalCommitTimeMax || properties->aulPropTag[i] == PR_RIGHTS || properties->aulPropTag[i] == PR_ACCESS || properties->aulPropTag[i] == PR_ACCESS_LEVEL || properties->aulPropTag[i] == PidTagRights || properties->aulPropTag[i] == PidTagAccessControlListData || properties->aulPropTag[i] == PidTagExtendedACLData) {
 			struct mapistore_property_data prop_data;
 
 			mretval = mapistore_properties_get_properties(emsmdbp_ctx->mstore_ctx, contextID,
@@ -3130,6 +3138,15 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 				retval = mapistore_error_to_mapi(prop_data.error);
 			} else {
 				retval = mapistore_error_to_mapi(mretval);
+			}
+			/* The backend's change makes ICS resend the folder when its store changes; without one
+			   (store unreachable) keep the provisioned change, ICS aborts on a missing PidTagChangeNumber. */
+			if (retval != MAPI_E_SUCCESS &&
+			    (properties->aulPropTag[i] == PidTagChangeNumber || properties->aulPropTag[i] == PidTagChangeKey ||
+			     properties->aulPropTag[i] == PidTagPredecessorChangeList || properties->aulPropTag[i] == PidTagLastModificationTime)) {
+				owner = emsmdbp_get_owner(object);
+				retval = openchangedb_get_folder_property(data_pointers, emsmdbp_ctx->oc_ctx, owner ? owner : emsmdbp_ctx->username,
+									  properties->aulPropTag[i], folder->folderID, data_pointers + i);
 			}
 		}
 		else {

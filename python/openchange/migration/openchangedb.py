@@ -239,3 +239,17 @@ class InitialOCDBMigration(Migration):
                       "DROP TABLE public_folders",
                       "DROP TABLE organizational_units"):
             cur.execute(query)
+
+
+@migration('openchangedb', 2)
+class MessagePropertyValuesMigration(Migration):
+
+    description = 'message property values hold bodies (Outlook sync logs)'
+
+    @classmethod
+    def apply(cls, cur, **kwargs):
+        cur.execute("ALTER TABLE `messages_properties` MODIFY `value` MEDIUMTEXT NOT NULL")
+
+    @classmethod
+    def unapply(cls, cur):
+        cur.execute("ALTER TABLE `messages_properties` MODIFY `value` VARCHAR(512) NOT NULL")

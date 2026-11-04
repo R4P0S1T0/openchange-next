@@ -983,6 +983,47 @@ libmapistore-distclean: libmapistore-clean
 
 distclean:: libmapistore-distclean
 
+#################################################################
+# Read-only IMAP mapistore backend (M3, libetpan)
+#################################################################
+MAPISTORE_IMAP_OBJS = mapiproxy/libmapistore/backends/imap/mapistore_imap.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_conn.po		\
+		      mapiproxy/libmapistore/backends/imap/imap_names.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_folder.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_message.po
+MAPISTORE_IMAP_SO = mapiproxy/libmapistore/backends/mapistore_imap.$(SHLIBEXT)
+
+$(MAPISTORE_IMAP_OBJS): CFLAGS += $(LIBETPAN_CFLAGS)
+$(MAPISTORE_IMAP_OBJS): $(wildcard mapiproxy/libmapistore/backends/imap/*.h)
+
+mapistore_imap: $(MAPISTORE_IMAP_SO)
+
+$(MAPISTORE_IMAP_SO): $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	@echo "Linking $@"
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
+
+mapistore_imap-install:
+	$(INSTALL) -d $(DESTDIR)$(libdir)/mapistore_backends
+	$(INSTALL) -m 0755 $(MAPISTORE_IMAP_SO) $(DESTDIR)$(libdir)/mapistore_backends/
+
+mapistore_imap-uninstall:
+	rm -f $(DESTDIR)$(libdir)/mapistore_backends/mapistore_imap.$(SHLIBEXT)
+
+mapistore_imap-clean:
+	rm -f mapiproxy/libmapistore/backends/imap/*.po $(MAPISTORE_IMAP_SO) bin/imap-backend-test
+	rm -rf bin/imap-backend-fixture
+
+# The backend against Dovecot's imap binary in PREAUTH mode (no root, no network).
+DOVECOT_IMAP ?= /usr/lib/dovecot/imap
+bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
+
+.PHONY: check-imap-backend
+check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
+	rm -rf bin/imap-backend-fixture
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture
+
 mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION):  mapiproxy/libmapistore/mapistore_interface.po			\
 							mapiproxy/libmapistore/mapistore_processing.po			\
 							mapiproxy/libmapistore/mapistore_backend.po			\

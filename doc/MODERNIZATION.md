@@ -311,6 +311,60 @@ Known gaps:
 - No display templates (details dialog), no distribution lists, no
   "More columns" searches beyond ANR/display name/address/account.
 
+## M3 lab setup and result (2026-11-04)
+
+Branch `m3` (plan `docs/plans/2026-11-03-m3-imap-read.md`): read-only IMAP
+mapistore backend over libetpan. `make check-imap-backend` runs it against
+Dovecot's `imap` binary in PREAUTH mode on a throwaway Maildir (no root, no
+network), plain and under ASan/UBSan; `make check-oc-emsmdb` covers the
+provisioning changes. Both passed on the VM.
+
+Lab: Dovecot master user `openchange` (loopback only, `passwd-file`
+`/etc/dovecot/master-users`, password in `/etc/openchange/imap-master.pw`
+0600 openchange; IMAP listens on 127.0.0.1 only), smb.conf
+`mapistore:imap_master_password_file`. After a RopLogon of the lab mailbox,
+openchangedb maps Inbox, Sent Items, Deleted Items and Drafts to their IMAP
+mailboxes with their existing folder IDs, and adds Junk and Archive. A ROP
+sequence as Outlook sends it (Logon, OpenFolder of the IMAP Inbox,
+GetContentsTable, SetColumns, QueryRows) answers 0 for every ROP with the
+real subjects and senders; Dovecot logged `deleted=0 expunged=0 trashed=0`
+for every backend session.
+
+Found in the lab: special folders (Drafts) were never taken over by a
+backend once created natively; mapistore passes create_context the URI
+without its namespace. Both fixed with tests.
+
+Outlook acceptance (classic Outlook for Microsoft 365, cached mode): the
+folder tree shows the webmail folders, including subfolders under Inbox;
+message lists and message bodies display; a message moved on the server
+(`doveadm move`, as webmail would) leaves its old folder and appears in the
+new one after the client restarts.
+
+Found with Outlook and fixed:
+
+- ICS recipients carried duplicate properties, and Outlook dropped the
+  message.
+- The IMAP context root used the indexing's folder ID instead of the one
+  emsmdb provisioned, so subfolders pointed at an unknown parent.
+- The backend did not report messages gone from a mailbox
+  (`get_deleted_fmids`); the FAI pass then pushed a zero change number and
+  the daemon aborted.
+- The change properties of provisioned IMAP folders came from openchangedb,
+  so the hierarchy never told Outlook the Inbox changed. They now come from
+  the backend, falling back to openchangedb.
+- Outlook writes sync logs into Sync Issues / Local Failures. Every refused
+  upload produced another log, about 1,200 a minute, and downloads starved.
+  Three causes: non-mapistore imports were rejected and the message open
+  status was not mapped; `messages_properties.value` was VARCHAR(512)
+  (openchangedb migration 2 makes it MEDIUMTEXT); the directory's
+  administrative group lacked `legacyExchangeDN`. RopSaveChangesMessage
+  also answered success on a failed save; it now returns the error.
+
+Known limits, for later milestones: Outlook learns of IMAP changes only on
+a client restart (M5 adds notifications); IMAP folder change numbers are
+per process, so a service restart resends the hierarchy; unread counts of
+provisioned folders read 0; the IMAP side is read-only (M4).
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
