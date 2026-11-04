@@ -604,7 +604,13 @@ static void oxcfxics_push_messageChange_recipients(struct emsmdbp_context *emsmd
 			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
 
 			for (j = 0; j < msg->columns->cValues; j++) {
-				if (recipient->data[j] == NULL) {
+				enum MAPITAGS tag = msg->columns->aulPropTag[j];
+
+				/* Already written above: a property twice in one recipient makes Outlook drop the message. */
+				if (recipient->data[j] == NULL || tag == PidTagRowid || tag == PidTagRecipientType ||
+				    (email_idx != (uint32_t) -1 && recipient->data[email_idx] &&
+				     (tag == PidTagAddressType || tag == PidTagEmailAddress)) ||
+				    (cn_idx != (uint32_t) -1 && recipient->data[cn_idx] && tag == PidTagDisplayName)) {
 					retvals[j] = MAPI_E_NOT_FOUND;
 				}
 				else {

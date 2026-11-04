@@ -763,6 +763,38 @@ static enum mapistore_error view_sort(struct imap_table *t)
 	return MAPISTORE_SUCCESS;
 }
 
+/* The shape of a restriction for the log: types, operators and tags, never values. */
+static char *describe(TALLOC_CTX *mem_ctx, const struct mapi_SRestriction *r, int depth)
+{
+	char	*out;
+	uint16_t i;
+
+	if (!r || depth > 6) {
+		return talloc_strdup(mem_ctx, "...");
+	}
+	switch (r->rt) {
+	case RES_AND:
+	case RES_OR:
+		out = talloc_asprintf(mem_ctx, "%s(", r->rt == RES_AND ? "AND" : "OR");
+		for (i = 0; out && i < (r->rt == RES_AND ? r->res.resAnd.cRes : r->res.resOr.cRes); i++) {
+			const struct mapi_SRestriction *c = (const struct mapi_SRestriction *)
+				(r->rt == RES_AND ? (void *) &r->res.resAnd.res[i] : (void *) &r->res.resOr.res[i]);
+			out = talloc_asprintf_append_buffer(out, "%s%s", i ? "," : "", describe(mem_ctx, c, depth + 1));
+		}
+		return out ? talloc_strdup_append_buffer(out, ")") : NULL;
+	case RES_PROPERTY:
+		return talloc_asprintf(mem_ctx, "PROP(%u,%.8x)", r->res.resProperty.relop, r->res.resProperty.ulPropTag);
+	case RES_BITMASK:
+		return talloc_asprintf(mem_ctx, "BITMASK(%u,%.8x,%.8x)", r->res.resBitmask.relMBR, r->res.resBitmask.ulPropTag, r->res.resBitmask.ulMask);
+	case RES_EXIST:
+		return talloc_asprintf(mem_ctx, "EXIST(%.8x)", r->res.resExist.ulPropTag);
+	case RES_CONTENT:
+		return talloc_asprintf(mem_ctx, "CONTENT(%.8x,%.8x)", r->res.resContent.fuzzy, r->res.resContent.ulPropTag);
+	default:
+		return talloc_asprintf(mem_ctx, "TYPE%u", r->rt);
+	}
+}
+
 _PUBLIC_ enum mapistore_error imap_table_set_restrictions(void *object, struct mapi_SRestriction *res, uint8_t *status)
 {
 	struct imap_table	*t = object;
@@ -786,6 +818,8 @@ _PUBLIC_ enum mapistore_error imap_table_set_restrictions(void *object, struct m
 			t->view[n++] = i;
 		}
 	}
+	OC_DEBUG(3, "IMAP backend: table type %d restricted by %s: %u of %u rows\n", t->table_type,
+		 describe(tmp, res, 0), n, t->row_count);
 	talloc_free(tmp);
 	t->view_count = n;
 	return view_sort(t);
