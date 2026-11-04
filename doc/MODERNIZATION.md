@@ -311,7 +311,7 @@ Known gaps:
 - No display templates (details dialog), no distribution lists, no
   "More columns" searches beyond ANR/display name/address/account.
 
-## M3 lab setup and result (2026-11-03, in progress)
+## M3 lab setup and result (2026-11-04)
 
 Branch `m3` (plan `docs/plans/2026-11-03-m3-imap-read.md`): read-only IMAP
 mapistore backend over libetpan. `make check-imap-backend` runs it against
@@ -334,8 +334,36 @@ Found in the lab: special folders (Drafts) were never taken over by a
 backend once created natively; mapistore passes create_context the URI
 without its namespace. Both fixed with tests.
 
-Pending: Outlook acceptance (folder tree with webmail folders, message
-list, opening a message and an attachment).
+Outlook acceptance (classic Outlook for Microsoft 365, cached mode): the
+folder tree shows the webmail folders, including subfolders under Inbox;
+message lists and message bodies display; a message moved on the server
+(`doveadm move`, as webmail would) leaves its old folder and appears in the
+new one after the client restarts.
+
+Found with Outlook and fixed:
+
+- ICS recipients carried duplicate properties, and Outlook dropped the
+  message.
+- The IMAP context root used the indexing's folder ID instead of the one
+  emsmdb provisioned, so subfolders pointed at an unknown parent.
+- The backend did not report messages gone from a mailbox
+  (`get_deleted_fmids`); the FAI pass then pushed a zero change number and
+  the daemon aborted.
+- The change properties of provisioned IMAP folders came from openchangedb,
+  so the hierarchy never told Outlook the Inbox changed. They now come from
+  the backend, falling back to openchangedb.
+- Outlook writes sync logs into Sync Issues / Local Failures. Every refused
+  upload produced another log, about 1,200 a minute, and downloads starved.
+  Three causes: non-mapistore imports were rejected and the message open
+  status was not mapped; `messages_properties.value` was VARCHAR(512)
+  (openchangedb migration 2 makes it MEDIUMTEXT); the directory's
+  administrative group lacked `legacyExchangeDN`. RopSaveChangesMessage
+  also answered success on a failed save; it now returns the error.
+
+Known limits, for later milestones: Outlook learns of IMAP changes only on
+a client restart (M5 adds notifications); IMAP folder change numbers are
+per process, so a service restart resends the hierarchy; unread counts of
+provisioned folders read 0; the IMAP side is read-only (M4).
 
 ## Status on 2026-10-28
 
