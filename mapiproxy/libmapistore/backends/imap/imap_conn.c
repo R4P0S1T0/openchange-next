@@ -36,6 +36,8 @@
 
 extern char **environ;
 
+#define IMAP_TIMEOUT_SECONDS 10
+
 struct imap_conn {
 	mailimap	*imap;
 	bool		dead;		/* a command hit a stream error: reconnect */
@@ -269,6 +271,8 @@ _PUBLIC_ struct imap_conn *imap_conn_open(TALLOC_CTX *mem_ctx, const struct imap
 		return NULL;
 	}
 	talloc_set_destructor(conn, imap_conn_destructor);
+	/* One worker serves every user: a server that stops answering must not block it for minutes. */
+	mailimap_set_timeout(conn->imap, IMAP_TIMEOUT_SECONDS);
 	r = settings->tunnel ? open_tunnel(conn, settings->tunnel, username) : open_tcp(conn, settings, username);
 	if (r != 0) {
 		talloc_free(conn);

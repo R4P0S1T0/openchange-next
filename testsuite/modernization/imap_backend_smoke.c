@@ -10,6 +10,9 @@
    (at your option) any later version.
  */
 
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <time.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -440,6 +443,25 @@ static int test_create_root_folder_not_found(void)
     /* NOT_FOUND lets emsmdb create the folder natively (emsmdbp_object_folder_commit_creation). */
     CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "New", root, &uri)
         == MAPISTORE_ERR_NOT_FOUND && uri == NULL);
+    return 0;
+}
+
+/* A server that accepts but never answers (overloaded, stopped) fails the logon in seconds; the
+   worker serving every user must not block for libetpan's default five minutes. */
+static int test_silent_server_times_out(void)
+{
+    struct imap_settings silent = { .host = "127.0.0.1", .master_user = "openchange", .master_password = "x" };
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t len = sizeof a;
+    time_t start;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(s >= 0 && bind(s, (struct sockaddr *) &a, sizeof a) == 0 && listen(s, 1) == 0);
+    CHECK(getsockname(s, (struct sockaddr *) &a, &len) == 0);
+    silent.port = ntohs(a.sin_port);
+    start = time(NULL);
+    CHECK(imap_conn_open(root, &silent, "alice@example.invalid") == NULL);
+    CHECK(time(NULL) - start < 30);
+    close(s);
     return 0;
 }
 
@@ -1007,7 +1029,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_silent_server_times_out() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);
