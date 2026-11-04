@@ -314,6 +314,10 @@ static enum mapistore_error get_root_folder(void *object, TALLOC_CTX *mem_ctx, u
 	if (!f || f->type != IMAP_OBJ_FOLDER) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
+	/* emsmdb knows the root by the ID it provisioned; the indexing may hold another for the URI. */
+	if (fid) {
+		f->ctx->root->fid = fid;
+	}
 	*folder = f->ctx->root;
 	return MAPISTORE_SUCCESS;
 }

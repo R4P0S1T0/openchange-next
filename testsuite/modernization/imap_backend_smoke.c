@@ -911,6 +911,30 @@ static int test_available_properties(void)
     return 0;
 }
 
+/* emsmdb knows a context root by the folder ID it provisioned, not by the one the indexing
+   holds for the URI: children must name that ID as parent, or Outlook orphans them. */
+static int test_root_folder_takes_core_fid(void)
+{
+    struct mapistore_backend b;
+    void *inbox = context_for("Projects"), *rootf = NULL, *table = NULL;
+    struct mapistore_property_data *row = NULL;
+    enum MAPITAGS tags[] = { PidTagFolderId, PidTagParentFolderId };
+    struct mapistore_property_data d[1];
+    uint32_t count = 0;
+    const uint64_t core_fid = 0xf503000000000001ULL;
+    memset(&b, 0, sizeof b);
+    CHECK(inbox != NULL && mapistore_backend_init_defaults(&b) == MAPISTORE_SUCCESS);
+    imap_backend_fill(&b);
+    CHECK(b.context.get_root_folder(inbox, root, core_fid, &rootf) == MAPISTORE_SUCCESS && rootf);
+    CHECK(imap_properties_get(rootf, root, 1, tags, d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == MAPISTORE_SUCCESS && *(uint64_t *) d[0].data == core_fid);
+    CHECK(imap_folder_open_table(rootf, root, MAPISTORE_FOLDER_TABLE, 1, &table, &count) == MAPISTORE_SUCCESS && count >= 1);
+    CHECK(imap_table_set_columns(table, 2, tags) == MAPISTORE_SUCCESS);
+    CHECK(imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &row) == MAPISTORE_SUCCESS);
+    CHECK(row[1].error == MAPISTORE_SUCCESS && *(uint64_t *) row[1].data == core_fid);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -940,7 +964,7 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_sort_and_restrict() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_sort_and_restrict() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
         return 1;
     }
     talloc_free(root);
