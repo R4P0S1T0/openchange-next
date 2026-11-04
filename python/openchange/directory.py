@@ -79,7 +79,8 @@ def _populate(db, org, ou, mailboxes):
     org_dn = "CN=%s,CN=Microsoft Exchange,CN=Services,%s" % (org, CONFIG_DN)
     _entry(db, org_dn, objectClass=["top", "msExchOrganizationContainer"], cn=org)
     _entry(db, "CN=%s,CN=Administrative Groups,%s" % (ou, org_dn),
-           objectClass=["top", "msExchAdminGroup"], cn=ou, msExchDefaultAdminGroup="TRUE")
+           objectClass=["top", "msExchAdminGroup"], cn=ou, msExchDefaultAdminGroup="TRUE",
+           legacyExchangeDN="/o=%s/ou=%s" % (org, ou))
     _entry(db, "CN=Addressing," + org_dn, objectClass=["top", "container"], cn="Addressing")
     templates = "CN=Address-Templates,CN=Addressing," + org_dn
     _entry(db, templates, objectClass=["top", "container"], cn="Address-Templates", msExchTemplateRDNs=TEMPLATE_LCIDS)
