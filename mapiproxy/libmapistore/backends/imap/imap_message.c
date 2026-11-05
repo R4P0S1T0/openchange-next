@@ -1550,7 +1550,7 @@ static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn 
 	if (!d->dirty && old_uid) {
 		return MAPISTORE_SUCCESS;
 	}
-	raw = imap_compose(m, d, f->ctx->username, d->from_name, time(NULL), &len);
+	raw = imap_compose(m, d, f->ctx->username, d->from_name, time(NULL), true, &len);
 	if (!raw) {
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
@@ -1621,8 +1621,147 @@ static enum mapistore_error get_attachment_table(void *message, TALLOC_CTX *mem_
 	return imap_message_get_attachment_table(message, mem_ctx, table, count);
 }
 
+/* The header block without its Bcc field (and that field's folded lines). */
+static char *without_bcc(TALLOC_CTX *mem_ctx, const char *raw, size_t len, size_t *out_len)
+{
+	char	*out = talloc_array(mem_ctx, char, len + 1);
+	size_t	i = 0, n = 0, eol;
+	bool	skipping = false, in_headers = true;
+
+	if (!out) {
+		return NULL;
+	}
+	while (i < len) {
+		const char *nl = memchr(raw + i, '\n', len - i);
+
+		eol = nl ? (size_t) (nl - raw) + 1 : len;
+		if (in_headers) {
+			if (eol - i <= 2 && (raw[i] == '\r' || raw[i] == '\n')) {
+				in_headers = false;
+				skipping = false;
+			} else if (raw[i] == ' ' || raw[i] == '\t') {
+				/* a continuation belongs to the field before it */
+			} else {
+				skipping = eol - i >= 4 && strncasecmp(raw + i, "Bcc:", 4) == 0;
+			}
+		}
+		if (!skipping) {
+			memcpy(out + n, raw + i, eol - i);
+			n += eol - i;
+		}
+		i = eol;
+	}
+	out[n] = '\0';
+	*out_len = n;
+	return out;
+}
+
+static char *sent_mailbox(struct imap_conn *conn, TALLOC_CTX *mem_ctx)
+{
+	struct imap_mailbox	*mbs;
+	size_t			n, i;
+	char			*name = NULL;
+
+	if (imap_list(conn, mem_ctx, &mbs, &n) != MAPISTORE_SUCCESS) {
+		return NULL;
+	}
+	for (i = 0; i < n && !name; i++) {
+		if (mbs[i].flags & IMAP_MB_SENT) {
+			name = talloc_steal(mem_ctx, mbs[i].name);
+		}
+	}
+	talloc_free(mbs);
+	return name;
+}
+
+/* Sends the stored draft through submission; on success files the bytes sent in Sent (or drops
+   them on PidTagDeleteAfterSubmit) and removes the Outbox copy. On failure nothing moves. */
+static enum mapistore_error submit(void *message, enum SubmitFlags flags)
+{
+	struct imap_message		*m = message;
+	const struct imap_settings	*settings = imap_backend_settings();
+	struct imap_folder		*f, sent_folder;
+	struct indexing_context		*ictx;
+	struct imap_draft		*d;
+	struct imap_conn		*conn;
+	struct imap_status		st;
+	TALLOC_CTX			*tmp;
+	const char			**rcpts;
+	char				*raw, *wire, *sent, *uri;
+	size_t				len = 0, wlen = 0;
+	uint32_t			n, old_uid, validity = 0, uid = 0;
+	int				code = 0, r;
+	enum mapistore_error		ret;
+	bool				filed = false;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	f = m->folder;
+	ictx = f->ctx->ictx;
+	d = ensure_draft(m);
+	if (!d) {
+		return MAPISTORE_ERR_INVALID_DATA; /* received mail is not sent again */
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!settings || !conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (d->dirty || !m->row.uid) {
+		ret = save_draft(m, conn);
+		if (ret != MAPISTORE_SUCCESS) {
+			return ret;
+		}
+	}
+	tmp = talloc_new(NULL);
+	n = tmp ? imap_draft_envelope(d, tmp, &rcpts) : 0;
+	if (!n) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS || st.uidvalidity != m->row.uidvalidity ||
+	    !(raw = fetch_body(tmp, conn, m->row.uid, &len)) || !(wire = without_bcc(tmp, raw, len, &wlen))) {
+		talloc_free(tmp);
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	r = imap_smtp_send(settings, f->ctx->username, f->ctx->username, rcpts, n, wire, wlen, &code);
+	if (r != 0) {
+		talloc_free(tmp);
+		/* A refusal (5xx: sender, recipient, size) is final; transport and 4xx may pass later. */
+		return (r == -1 && code >= 500) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	old_uid = m->row.uid;
+	if (!d->delete_after_submit) {
+		sent = sent_mailbox(conn, tmp);
+		if (sent && imap_append(conn, sent, wire, wlen, IMAP_FLAG_SEEN, &validity, &uid) == 0) {
+			sent_folder = *f;
+			sent_folder.mailbox = sent;
+			uri = imap_message_uri(tmp, &sent_folder, validity, uid);
+			if (!uri || ictx->update_fmid(ictx, f->ctx->username, m->row.mid, uri) != MAPISTORE_SUCCESS) {
+				OC_DEBUG(1, "IMAP backend: sent copy of mid 0x%"PRIx64" filed but not indexed\n", m->row.mid);
+			}
+			filed = true;
+		} else {
+			/* shortcut: the message left but its copy stays in the Outbox; upgrade with a retry queue
+			   if this shows up. */
+			OC_DEBUG(0, "IMAP backend: message sent, but its copy could not be filed in Sent\n");
+		}
+	}
+	if ((filed || d->delete_after_submit) && imap_uid_expunge(conn, f->mailbox, &old_uid, 1)) {
+		OC_DEBUG(1, "IMAP backend: sent message mid 0x%"PRIx64" stays in the Outbox\n", m->row.mid);
+	}
+	if (d->delete_after_submit) {
+		ictx->del_fmid(ictx, f->ctx->username, m->row.mid, MAPISTORE_PERMANENT_DELETE);
+	}
+	m->row.draft = false;
+	m->draft = NULL;
+	talloc_free(tmp);
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 {
+	backend->message.submit = submit;
 	backend->folder.get_deleted_fmids = get_deleted_fmids;
 	backend->message.get_message_data = imap_message_get_data;
 	backend->message.set_read_flag = set_read_flag;

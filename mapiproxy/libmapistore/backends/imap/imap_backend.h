@@ -222,9 +222,10 @@ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *ur
 void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when, enum MAPITAGS tag);
 
 /* imap_compose.c */
-/* RFC 5322 + MIME, 7-bit; Bcc never in the headers. NULL when an address is not a plain addr-spec. */
+/* RFC 5322 + MIME, 7-bit; Bcc in the headers only with_bcc (stored drafts). NULL when an address
+   is not a plain addr-spec. */
 char *imap_compose(TALLOC_CTX *mem_ctx, const struct imap_draft *d, const char *from_address, const char *from_name,
-		   time_t now, size_t *len);
+		   time_t now, bool with_bcc, size_t *len);
 /* To, Cc and Bcc addresses, without case-insensitive duplicates. */
 uint32_t imap_draft_envelope(const struct imap_draft *d, TALLOC_CTX *mem_ctx, const char ***rcpts);
 

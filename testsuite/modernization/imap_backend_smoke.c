@@ -2,7 +2,7 @@
    Read-only IMAP mapistore backend against Dovecot's imap binary in PREAUTH mode
    (mapistore:imap_tunnel): a throwaway Maildir, no root, no network.
 
-   Usage: imap-backend-test /usr/lib/dovecot/imap <fixture dir>
+   Usage: imap-backend-test /usr/lib/dovecot/imap <fixture dir> <smtp_fake.py>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1551,7 +1551,7 @@ static int test_compose_round_trip(void)
     uint64_t mid;
     uint32_t i;
     CHECK(c != NULL);
-    raw = imap_compose(root, d, "alice@example.invalid", "Alice \xc3\x81vila", 1793000000, &len);
+    raw = imap_compose(root, d, "alice@example.invalid", "Alice \xc3\x81vila", 1793000000, false, &len);
     CHECK(raw && len == strlen(raw));
     CHECK(strstr(raw, "x@example.invalid") == NULL && strstr(raw, "Hidden") == NULL);   /* Bcc: envelope only */
     CHECK(strstr(raw, "\r\nMessage-ID: <") && strstr(raw, "@example.invalid>\r\n"));
@@ -1580,17 +1580,17 @@ static int test_compose_round_trip(void)
     t = talloc_zero(root, struct imap_draft);
     t->subject = talloc_strdup(t, "Plain");
     t->body = talloc_strdup(t, "Just text\r\n");
-    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len);
+    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, false, &len);
     CHECK(raw && strstr(raw, "Content-Type: text/plain; charset=\"utf-8\"") && !strstr(raw, "multipart"));
     CHECK(strstr(raw, "From: alice@example.invalid\r\n") || strstr(raw, "From: <alice@example.invalid>\r\n"));
     /* A header line break smuggled into a field never reaches the wire as a header. */
     t->subject = talloc_strdup(t, "Hi\r\nBcc: evil@example.invalid");
-    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len);
+    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, false, &len);
     CHECK(raw && !strstr(raw, "\nBcc:"));
     t->recipient_count = 1;
     t->recipients = talloc_zero_array(t, struct imap_recipient, 1);
     t->recipients[0] = (struct imap_recipient) { MAPI_TO, NULL, "a@example.invalid>\r\nX: y" };
-    CHECK(imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len) == NULL);
+    CHECK(imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, false, &len) == NULL);
     talloc_free(c);
     return 0;
 }
@@ -1720,6 +1720,219 @@ static int test_outbox_provisioned(void)
     return 0;
 }
 
+/* M4 Task 7: submission through a scripted SMTP server on stdio. */
+
+static const char *smtp_fake;
+
+static char *read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf;
+    long n;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = talloc_array(root, char, n + 1);
+    if (buf && fread(buf, 1, n, f) != (size_t) n) buf = NULL;
+    fclose(f);
+    if (buf) { buf[n] = '\0'; if (len) *len = n; }
+    return buf;
+}
+
+/* The backend's settings with SMTP going to the fake in `mode`; logs reset. */
+static struct imap_settings smtp_conf;
+static char *smtp_log, *smtp_data;
+static void use_smtp(const char *mode)
+{
+    smtp_conf = tunnel;
+    smtp_conf.master_password = "master-secret";
+    smtp_log = talloc_asprintf(root, "%s/smtp.log", fixture);
+    smtp_data = talloc_asprintf(root, "%s/smtp.data", fixture);
+    unlink(smtp_log);
+    unlink(smtp_data);
+    smtp_conf.smtp_tunnel = talloc_asprintf(root, "/usr/bin/python3 -I %s %s %s %s", smtp_fake, smtp_log, smtp_data, mode);
+    imap_backend_set_state(&smtp_conf, false);
+}
+
+static void *outbox_draft(uint64_t mid, const char *subject)
+{
+    void *outbox = context_for("Outbox"), *msg = NULL;
+    if (!outbox || ops()->folder.create_message(outbox, root, mid, 0, &msg) != MAPISTORE_SUCCESS) return NULL;
+    if (set_string(msg, PidTagSubject, subject) || set_string(msg, PidTagBody, "Segue.\r\n") ||
+        add_recipient(msg, MAPI_TO, "Ana", "ana@example.invalid")) return NULL;
+    {
+        enum MAPITAGS tags[] = { PR_DISPLAY_NAME_UNICODE, PR_EMAIL_ADDRESS_UNICODE, PidTagSmtpAddress };
+        struct SPropTagArray columns = { .cValues = 3, .aulPropTag = tags };
+        struct mapistore_message_recipient r[3];
+        void *d0[3] = { "Ana", "ana@example.invalid", "ana@example.invalid" };
+        void *d1[3] = { "Bruno", "bruno@example.invalid", "bruno@example.invalid" };
+        void *d2[3] = { "Oculto", "x@example.invalid", "x@example.invalid" };
+        memset(r, 0, sizeof r);
+        r[0].type = MAPI_TO; r[0].data = d0;
+        r[1].type = MAPI_CC; r[1].data = d1;
+        r[2].type = MAPI_BCC; r[2].data = d2;
+        if (ops()->message.modify_recipients(msg, &columns, 3, r) != MAPISTORE_SUCCESS) return NULL;
+    }
+    return ops()->message.save(msg, root) == MAPISTORE_SUCCESS ? msg : NULL;
+}
+
+/* BODY[] of `uid` in `mailbox`. */
+static char *raw_of(struct imap_conn *c, const char *mailbox, uint32_t uid, size_t *len)
+{
+    mailimap *imap = imap_conn_session(c);
+    struct mailimap_set *set = mailimap_set_new_single(uid);
+    struct mailimap_fetch_type *ft = mailimap_fetch_type_new_fetch_att(
+        mailimap_fetch_att_new_body_peek_section(mailimap_section_new(NULL)));
+    clist *result = NULL;
+    char *out = NULL;
+    if (mailimap_select(imap, mailbox) == MAILIMAP_NO_ERROR && mailimap_uid_fetch(imap, set, ft, &result) == MAILIMAP_NO_ERROR) {
+        clistiter *it, *a;
+        for (it = clist_begin(result); it; it = clist_next(it)) {
+            struct mailimap_msg_att *m = clist_content(it);
+            for (a = clist_begin(m->att_list); a; a = clist_next(a)) {
+                struct mailimap_msg_att_item *item = clist_content(a);
+                if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC &&
+                    item->att_data.att_static->att_type == MAILIMAP_MSG_ATT_BODY_SECTION) {
+                    struct mailimap_msg_att_body_section *b = item->att_data.att_static->att_data.att_body_section;
+                    out = talloc_memdup(root, b->sec_body_part, b->sec_length + 1);
+                    out[b->sec_length] = '\0';
+                    *len = b->sec_length;
+                }
+            }
+        }
+    }
+    if (result) mailimap_fetch_list_free(result);
+    mailimap_fetch_type_free(ft);
+    mailimap_set_free(set);
+    return out;
+}
+
+static int test_submit_sends_and_files(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg, *sent, *again;
+    struct imap_message *sm;
+    char *log, *data, *auth, *stored, *flags;
+    size_t dlen = 0, slen = 0;
+    uint32_t outbox_before, sent_before;
+    enum MAPITAGS tags[] = { PidTagTargetEntryId, PidTagSentMailSvrEID };
+    struct mapistore_property_data v[2];
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9201, "Envio");
+    CHECK(msg);
+    {
+        struct SPropValue p[2];
+        struct SRow row = { .cValues = 2, .lpProps = p };
+        static uint8_t eid[] = { 1, 2, 3, 4 };
+        memset(p, 0, sizeof p);
+        p[0].ulPropTag = PidTagTargetEntryId; p[0].value.bin.cb = 4; p[0].value.bin.lpb = eid;
+        p[1].ulPropTag = PidTagSentMailSvrEID; p[1].value.bin.cb = 4; p[1].value.bin.lpb = eid;
+        CHECK(ops()->properties.set_properties(msg, &row) == MAPISTORE_SUCCESS);
+    }
+    outbox_before = count_of(c, "Outbox");
+    sent_before = count_of(c, "Sent");
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_SUCCESS);
+    CHECK((log = read_file(smtp_log, NULL)) != NULL);
+    CHECK(strstr(log, "MAIL FROM:<alice@example.invalid>"));
+    CHECK(strstr(log, "RCPT TO:<ana@example.invalid>") && strstr(log, "RCPT TO:<bruno@example.invalid>") &&
+          strstr(log, "RCPT TO:<x@example.invalid>"));
+    CHECK((auth = strstr(log, "AUTHDATA ")) != NULL);
+    {
+        char b64[256];
+        size_t idx = 0, n;
+        char *decoded = NULL;
+        sscanf(auth, "AUTHDATA %255s", b64);
+        n = strlen(b64);
+        CHECK(mailmime_base64_body_parse(b64, n, &idx, &decoded, &n) == MAILIMF_NO_ERROR && decoded);
+        CHECK(memmem(decoded, n, "alice@example.invalid*openchange", 32) && memmem(decoded, n, "master-secret", 13));
+        mailmime_decoded_part_free(decoded);
+    }
+    CHECK((data = read_file(smtp_data, &dlen)) != NULL);
+    CHECK(strstr(data, "Subject: Envio\r\n") && !strstr(data, "Bcc:") && !strstr(data, "x@example.invalid"));
+    CHECK(count_of(c, "Outbox") == outbox_before - 1 && count_of(c, "Sent") == sent_before + 1);
+    /* The mid now opens in Sent: the exact bytes sent, \Seen, not \Draft. */
+    sent = context_for("Sent");
+    CHECK(sent && imap_folder_open_message(sent, root, 0x9201, false, &again) == MAPISTORE_SUCCESS);
+    sm = again;
+    CHECK(uid_info(c, "Sent", sm->row.uid, &flags, NULL) && has_flag(flags, "\\Seen") && !has_flag(flags, "\\Draft"));
+    CHECK((stored = raw_of(c, "Sent", sm->row.uid, &slen)) != NULL);
+    CHECK(slen == dlen && memcmp(stored, data, dlen) == 0);
+    CHECK(imap_properties_get(msg, root, 2, tags, v) == MAPISTORE_SUCCESS);
+    CHECK(v[0].error == MAPISTORE_ERR_NOT_FOUND && v[1].error == MAPISTORE_ERR_NOT_FOUND);
+    imap_backend_set_state(&tunnel, false);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_submit_refusal_keeps_outbox(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg;
+    uint32_t outbox_before;
+    char *log;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9202, "Recusada");
+    CHECK(msg);
+    outbox_before = count_of(c, "Outbox");
+    use_smtp("rcpt553");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_ERR_DENIED);
+    CHECK(count_of(c, "Outbox") == outbox_before);
+    CHECK(read_file(smtp_data, NULL) == NULL);
+    CHECK((log = read_file(smtp_log, NULL)) && !strstr(log, "\nDATA\n"));
+    imap_backend_set_state(&tunnel, false);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_submit_delete_after(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg;
+    uint32_t outbox_before, sent_before;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9203, "Sem copia");
+    CHECK(msg);
+    {
+        struct SPropValue p;
+        struct SRow row = { .cValues = 1, .lpProps = &p };
+        memset(&p, 0, sizeof p);
+        p.ulPropTag = PidTagDeleteAfterSubmit;
+        p.value.b = 1;
+        CHECK(ops()->properties.set_properties(msg, &row) == MAPISTORE_SUCCESS);
+    }
+    outbox_before = count_of(c, "Outbox");
+    sent_before = count_of(c, "Sent");
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_SUCCESS);
+    CHECK(read_file(smtp_data, NULL) != NULL);
+    /* Saved before sending (the edit above), then gone; nothing filed. */
+    CHECK(count_of(c, "Outbox") == outbox_before - 1 && count_of(c, "Sent") == sent_before);
+    imap_backend_set_state(&tunnel, false);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_submit_size_refused(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg;
+    uint32_t outbox_before;
+    char *log;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9204, "Grande demais");
+    CHECK(msg);
+    outbox_before = count_of(c, "Outbox");
+    use_smtp("size100");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_ERR_DENIED);
+    CHECK((log = read_file(smtp_log, NULL)) && !strstr(log, "MAIL FROM"));
+    CHECK(count_of(c, "Outbox") == outbox_before);
+    imap_backend_set_state(&tunnel, false);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1729,10 +1942,11 @@ static int test_backend_registers(void)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <dovecot imap binary> <fixture dir>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <dovecot imap binary> <fixture dir> <smtp_fake.py>\n", argv[0]);
         return 2;
     }
+    smtp_fake = argv[3];
     signal(SIGPIPE, SIG_IGN); /* as openchange-mapihttpd (Rust ignores SIGPIPE) */
     root = talloc_new(NULL);
     fixture = argv[2];
@@ -1758,7 +1972,8 @@ int main(int argc, char **argv)
         test_backend_move_binds_target_mid() || test_backend_hard_delete() || test_read_and_follow_up_flags() ||
         test_refused_move_keeps_index() || test_create_folder_named_utf8() || test_rename_keeps_mids() ||
         test_delete_folder_rules() || test_compose_round_trip() || test_draft_save_and_edit() ||
-        test_fai_create_denied() || test_outbox_provisioned()) {
+        test_fai_create_denied() || test_outbox_provisioned() || test_submit_sends_and_files() ||
+        test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused()) {
         return 1;
     }
     talloc_free(root);

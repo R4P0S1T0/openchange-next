@@ -365,6 +365,30 @@ a client restart (M5 adds notifications); IMAP folder change numbers are
 per process, so a service restart resends the hierarchy; unread counts of
 provisioned folders read 0; the IMAP side is read-only (M4).
 
+
+## M4 writes and sending (2026-11-05)
+
+Branch `m4` (plan `docs/plans/2026-11-04-m4-imap-writes.md`): what Outlook
+does reaches Dovecot and Postfix. Move/copy (UID MOVE/COPY), permanent
+delete (UID EXPUNGE of exactly the UIDs deleted, never a bare EXPUNGE),
+read state, follow-up flag, replied/forwarded, folder create/rename/move/
+delete, drafts, and sending. Received mail is never rewritten: only its
+IMAP flags change.
+
+smb.conf parameters (besides M3's `mapistore:imap_*`):
+
+- `mapistore:smtp_host` (default `127.0.0.1`, loopback only, as
+  `imap_host`) and `mapistore:smtp_port` (default `587`): the submission
+  service. The backend always uses STARTTLS, logs in with SASL PLAIN as
+  `<user>*<imap_master_user>` with the master password, and uses the user's
+  own address as the envelope sender, so Postfix's
+  `reject_sender_login_mismatch` and DKIM signing apply as for any client.
+  The PLAIN mechanism needs `libsasl2-modules` on the server.
+- `mapistore:smtp_tunnel` (tests only): a command speaking SMTP on stdio.
+
+The Outbox is the IMAP mailbox `Outbox`, created unsubscribed at logon.
+Drafts and Outbox messages are stored with their Bcc header (as other
+clients do); the bytes sent and filed in Sent have none.
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern

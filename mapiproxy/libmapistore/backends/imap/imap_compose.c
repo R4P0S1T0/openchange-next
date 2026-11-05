@@ -369,7 +369,7 @@ static struct mailmime *body_tree(TALLOC_CTX *mem_ctx, const struct imap_draft *
 }
 
 _PUBLIC_ char *imap_compose(TALLOC_CTX *mem_ctx, const struct imap_draft *d, const char *from_address,
-			    const char *from_name, time_t now, size_t *len)
+			    const char *from_name, time_t now, bool with_bcc, size_t *len)
 {
 	TALLOC_CTX	*tmp;
 	struct mailmime	*tree, *body;
@@ -391,7 +391,9 @@ _PUBLIC_ char *imap_compose(TALLOC_CTX *mem_ctx, const struct imap_draft *d, con
 	if (headers && field) headers = talloc_asprintf_append_buffer(headers, "To: %s\r\n", field);
 	field = bad ? NULL : address_header(tmp, d, MAPI_CC, &bad);
 	if (headers && field) headers = talloc_asprintf_append_buffer(headers, "Cc: %s\r\n", field);
-	/* Bcc recipients exist in the SMTP envelope only. */
+	/* Bcc recipients exist in the SMTP envelope only; a stored draft keeps them as a header. */
+	field = (bad || !with_bcc) ? NULL : address_header(tmp, d, MAPI_BCC, &bad);
+	if (headers && field) headers = talloc_asprintf_append_buffer(headers, "Bcc: %s\r\n", field);
 	field = header_text(tmp, d->subject ? d->subject : "");
 	if (headers && field) headers = talloc_asprintf_append_buffer(headers, "Subject: %s\r\n", field);
 	field = rfc5322_date(tmp, now);

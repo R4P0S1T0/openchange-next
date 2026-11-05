@@ -225,7 +225,16 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSubmitMessage(TALLOC_CTX *mem_ctx,
 		contextID = emsmdbp_get_contextID(object);
 		flags = mapi_req->u.mapi_SubmitMessage.SubmitFlags;
 		owner = emsmdbp_get_owner(object);
-		mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object), object->backend_object, flags);
+		{
+			enum mapistore_error ret = mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object),
+									    object->backend_object, flags);
+
+			/* A refused send stays where it was (Outbox): Outlook shows the error. */
+			if (ret != MAPISTORE_SUCCESS) {
+				mapi_repl->error_code = mapistore_error_to_mapi(ret);
+				break;
+			}
+		}
 		oxomsg_mapistore_handle_message_relocation(emsmdbp_ctx, object);
 		mapistore_indexing_record_add_mid(emsmdbp_ctx->mstore_ctx, contextID, owner, messageID);
 		break;

@@ -33,6 +33,9 @@ struct imap_settings {
 	char		*master_password; /* read from imap_master_password_file; never logged */
 	const char	*tunnel;	 /* imap_tunnel: PREAUTH IMAP on stdio, $USER = mailbox */
 	uint32_t	max_message_size; /* imap_max_message_size: bodies larger than this are not fetched */
+	const char	*smtp_host;	 /* smtp_host, default 127.0.0.1 (loopback only) */
+	uint16_t	smtp_port;	 /* smtp_port, default 587 */
+	const char	*smtp_tunnel;	 /* tests: SMTP without TLS on stdio, $USER = sender */
 };
 
 /* LIST attributes (RFC 3501, RFC 6154) the backend uses. */
@@ -79,6 +82,15 @@ bool imap_conn_alive(struct imap_conn *conn);
 int imap_conn_check(struct imap_conn *conn, int r);
 /* The tunnel child, or -1 (tests). */
 pid_t imap_conn_pid(struct imap_conn *conn);
+
+/* Runs `tunnel` (argv words, no shell) with $USER = username on a socketpair; our end, or -1. */
+int imap_tunnel_spawn(TALLOC_CTX *mem_ctx, const char *tunnel, const char *username, pid_t *pid);
+
+/* Submission (imap_submit.c): 0 sent; -1 the server refused the sender, a recipient, the size or
+   the data (*smtp_code holds its reply); -2 connect, TLS or AUTH failed. Nothing is sent unless
+   every recipient was accepted. */
+int imap_smtp_send(const struct imap_settings *s, const char *username, const char *from, const char **rcpts,
+		   uint32_t count, const char *data, size_t len, int *smtp_code);
 
 /* libetpan session of an open connection (for the fetch code). */
 struct mailimap *imap_conn_session(struct imap_conn *conn);

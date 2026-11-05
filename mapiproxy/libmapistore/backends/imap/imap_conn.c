@@ -132,6 +132,20 @@ _PUBLIC_ struct imap_settings *imap_settings_load(TALLOC_CTX *mem_ctx, struct lo
 		return NULL;
 	}
 	s->max_message_size = lpcfg_parm_ulong(lp_ctx, NULL, "mapistore", "imap_max_message_size", 32 * 1024 * 1024);
+	s->smtp_host = talloc_strdup(s, lpcfg_parm_string(lp_ctx, NULL, "mapistore", "smtp_host") ?: "127.0.0.1");
+	port = lpcfg_parm_int(lp_ctx, NULL, "mapistore", "smtp_port", 587);
+	s->smtp_tunnel = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "smtp_tunnel");
+	if (s->smtp_tunnel) {
+		s->smtp_tunnel = talloc_strdup(s, s->smtp_tunnel);
+	}
+	/* As for IMAP: libetpan's STARTTLS does not verify the certificate, so the master password
+	   only goes to a loopback submission service. */
+	if (!s->smtp_host || port <= 0 || port > 65535 || (!s->smtp_tunnel && !is_loopback(s->smtp_host))) {
+		OC_DEBUG(0, "IMAP backend: mapistore:smtp_host must be a loopback address and smtp_port valid\n");
+		talloc_free(s);
+		return NULL;
+	}
+	s->smtp_port = port;
 	if (!s->tunnel) {
 		password_file = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "imap_master_password_file");
 		if (!password_file) {
@@ -162,19 +176,20 @@ static bool is_loopback(const char *host)
 	return inet_pton(AF_INET6, host, &a6) == 1 && IN6_IS_ADDR_LOOPBACK(&a6);
 }
 
-/* Runs the tunnel command with $USER = username and speaks IMAP over a socketpair; no shell. */
-static int open_tunnel(struct imap_conn *conn, const char *tunnel, const char *username)
+_PUBLIC_ int imap_tunnel_spawn(TALLOC_CTX *mem_ctx, const char *tunnel, const char *username, pid_t *pid)
 {
 	char		*words[MAX_TUNNEL_ARGS + 1];
 	char		**envp;
 	char		*copy, *save = NULL, *w, *user_env;
 	size_t		n = 0, envc = 0, i, j;
 	int		sv[2];
-	mailstream	*stream;
+	TALLOC_CTX	*tmp = talloc_new(mem_ctx);
 
-	copy = talloc_strdup(conn, tunnel);
-	user_env = talloc_asprintf(conn, "USER=%s", username);
+	*pid = -1;
+	copy = tmp ? talloc_strdup(tmp, tunnel) : NULL;
+	user_env = tmp ? talloc_asprintf(tmp, "USER=%s", username) : NULL;
 	if (!copy || !user_env) {
+		talloc_free(tmp);
 		return -1;
 	}
 	for (w = strtok_r(copy, " \t", &save); w && n < MAX_TUNNEL_ARGS; w = strtok_r(NULL, " \t", &save)) {
@@ -182,13 +197,15 @@ static int open_tunnel(struct imap_conn *conn, const char *tunnel, const char *u
 	}
 	words[n] = NULL;
 	if (n == 0 || w) {
+		talloc_free(tmp);
 		return -1;
 	}
 	while (environ[envc]) {
 		envc++;
 	}
-	envp = talloc_array(conn, char *, envc + 2);
+	envp = talloc_array(tmp, char *, envc + 2);
 	if (!envp) {
+		talloc_free(tmp);
 		return -1;
 	}
 	for (i = 0, j = 0; i < envc; i++) {
@@ -200,15 +217,17 @@ static int open_tunnel(struct imap_conn *conn, const char *tunnel, const char *u
 	envp[j] = NULL;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == -1) {
+		talloc_free(tmp);
 		return -1;
 	}
-	conn->tunnel_pid = fork();
-	if (conn->tunnel_pid == -1) {
+	*pid = fork();
+	if (*pid == -1) {
 		close(sv[0]);
 		close(sv[1]);
+		talloc_free(tmp);
 		return -1;
 	}
-	if (conn->tunnel_pid == 0) {
+	if (*pid == 0) {
 		/* Child: only async-signal-safe calls until exec. */
 		if (dup2(sv[1], 0) == -1 || dup2(sv[1], 1) == -1) {
 			_exit(127);
@@ -217,9 +236,22 @@ static int open_tunnel(struct imap_conn *conn, const char *tunnel, const char *u
 		_exit(127);
 	}
 	close(sv[1]);
-	stream = mailstream_socket_open(sv[0]);
+	talloc_free(tmp);
+	return sv[0];
+}
+
+/* Runs the tunnel command with $USER = username and speaks IMAP over a socketpair; no shell. */
+static int open_tunnel(struct imap_conn *conn, const char *tunnel, const char *username)
+{
+	mailstream	*stream;
+	int		fd = imap_tunnel_spawn(conn, tunnel, username, &conn->tunnel_pid);
+
+	if (fd == -1) {
+		return -1;
+	}
+	stream = mailstream_socket_open(fd);
 	if (!stream) {
-		close(sv[0]);
+		close(fd);
 		return -1;
 	}
 	return mailimap_connect(conn->imap, stream) == MAILIMAP_NO_ERROR_AUTHENTICATED ? 0 : -1;
