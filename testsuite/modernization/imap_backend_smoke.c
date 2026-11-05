@@ -37,6 +37,8 @@
 enum mapistore_error mapistore_backend_registered(const char *);
 
 static TALLOC_CTX *root;
+struct imap_conn;
+static bool subscribed(struct imap_conn *c, const char *name);
 static const char *fixture;
 static struct imap_settings tunnel;
 
@@ -471,9 +473,28 @@ static int test_folder_properties(void)
 static int test_create_root_folder_not_found(void)
 {
     char *uri = NULL;
-    /* NOT_FOUND lets emsmdb create the folder natively (emsmdbp_object_folder_commit_creation). */
-    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "New", root, &uri)
+    /* NOT_FOUND lets emsmdb create the folder natively (emsmdbp_object_folder_commit_creation):
+       non-mail folders, and the folders Outlook creates for itself. */
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_CALENDAR_ROLE, 0x1234, "Agenda 2", root, &uri)
         == MAPISTORE_ERR_NOT_FOUND && uri == NULL);
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "Sync Issues", root, &uri)
+        == MAPISTORE_ERR_NOT_FOUND && uri == NULL);
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234,
+                                  "Problemas de Sincroniza\xc3\xa7\xc3\xa3o", root, &uri) == MAPISTORE_ERR_NOT_FOUND && uri == NULL);
+    /* A mail folder the user creates next to the Inbox is an IMAP mailbox, subscribed. */
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "Clientes \xc3\x81", root, &uri)
+        == MAPISTORE_SUCCESS && uri && strcmp(uri, "imap://alice%40example.invalid/Clientes%20&AME-/") == 0);
+    {
+        struct imap_conn *c = imap_conn_open(root, &tunnel, "alice@example.invalid");
+        struct imap_mailbox *list;
+        size_t n;
+        CHECK(c && imap_list(c, c, &list, &n) == MAPISTORE_SUCCESS && find(list, n, "Clientes &AME-"));
+        CHECK(subscribed(c, "Clientes &AME-"));
+        CHECK(imap_delete_mailbox(c, "Clientes &AME-") == 0);
+        talloc_free(c);
+    }
+    CHECK(imap_create_root_folder("alice@example.invalid", MAPISTORE_MAIL_ROLE, 0x1234, "a/b", root, &uri)
+        == MAPISTORE_ERR_INVALID_PARAMETER);
     return 0;
 }
 

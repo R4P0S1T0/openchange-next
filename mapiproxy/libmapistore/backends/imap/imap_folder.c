@@ -302,13 +302,56 @@ _PUBLIC_ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct ma
 	return MAPISTORE_SUCCESS;
 }
 
-/* Top-level folders Outlook creates stay native in openchangedb: Outlook creates hidden IPF.Note
-   folders there itself (Sync Issues and its children), which must not show up in webmail. Folders
-   created below an IMAP folder become mailboxes (create_folder). */
+/* A mail folder Outlook creates next to the Inbox becomes a top-level IMAP mailbox, subscribed.
+   The folders Outlook creates there for itself stay native in openchangedb (NOT_FOUND): their
+   sync logs must not land in webmail. Other folder kinds (calendars...) are not IMAP's. */
 _PUBLIC_ enum mapistore_error imap_create_root_folder(const char *username, enum mapistore_context_role role,
 						      uint64_t fid, const char *name, TALLOC_CTX *mem_ctx, char **uri)
 {
-	return MAPISTORE_ERR_NOT_FOUND;
+	/* shortcut: Outlook's own folders are known by their English and Brazilian Portuguese names;
+	   add a locale here when its users show them in webmail. */
+	static const char *outlook_own[] = {
+		"Sync Issues", "Conflicts", "Local Failures", "Server Failures", "Conversation History",
+		"Problemas de Sincroniza\xc3\xa7\xc3\xa3o", "Conflitos", "Falhas Locais", "Falhas do Servidor",
+		"Hist\xc3\xb3rico de Conversa", "Hist\xc3\xb3rico de Conversas",
+	};
+	const struct imap_settings	*settings = imap_backend_settings();
+	struct imap_conn		*conn;
+	char				*leaf;
+	char				delimiter;
+	size_t				i;
+
+	if (!uri) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	*uri = NULL;
+	if (role != MAPISTORE_MAIL_ROLE || !name || !username || !settings) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	for (i = 0; i < sizeof outlook_own / sizeof outlook_own[0]; i++) {
+		if (strcasecmp(name, outlook_own[i]) == 0) {
+			return MAPISTORE_ERR_NOT_FOUND;
+		}
+	}
+	conn = imap_conn_open(mem_ctx, settings, username);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	delimiter = imap_conn_delimiter(conn);
+	leaf = imap_mailbox_name(conn, name, delimiter);
+	if (!leaf) {
+		talloc_free(conn);
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (imap_create_mailbox(conn, leaf, true)) {
+		enum mapistore_error ret = imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+
+		talloc_free(conn);
+		return ret;
+	}
+	*uri = imap_uri(mem_ctx, username, leaf, delimiter);
+	talloc_free(conn);
+	return *uri ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
 }
 
 static enum mapistore_error get_path(void *object, TALLOC_CTX *mem_ctx, uint64_t fmid, char **path)
