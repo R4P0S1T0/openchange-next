@@ -2306,6 +2306,10 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	owner = emsmdbp_get_owner(synccontext_object);
 	openchangedb_get_MailboxReplica(emsmdbp_ctx->oc_ctx, owner, &repl_id, &replica_guid);
 	if (oxcfxics_fmid_from_source_key(emsmdbp_ctx, owner, &request->PropertyValues.lpProps[0].value.bin, &messageID)) {
+		const struct SBinary_short *key = &request->PropertyValues.lpProps[0].value.bin;
+
+		OC_DEBUG(3, "ImportMessageChange: source key (%u bytes) of replica %s is not this mailbox's\n", key->cb,
+			 key->cb >= 16 ? GUID_string(mem_ctx, (const struct GUID *) key->lpb) : "?");
 		mapi_repl->error_code = MAPI_E_NOT_FOUND;
 		goto end;
 	}

@@ -243,6 +243,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopOpenMessage(TALLOC_CTX *mem_ctx,
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
 		}
 		else {
+			OC_DEBUG(3, "OpenMessage of mid 0x%"PRIx64" in folder 0x%"PRIx64" failed: %s\n",
+				 messageID, folderID, mapistore_errstr(ret));
 			mapi_repl->error_code = MAPI_E_CALL_FAILED;
 		}
 		goto end;
