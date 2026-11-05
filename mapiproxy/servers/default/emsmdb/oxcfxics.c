@@ -2807,11 +2807,12 @@ end:
    \returns MAPI_E_SUCCESS if check succeeded
  */
 static enum MAPISTATUS oxcfxics_check_cnset(struct openchangedb_context *oc_ctx,
+					    struct mapistore_context *mstore_ctx,
 					    const char *username,
 					    struct idset *parsed_idset,
 					    const char *label)
 {
-	uint64_t	next_cn, high_cn;
+	uint64_t	next_cn, high_cn, next_id;
 	enum MAPISTATUS	retval;
 
 	OPENCHANGE_RETVAL_IF(!username, MAPI_E_INVALID_PARAMETER, NULL);
@@ -2823,6 +2824,12 @@ static enum MAPISTATUS oxcfxics_check_cnset(struct openchangedb_context *oc_ctx,
 	retval = openchangedb_get_next_changeNumber(oc_ctx, username, &next_cn);
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, NULL);
 	next_cn = exchange_globcnt(next_cn >> 16);
+	/* The IMAP backend numbers its changes from the indexing ID counter (the one Outlook's local
+	   replica ranges come from): a change number below either counter has been issued. */
+	if (mstore_ctx && mapistore_indexing_get_new_folderID_as_user(mstore_ctx, username, &next_id) == MAPISTORE_SUCCESS &&
+	    exchange_globcnt(next_id >> 16) > next_cn) {
+		next_cn = exchange_globcnt(next_id >> 16);
+	}
 	high_cn = exchange_globcnt(parsed_idset->ranges->high);
 	if (high_cn >= next_cn) {
 		OC_DEBUG(0, "inconsistency: idset range for '%s' is referencing a change number "
@@ -2921,7 +2928,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -2933,7 +2940,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_fai");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_fai");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -2945,7 +2952,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_read");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_read");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -3729,7 +3736,7 @@ static enum MAPISTATUS oxcfxics_ndr_push_transfer_state(struct ndr_push *ndr, co
 	talloc_free(old_idset);
 	talloc_free(new_idset);
 
-	retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, synccontext->cnset_seen, "cnset_seen");
+	retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, synccontext->cnset_seen, "cnset_seen");
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 
 	ndr_push_uint32(ndr, NDR_SCALARS, MetaTagCnsetSeen);
@@ -3749,7 +3756,7 @@ static enum MAPISTATUS oxcfxics_ndr_push_transfer_state(struct ndr_push *ndr, co
 		talloc_free(old_idset);
 		talloc_free(new_idset);
 
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username,
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username,
 					      synccontext->cnset_seen_fai, "cnset_seen_fai");
 		OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 
