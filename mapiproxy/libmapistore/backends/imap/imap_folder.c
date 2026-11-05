@@ -207,6 +207,16 @@ _PUBLIC_ enum mapistore_error imap_list_contexts(const char *username, struct in
 	}
 	delimiter = imap_conn_delimiter(conn);
 	ret = imap_list(conn, conn, &mbs, &n);
+	/* Outlook's Outbox lives in IMAP (one MIME path with Drafts), unsubscribed so that IMAP
+	   clients honouring subscriptions hide it. */
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < n && strcmp(mbs[i].name, "Outbox") != 0; i++);
+	if (ret == MAPISTORE_SUCCESS && i == n) {
+		if (imap_create_mailbox(conn, "Outbox", false) == 0) {
+			ret = imap_list(conn, conn, &mbs, &n);
+		} else {
+			OC_DEBUG(1, "IMAP backend: cannot create the Outbox mailbox; Outlook keeps its native Outbox\n");
+		}
+	}
 	for (i = 0; ret == MAPISTORE_SUCCESS && i < n; i++) {
 		const struct imap_mailbox *mb = &mbs[i];
 		enum mapistore_context_role role = MAPISTORE_MAIL_ROLE;
@@ -219,6 +229,9 @@ _PUBLIC_ enum mapistore_error imap_list_contexts(const char *username, struct in
 		if (strcasecmp(mb->name, "INBOX") == 0) {
 			main_folder = !taken[MAPISTORE_MAIL_ROLE];
 			name = "Inbox";
+		} else if (strcmp(mb->name, "Outbox") == 0 && !taken[MAPISTORE_OUTBOX_ROLE]) {
+			role = MAPISTORE_OUTBOX_ROLE;
+			main_folder = true;
 		}
 		for (k = 0; k < sizeof special / sizeof special[0]; k++) {
 			if ((mb->flags & special[k].flag) && !taken[special[k].role]) {
@@ -1116,6 +1129,9 @@ _PUBLIC_ enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_
 		return imap_message_properties(object, mem_ctx, count, tags, data);
 	case IMAP_OBJ_ATTACHMENT:
 		return imap_attachment_properties(object, mem_ctx, count, tags, data);
+	case IMAP_OBJ_DRAFT_ATTACHMENT:
+		object = imap_draft_attachment_get(object);
+		return object ? imap_attachment_properties(object, mem_ctx, count, tags, data) : MAPISTORE_ERR_NOT_FOUND;
 	default:
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
@@ -1161,7 +1177,8 @@ _PUBLIC_ enum mapistore_error imap_properties_available(void *object, TALLOC_CTX
 	switch (*type) {
 	case IMAP_OBJ_FOLDER:	  candidates = folder_candidates; n = sizeof folder_candidates / sizeof folder_candidates[0]; break;
 	case IMAP_OBJ_MESSAGE:	  candidates = message_candidates; n = sizeof message_candidates / sizeof message_candidates[0]; break;
-	case IMAP_OBJ_ATTACHMENT: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
+	case IMAP_OBJ_ATTACHMENT:
+	case IMAP_OBJ_DRAFT_ATTACHMENT: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
 	default:		  return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	tmp = talloc_new(NULL);

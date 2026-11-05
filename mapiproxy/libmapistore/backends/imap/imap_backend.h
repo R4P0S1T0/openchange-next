@@ -44,6 +44,7 @@ enum imap_object_type {
 	IMAP_OBJ_TABLE,
 	IMAP_OBJ_MESSAGE,
 	IMAP_OBJ_ATTACHMENT,
+	IMAP_OBJ_DRAFT_ATTACHMENT,	/* struct imap_draft_attachment */
 };
 
 struct imap_recipient {
@@ -93,6 +94,14 @@ struct imap_message {
 	struct imap_attachment	*attachments;
 	uint32_t		attachment_count;
 	uint32_t		flags_add, flags_remove;	/* IMAP_FLAG_*, written by save */
+	struct imap_draft	*draft;		/* set once Outlook writes to an unsent message */
+};
+
+/* An attachment of a draft by number: the draft's array moves as attachments are added. */
+struct imap_draft_attachment {
+	uint32_t		type;		/* IMAP_OBJ_DRAFT_ATTACHMENT */
+	struct imap_message	*message;
+	uint32_t		number;
 };
 
 /* A message Outlook is writing (drafts, Outbox): what imap_compose renders. */
@@ -105,6 +114,7 @@ struct imap_draft {
 	char			*message_id;	/* PidTagInternetMessageId */
 	char			*in_reply_to;	/* PidTagInReplyToId */
 	char			*references;	/* PidTagInternetReferences */
+	char			*from_name;	/* PidTagSentRepresentingName or PidTagSenderName */
 	bool			delete_after_submit;
 	struct imap_recipient	*recipients;
 	uint32_t		recipient_count;
@@ -238,6 +248,8 @@ enum mapistore_error imap_attachment_properties(struct imap_attachment *a, TALLO
 enum mapistore_error imap_message_get_data(void *message, TALLOC_CTX *mem_ctx, struct mapistore_message **msg);
 enum mapistore_error imap_message_get_attachment_table(void *message, TALLOC_CTX *mem_ctx, void **table,
 						       uint32_t *row_count);
+/* The attachment a draft attachment handle points at (NULL when gone). */
+struct imap_attachment *imap_draft_attachment_get(void *handle);
 enum mapistore_error imap_message_open_attachment(void *message, TALLOC_CTX *mem_ctx, uint32_t number,
 						  void **attachment);
 

@@ -1595,6 +1595,131 @@ static int test_compose_round_trip(void)
     return 0;
 }
 
+/* M4 Task 6: drafts and Outbox. */
+
+static int set_string(void *object, uint32_t tag, const char *value)
+{
+    struct SPropValue v;
+    struct SRow row = { .cValues = 1, .lpProps = &v };
+    memset(&v, 0, sizeof v);
+    v.ulPropTag = tag;
+    v.value.lpszW = value;
+    CHECK(ops()->properties.set_properties(object, &row) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static int add_recipient(void *msg, enum ulRecipClass type, const char *name, const char *smtp)
+{
+    enum MAPITAGS tags[] = { PR_DISPLAY_NAME_UNICODE, PR_EMAIL_ADDRESS_UNICODE, PidTagSmtpAddress };
+    struct SPropTagArray columns = { .cValues = 3, .aulPropTag = tags };
+    struct mapistore_message_recipient r;
+    void *data[3] = { (void *) name, (void *) smtp, (void *) smtp };
+    memset(&r, 0, sizeof r);
+    r.type = type;
+    r.data = data;
+    CHECK(ops()->message.modify_recipients(msg, &columns, 1, &r) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static int add_attachment(void *msg, const char *name, const char *bytes)
+{
+    void *att = NULL;
+    uint32_t aid = 99;
+    struct SPropValue v[3];
+    struct SRow row = { .cValues = 3, .lpProps = v };
+    memset(v, 0, sizeof v);
+    v[0].ulPropTag = PidTagAttachLongFilename; v[0].value.lpszW = name;
+    v[1].ulPropTag = PidTagAttachMimeTag; v[1].value.lpszW = "text/plain";
+    v[2].ulPropTag = PidTagAttachDataBinary; v[2].value.bin.cb = strlen(bytes); v[2].value.bin.lpb = (uint8_t *) bytes;
+    CHECK(ops()->message.create_attachment(msg, root, &att, &aid) == MAPISTORE_SUCCESS && att);
+    CHECK(ops()->properties.set_properties(att, &row) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static int test_draft_save_and_edit(void)
+{
+    struct imap_conn *c = wconn();
+    void *drafts, *msg, *again, *att;
+    struct mapistore_message *data;
+    enum MAPITAGS tags[] = { PidTagSubject, PidTagMessageFlags };
+    struct mapistore_property_data v[2];
+    uint32_t before;
+    uint64_t mid;
+    CHECK(c != NULL && ops());
+    drafts = context_for("Drafts");
+    CHECK(drafts);
+    before = count_of(c, "Drafts");
+    CHECK(ops()->folder.create_message(drafts, root, 0x9101, 0, &msg) == MAPISTORE_SUCCESS && msg);
+    if (set_string(msg, PidTagSubject, "v1") || set_string(msg, PidTagBody, "corpo v1\r\n") ||
+        add_recipient(msg, MAPI_TO, "Ana", "ana@example.invalid") || add_attachment(msg, "a.txt", "hello")) return 1;
+    CHECK(count_of(c, "Drafts") == before);                 /* nothing in IMAP before save */
+    CHECK(imap_properties_get(msg, root, 2, tags, v) == MAPISTORE_SUCCESS);
+    CHECK(!v[0].error && strcmp(v[0].data, "v1") == 0 && !v[1].error && (*(uint32_t *) v[1].data & MSGFLAG_UNSENT));
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(count_of(c, "Drafts") == before + 1);
+    mid = mid_by_subject("Drafts", "v1", &drafts);
+    CHECK(mid == 0x9101);
+    /* Edit: one version in IMAP, under the same mid. */
+    CHECK(imap_folder_open_message(drafts, root, 0x9101, true, &again) == MAPISTORE_SUCCESS);
+    if (set_string(again, PidTagSubject, "v2")) return 1;
+    CHECK(ops()->message.save(again, root) == MAPISTORE_SUCCESS);
+    CHECK(count_of(c, "Drafts") == before + 1);
+    CHECK(subject_of(drafts, 0x9101) && strcmp(subject_of(drafts, 0x9101), "v2") == 0);
+    CHECK(imap_folder_open_message(drafts, root, 0x9101, false, &again) == MAPISTORE_SUCCESS);
+    CHECK(imap_message_open_attachment(again, root, 0, &att) == MAPISTORE_SUCCESS);
+    CHECK(((struct imap_attachment *) att)->filename && strcmp(((struct imap_attachment *) att)->filename, "a.txt") == 0);
+    CHECK(imap_message_get_data(again, root, &data) == MAPISTORE_SUCCESS && data->recipients_count == 1);
+    {
+        char *flags;
+        struct imap_message *m = again;
+        CHECK(uid_info(c, "Drafts", m->row.uid, &flags, NULL) && has_flag(flags, "\\Draft") && has_flag(flags, "\\Seen"));
+    }
+    /* APPEND refused (mailbox gone): an error, and the mid stays unbound. */
+    {
+        void *gone, *m;
+        char *uri; bool soft;
+        CHECK(mailimap_create(imap_conn_session(c), "W8") == MAILIMAP_NO_ERROR);
+        gone = context_for("W8");
+        CHECK(gone && ops()->folder.create_message(gone, root, 0x9102, 0, &m) == MAPISTORE_SUCCESS);
+        if (set_string(m, PidTagSubject, "lost")) return 1;
+        CHECK(mailimap_delete(imap_conn_session(c), "W8") == MAILIMAP_NO_ERROR);
+        CHECK(ops()->message.save(m, root) != MAPISTORE_SUCCESS);
+        CHECK(fi_get_uri(&ictx, "alice@example.invalid", root, 0x9102, &uri, &soft) == MAPISTORE_ERR_NOT_FOUND);
+    }
+    talloc_free(c);
+    return 0;
+}
+
+static int test_fai_create_denied(void)
+{
+    void *drafts = context_for("Drafts"), *msg = NULL;
+    CHECK(drafts && ops());
+    CHECK(ops()->folder.create_message(drafts, root, 0x9103, 1, &msg) == MAPISTORE_ERR_DENIED);
+    return 0;
+}
+
+static int test_outbox_provisioned(void)
+{
+    struct mapistore_contexts_list *list = NULL;
+    const struct mapistore_contexts_list *e;
+    struct imap_conn *c = wconn();
+    struct imap_mailbox *mbs;
+    size_t n;
+    CHECK(c != NULL);
+    mailimap_delete(imap_conn_session(c), "Outbox"); /* earlier tests listed the contexts already */
+    CHECK(imap_list(c, c, &mbs, &n) == MAPISTORE_SUCCESS && !find(mbs, n, "Outbox"));
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_SUCCESS && list);
+    CHECK((e = entry(list, "Outbox")) && e->main_folder && e->role == MAPISTORE_OUTBOX_ROLE);
+    CHECK(strcmp(e->url, "imap://alice%40example.invalid/Outbox/") == 0);
+    CHECK(imap_list(c, c, &mbs, &n) == MAPISTORE_SUCCESS && find(mbs, n, "Outbox"));
+    CHECK(!subscribed(c, "Outbox"));
+    /* Next logon: offered again, not created twice. */
+    CHECK(imap_list_contexts("alice@example.invalid", &ictx, root, &list) == MAPISTORE_SUCCESS && list);
+    CHECK((e = entry(list, "Outbox")) && e->main_folder && e->role == MAPISTORE_OUTBOX_ROLE);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1632,7 +1757,8 @@ int main(int argc, char **argv)
         test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle() ||
         test_backend_move_binds_target_mid() || test_backend_hard_delete() || test_read_and_follow_up_flags() ||
         test_refused_move_keeps_index() || test_create_folder_named_utf8() || test_rename_keeps_mids() ||
-        test_delete_folder_rules() || test_compose_round_trip()) {
+        test_delete_folder_rules() || test_compose_round_trip() || test_draft_save_and_edit() ||
+        test_fai_create_denied() || test_outbox_provisioned()) {
         return 1;
     }
     talloc_free(root);
