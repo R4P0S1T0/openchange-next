@@ -990,7 +990,8 @@ MAPISTORE_IMAP_OBJS = mapiproxy/libmapistore/backends/imap/mapistore_imap.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_conn.po		\
 		      mapiproxy/libmapistore/backends/imap/imap_names.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_folder.po	\
-		      mapiproxy/libmapistore/backends/imap/imap_message.po
+		      mapiproxy/libmapistore/backends/imap/imap_message.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_write.po
 MAPISTORE_IMAP_SO = mapiproxy/libmapistore/backends/mapistore_imap.$(SHLIBEXT)
 
 $(MAPISTORE_IMAP_OBJS): CFLAGS += $(LIBETPAN_CFLAGS)

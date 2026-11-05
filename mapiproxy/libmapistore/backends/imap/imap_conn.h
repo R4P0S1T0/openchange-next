@@ -83,4 +83,25 @@ pid_t imap_conn_pid(struct imap_conn *conn);
 /* libetpan session of an open connection (for the fetch code). */
 struct mailimap *imap_conn_session(struct imap_conn *conn);
 
+/* Writes (imap_write.c): 0 on the server's tagged OK, -1 otherwise. Mailbox names are modified
+   UTF-7, as on the wire. Calls that act on messages SELECT the mailbox read-write first. */
+#define IMAP_FLAG_SEEN		0x01
+#define IMAP_FLAG_FLAGGED	0x02
+#define IMAP_FLAG_ANSWERED	0x04
+#define IMAP_FLAG_DELETED	0x08
+#define IMAP_FLAG_FORWARDED	0x10	/* $Forwarded */
+#define IMAP_FLAG_DRAFT		0x20
+
+/* UID MOVE (or COPY); dest_uids[i] is the new UID of uids[i] (COPYUID). Needs UIDPLUS. */
+int imap_uid_move(struct imap_conn *conn, const char *from, const uint32_t *uids, uint32_t count,
+		  const char *to, bool copy, uint32_t *dest_uidvalidity, uint32_t *dest_uids);
+int imap_uid_set_flags(struct imap_conn *conn, const char *mailbox, uint32_t uid, uint32_t add, uint32_t remove);
+/* \Deleted + UID EXPUNGE of exactly these UIDs; refused without UIDPLUS. */
+int imap_uid_expunge(struct imap_conn *conn, const char *mailbox, const uint32_t *uids, uint32_t count);
+int imap_append(struct imap_conn *conn, const char *mailbox, const char *data, size_t len, uint32_t flags,
+		uint32_t *uidvalidity, uint32_t *uid);
+int imap_create_mailbox(struct imap_conn *conn, const char *name, bool subscribe);
+int imap_rename_mailbox(struct imap_conn *conn, const char *from, const char *to);
+int imap_delete_mailbox(struct imap_conn *conn, const char *name);
+
 #endif /* __IMAP_CONN_H__ */

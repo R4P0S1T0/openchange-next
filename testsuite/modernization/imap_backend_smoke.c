@@ -999,6 +999,187 @@ static int test_root_folder_takes_core_fid(void)
     return 0;
 }
 
+/* M4: wire-level checks of the writes, each on mailboxes it creates. */
+
+static struct imap_conn *wconn(void)
+{
+    return imap_conn_open(root, &tunnel, "alice@example.invalid");
+}
+
+static uint32_t count_of(struct imap_conn *c, const char *mailbox)
+{
+    struct imap_status st;
+    return imap_status(c, mailbox, &st) == MAPISTORE_SUCCESS ? st.messages : 0xffffffff;
+}
+
+/* FLAGS (space-joined) and Message-ID of one UID; false when the UID is gone. */
+static bool uid_info(struct imap_conn *c, const char *mailbox, uint32_t uid, char **flags, char **msgid)
+{
+    mailimap *imap = imap_conn_session(c);
+    struct mailimap_set *set = mailimap_set_new_single(uid);
+    struct mailimap_fetch_type *ft = mailimap_fetch_type_new_fetch_att_list_empty();
+    clist *result = NULL;
+    clistiter *it, *a, *f;
+    bool found = false;
+
+    *flags = talloc_strdup(root, "");
+    if (msgid) *msgid = NULL;
+    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_flags());
+    mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_envelope());
+    if (mailimap_select(imap, mailbox) == MAILIMAP_NO_ERROR &&
+        mailimap_uid_fetch(imap, set, ft, &result) == MAILIMAP_NO_ERROR) {
+        for (it = clist_begin(result); it; it = clist_next(it)) {
+            struct mailimap_msg_att *m = clist_content(it);
+            for (a = clist_begin(m->att_list); a; a = clist_next(a)) {
+                struct mailimap_msg_att_item *item = clist_content(a);
+                if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC &&
+                    item->att_data.att_static->att_type == MAILIMAP_MSG_ATT_UID) {
+                    found = found || item->att_data.att_static->att_data.att_uid == uid;
+                } else if (item->att_type == MAILIMAP_MSG_ATT_ITEM_STATIC &&
+                           item->att_data.att_static->att_type == MAILIMAP_MSG_ATT_ENVELOPE && msgid) {
+                    const char *id = item->att_data.att_static->att_data.att_env->env_message_id;
+                    *msgid = id ? talloc_strdup(root, id) : NULL;
+                } else if (item->att_type == MAILIMAP_MSG_ATT_ITEM_DYNAMIC && item->att_data.att_dyn->att_list) {
+                    for (f = clist_begin(item->att_data.att_dyn->att_list); f; f = clist_next(f)) {
+                        struct mailimap_flag_fetch *ff = clist_content(f);
+                        const struct mailimap_flag *fl = ff->fl_flag;
+                        const char *name = NULL;
+                        if (ff->fl_type != MAILIMAP_FLAG_FETCH_OTHER || !fl) continue;
+                        switch (fl->fl_type) {
+                        case MAILIMAP_FLAG_SEEN: name = "\\Seen"; break;
+                        case MAILIMAP_FLAG_FLAGGED: name = "\\Flagged"; break;
+                        case MAILIMAP_FLAG_ANSWERED: name = "\\Answered"; break;
+                        case MAILIMAP_FLAG_DELETED: name = "\\Deleted"; break;
+                        case MAILIMAP_FLAG_DRAFT: name = "\\Draft"; break;
+                        case MAILIMAP_FLAG_KEYWORD: name = fl->fl_data.fl_keyword; break;
+                        default: break;
+                        }
+                        if (name) *flags = talloc_asprintf_append(*flags, " %s", name);
+                    }
+                }
+            }
+        }
+    }
+    if (result) mailimap_fetch_list_free(result);
+    mailimap_fetch_type_free(ft);
+    mailimap_set_free(set);
+    return found;
+}
+
+static bool has_flag(const char *flags, const char *flag)
+{
+    char *padded = talloc_asprintf(root, "%s ", flags), *needle = talloc_asprintf(root, " %s ", flag);
+    return strstr(padded, needle) != NULL;
+}
+
+static const char w_msg1[] = "From: a@example.invalid\r\nSubject: one\r\nMessage-ID: <m1@example.invalid>\r\n\r\none\r\n";
+static const char w_msg2[] = "From: a@example.invalid\r\nSubject: two\r\nMessage-ID: <m2@example.invalid>\r\n\r\ntwo\r\n";
+
+static int test_uid_move_copy(void)
+{
+    struct imap_conn *c = wconn();
+    mailimap *imap;
+    uint32_t uids[2] = { 2, 1 }, dest[2] = { 0, 0 }, validity = 0;
+    char *flags, *id;
+    CHECK(c != NULL);
+    imap = imap_conn_session(c);
+    CHECK(mailimap_create(imap, "W1") == MAILIMAP_NO_ERROR);
+    mailimap_create(imap, "Archive");
+    if (append(imap, "W1", w_msg1) || append(imap, "W1", w_msg2)) return 1;
+    /* Copy, UIDs out of order: each dest UID belongs to its own source UID. */
+    CHECK(imap_uid_move(c, "W1", uids, 2, "Archive", true, &validity, dest) == 0);
+    CHECK(validity != 0 && dest[0] && dest[1] && dest[0] != dest[1]);
+    CHECK(count_of(c, "W1") == 2 && count_of(c, "Archive") == 2);
+    CHECK(uid_info(c, "Archive", dest[0], &flags, &id) && id && strstr(id, "m2@example.invalid"));
+    CHECK(uid_info(c, "Archive", dest[1], &flags, &id) && id && strstr(id, "m1@example.invalid"));
+    /* Move one: the source loses it. */
+    CHECK(imap_uid_move(c, "W1", uids, 1, "Archive", false, &validity, dest) == 0);
+    CHECK(count_of(c, "W1") == 1 && count_of(c, "Archive") == 3);
+    CHECK(uid_info(c, "Archive", dest[0], &flags, &id) && id && strstr(id, "m2@example.invalid"));
+    CHECK(!uid_info(c, "W1", 2, &flags, NULL));
+    /* A refused move (no such mailbox) is an error. */
+    CHECK(imap_uid_move(c, "W1", uids + 1, 1, "NoSuchBox", false, &validity, dest) == -1);
+    CHECK(count_of(c, "W1") == 1);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_expunge_only_given_uid(void)
+{
+    struct imap_conn *c = wconn();
+    mailimap *imap;
+    uint32_t one = 1;
+    char *flags;
+    CHECK(c != NULL);
+    imap = imap_conn_session(c);
+    CHECK(mailimap_create(imap, "W2") == MAILIMAP_NO_ERROR);
+    if (append(imap, "W2", w_msg1) || append(imap, "W2", w_msg2)) return 1;
+    /* UID 2 stands for a message webmail marked \Deleted but did not expunge. */
+    CHECK(imap_uid_set_flags(c, "W2", 1, IMAP_FLAG_DELETED, 0) == 0);
+    CHECK(imap_uid_set_flags(c, "W2", 2, IMAP_FLAG_DELETED, 0) == 0);
+    CHECK(imap_uid_expunge(c, "W2", &one, 1) == 0);
+    CHECK(count_of(c, "W2") == 1);
+    CHECK(!uid_info(c, "W2", 1, &flags, NULL));
+    CHECK(uid_info(c, "W2", 2, &flags, NULL) && has_flag(flags, "\\Deleted"));
+    talloc_free(c);
+    return 0;
+}
+
+static int test_append_and_flags(void)
+{
+    static const char msg[] = "From: a@example.invalid\r\nSubject: draft\r\n\r\nbody\r\n";
+    struct imap_conn *c = wconn();
+    uint32_t validity = 0, uid = 0;
+    char *flags;
+    CHECK(c != NULL);
+    CHECK(mailimap_create(imap_conn_session(c), "W3") == MAILIMAP_NO_ERROR);
+    CHECK(imap_append(c, "W3", msg, strlen(msg), IMAP_FLAG_SEEN | IMAP_FLAG_DRAFT, &validity, &uid) == 0);
+    CHECK(validity != 0 && uid != 0);
+    CHECK(uid_info(c, "W3", uid, &flags, NULL) && has_flag(flags, "\\Seen") && has_flag(flags, "\\Draft"));
+    CHECK(imap_uid_set_flags(c, "W3", uid, IMAP_FLAG_FLAGGED | IMAP_FLAG_FORWARDED, IMAP_FLAG_SEEN) == 0);
+    CHECK(uid_info(c, "W3", uid, &flags, NULL));
+    CHECK(has_flag(flags, "\\Flagged") && has_flag(flags, "$Forwarded") && !has_flag(flags, "\\Seen"));
+    CHECK(imap_append(c, "NoSuchBox", msg, strlen(msg), 0, &validity, &uid) == -1);
+    talloc_free(c);
+    return 0;
+}
+
+static bool subscribed(struct imap_conn *c, const char *name)
+{
+    clist *res = NULL;
+    clistiter *it;
+    bool found = false;
+    if (mailimap_lsub(imap_conn_session(c), "", "*", &res) != MAILIMAP_NO_ERROR) return false;
+    for (it = clist_begin(res); it; it = clist_next(it)) {
+        const struct mailimap_mailbox_list *mb = clist_content(it);
+        found = found || (mb->mb_name && strcmp(mb->mb_name, name) == 0);
+    }
+    mailimap_list_result_free(res);
+    return found;
+}
+
+static int test_mailbox_lifecycle(void)
+{
+    struct imap_conn *c = wconn();
+    struct imap_mailbox *list;
+    size_t n;
+    CHECK(c != NULL);
+    CHECK(imap_create_mailbox(c, "Tmp", true) == 0 && subscribed(c, "Tmp"));
+    CHECK(imap_create_mailbox(c, "Tmp3", false) == 0 && !subscribed(c, "Tmp3"));
+    CHECK(imap_create_mailbox(c, "Tmp/Kid", true) == 0);
+    CHECK(imap_create_mailbox(c, "Tmp", true) == -1);
+    CHECK(imap_rename_mailbox(c, "Tmp", "Tmp2") == 0);
+    CHECK(subscribed(c, "Tmp2") && subscribed(c, "Tmp2/Kid") && !subscribed(c, "Tmp") && !subscribed(c, "Tmp/Kid"));
+    CHECK(imap_delete_mailbox(c, "Tmp2/Kid") == 0);
+    CHECK(imap_delete_mailbox(c, "Tmp2") == 0 && imap_delete_mailbox(c, "Tmp3") == 0);
+    CHECK(!subscribed(c, "Tmp2"));
+    CHECK(imap_delete_mailbox(c, "Tmp2") == -1);
+    CHECK(imap_list(c, c, &list, &n) == MAPISTORE_SUCCESS);
+    CHECK(!find(list, n, "Tmp") && !find(list, n, "Tmp2") && !find(list, n, "Tmp3"));
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1029,7 +1210,8 @@ int main(int argc, char **argv)
         test_uidvalidity_change_new_mids() || test_open_plain_message_body() || test_charset_and_recipients() ||
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
-        test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_silent_server_times_out() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers()) {
+        test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_silent_server_times_out() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers() ||
+        test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle()) {
         return 1;
     }
     talloc_free(root);
