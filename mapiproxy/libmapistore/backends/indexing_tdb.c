@@ -410,6 +410,74 @@ static enum mapistore_error tdb_record_get_fmid(struct indexing_context *ictx,
 }
 
 
+struct tdb_prefix_data {
+	TALLOC_CTX	*mem_ctx;
+	const char	*old_prefix;
+	TDB_DATA	*keys;
+	size_t		count;
+};
+
+static int tdb_prefix_traverse(struct tdb_context *tdb_ctx, TDB_DATA key, TDB_DATA value, void *data)
+{
+	struct tdb_prefix_data	*d = data;
+	size_t			len = strlen(d->old_prefix);
+
+	if (value.dsize >= len && memcmp(value.dptr, d->old_prefix, len) == 0) {
+		d->keys = talloc_realloc(d->mem_ctx, d->keys, TDB_DATA, d->count + 1);
+		if (!d->keys) {
+			return -1;
+		}
+		d->keys[d->count].dptr = talloc_memdup(d->keys, key.dptr, key.dsize);
+		d->keys[d->count].dsize = key.dsize;
+		if (!d->keys[d->count].dptr) {
+			return -1;
+		}
+		d->count++;
+	}
+	return 0;
+}
+
+static enum mapistore_error tdb_record_update_uri_prefix(struct indexing_context *ictx,
+							 const char *username,
+							 const char *old_prefix,
+							 const char *new_prefix)
+{
+	struct tdb_prefix_data	d = { 0 };
+	TDB_DATA		value, dbuf;
+	size_t			i, len;
+	int			ret = 0;
+
+	MAPISTORE_RETVAL_IF(!ictx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !old_prefix || !old_prefix[0] || !new_prefix, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+
+	d.mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!d.mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	d.old_prefix = old_prefix;
+	len = strlen(old_prefix);
+	/* Collect first: the records change only once the traversal is over. */
+	if (tdb_traverse(TDB_WRAP(ictx)->tdb, tdb_prefix_traverse, &d) == -1) {
+		talloc_free(d.mem_ctx);
+		return MAPISTORE_ERR_DATABASE_OPS;
+	}
+	for (i = 0; i < d.count && ret == 0; i++) {
+		value = tdb_fetch(TDB_WRAP(ictx)->tdb, d.keys[i]);
+		if (!value.dptr) {
+			continue;
+		}
+		dbuf.dptr = (unsigned char *) talloc_asprintf(d.mem_ctx, "%s%.*s", new_prefix,
+							      (int) (value.dsize - len), (const char *) value.dptr + len);
+		free(value.dptr);
+		if (!dbuf.dptr) {
+			ret = -1;
+			break;
+		}
+		dbuf.dsize = strlen((const char *) dbuf.dptr);
+		ret = tdb_store(TDB_WRAP(ictx)->tdb, d.keys[i], dbuf, TDB_MODIFY);
+	}
+	talloc_free(d.mem_ctx);
+	return ret == 0 ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+}
+
 static enum mapistore_error tdb_record_allocate_fmids(struct indexing_context *ictx,
 						      const char *username,
 						      int count,
@@ -523,6 +591,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_tdb_init(struct mapistore_conte
 	ictx->get_fmid = tdb_record_get_fmid;
 	ictx->allocate_fmid = tdb_record_allocate_fmid;
 	ictx->allocate_fmids = tdb_record_allocate_fmids;
+	ictx->update_uri_prefix = tdb_record_update_uri_prefix;
 
 	*ictxp = ictx;
 

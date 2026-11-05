@@ -155,6 +155,8 @@ struct indexing_context {
 
 	enum mapistore_error	(*allocate_fmid)(struct indexing_context *, const char *, uint64_t *);
 	enum mapistore_error	(*allocate_fmids)(struct indexing_context *, const char *, int, uint64_t *);
+	/* Every URI of the user starting with old_prefix gets new_prefix instead; fmids and soft-delete state stay. */
+	enum mapistore_error	(*update_uri_prefix)(struct indexing_context *, const char *, const char *, const char *);
 
 	/* Backend URL */
 	const char *url;

@@ -426,6 +426,50 @@ START_TEST(test_get_fmid) {
 	ck_assert(fmid_res == INDEXING_EXIST_FMID);
 } END_TEST
 
+/* A folder rename rewrites the URI of the folder and of everything below it, nothing else. */
+START_TEST(test_update_uri_prefix) {
+	static const struct { uint64_t fmid; const char *uri; } rows[] = {
+		{ 1, "imap://u/A/" }, { 2, "imap://u/A/B/" }, { 3, "imap://u/A/B/7_1" },
+		{ 4, "imap://u/AB/" }, { 5, "imap://u/A_/" }, { 6, "imap://u/A/9_1" },
+	};
+	char		*uri = NULL;
+	bool		soft = false;
+	uint64_t	fmid = 0;
+	size_t		i;
+
+	for (i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+		ck_assert_int_eq(g_ictx->add_fmid(g_ictx, g_test_username, rows[i].fmid, rows[i].uri), MAPISTORE_SUCCESS);
+	}
+	ck_assert_int_eq(g_ictx->del_fmid(g_ictx, g_test_username, 6, MAPISTORE_SOFT_DELETE), MAPISTORE_SUCCESS);
+
+	ck_assert_int_eq(g_ictx->update_uri_prefix(g_ictx, g_test_username, "imap://u/A/", "imap://u/Z/"), MAPISTORE_SUCCESS);
+
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 1, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/Z/");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 2, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/Z/B/");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 3, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/Z/B/7_1");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 4, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/AB/");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 5, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/A_/");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 6, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/Z/9_1");
+	ck_assert(soft);
+
+	ck_assert_int_eq(g_ictx->get_fmid(g_ictx, g_test_username, "imap://u/Z/B/", false, &fmid, &soft), MAPISTORE_SUCCESS);
+	ck_assert(fmid == 2);
+	ck_assert_int_eq(g_ictx->get_fmid(g_ictx, g_test_username, "imap://u/A/B/", false, &fmid, &soft), MAPISTORE_ERR_NOT_FOUND);
+
+	/* LIKE wildcards in the prefix are literal: "A_/" must not match "AB/". */
+	ck_assert_int_eq(g_ictx->update_uri_prefix(g_ictx, g_test_username, "imap://u/A_/", "imap://u/Y/"), MAPISTORE_SUCCESS);
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 4, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/AB/");
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 5, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/Y/");
+} END_TEST
+
 START_TEST(test_get_fmid_with_wildcard) {
 	enum mapistore_error	ret;
 	uint64_t		fid_1, fid_2;
@@ -564,6 +608,7 @@ static TCase *create_test_case_indexing_interface(const char *name, SFun setup,
 	tcase_add_test(tc_interface, test_get_fmid_sanity);
 	tcase_add_test(tc_interface, test_get_fmid);
 	tcase_add_test(tc_interface, test_get_fmid_with_wildcard);
+	tcase_add_test(tc_interface, test_update_uri_prefix);
 	tcase_add_test(tc_interface, test_allocate_fmid);
 
 	return tc_interface;
