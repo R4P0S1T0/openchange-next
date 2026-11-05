@@ -95,6 +95,24 @@ struct imap_message {
 	uint32_t		flags_add, flags_remove;	/* IMAP_FLAG_*, written by save */
 };
 
+/* A message Outlook is writing (drafts, Outbox): what imap_compose renders. */
+struct imap_draft {
+	char			*subject;	/* UTF-8 */
+	char			*body;		/* PidTagBody, UTF-8 */
+	uint8_t			*html;		/* PidTagHtml, in html_codepage */
+	uint32_t		html_len;
+	uint32_t		html_codepage;	/* PidTagInternetCodepage; 0 = UTF-8 */
+	char			*message_id;	/* PidTagInternetMessageId */
+	char			*in_reply_to;	/* PidTagInReplyToId */
+	char			*references;	/* PidTagInternetReferences */
+	bool			delete_after_submit;
+	struct imap_recipient	*recipients;
+	uint32_t		recipient_count;
+	struct imap_attachment	*attachments;	/* content_id set: inline in the HTML */
+	uint32_t		attachment_count;
+	bool			dirty;
+};
+
 struct openchangedb_context;
 
 struct imap_context {
@@ -192,6 +210,13 @@ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *ur
 					time_t *when);
 /* PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList or PidTagLastModificationTime of a change. */
 void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when, enum MAPITAGS tag);
+
+/* imap_compose.c */
+/* RFC 5322 + MIME, 7-bit; Bcc never in the headers. NULL when an address is not a plain addr-spec. */
+char *imap_compose(TALLOC_CTX *mem_ctx, const struct imap_draft *d, const char *from_address, const char *from_name,
+		   time_t now, size_t *len);
+/* To, Cc and Bcc addresses, without case-insensitive duplicates. */
+uint32_t imap_draft_envelope(const struct imap_draft *d, TALLOC_CTX *mem_ctx, const char ***rcpts);
 
 /* imap_message.c */
 char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len);

@@ -1508,6 +1508,93 @@ static int test_delete_folder_rules(void)
     return 0;
 }
 
+/* M4 Task 5: MAPI -> MIME. */
+
+static struct imap_draft *sample_draft(void)
+{
+    struct imap_draft *d = talloc_zero(root, struct imap_draft);
+    static uint8_t bytes[256];
+    size_t i;
+    for (i = 0; i < sizeof bytes; i++) bytes[i] = (uint8_t) i;
+    d->subject = talloc_strdup(d, "Relat\xc3\xb3rio de mar\xc3\xa7o \xe2\x9c\x93");
+    d->body = talloc_strdup(d, "Ol\xc3\xa1\r\n");
+    d->html = (uint8_t *) talloc_strdup(d, "<p>Ol\xc3\xa1</p>");
+    d->html_len = strlen((char *) d->html);
+    d->recipient_count = 4;
+    d->recipients = talloc_zero_array(d, struct imap_recipient, 4);
+    d->recipients[0] = (struct imap_recipient) { MAPI_TO, "Ana Souza", "ana@example.invalid" };
+    d->recipients[1] = (struct imap_recipient) { MAPI_CC, "Bruno", "bruno@example.invalid" };
+    d->recipients[2] = (struct imap_recipient) { MAPI_BCC, "Hidden", "x@example.invalid" };
+    d->recipients[3] = (struct imap_recipient) { MAPI_CC, NULL, "ANA@example.invalid" }; /* same as To */
+    d->attachment_count = 1;
+    d->attachments = talloc_zero_array(d, struct imap_attachment, 1);
+    d->attachments[0].type = IMAP_OBJ_ATTACHMENT;
+    d->attachments[0].filename = talloc_strdup(d, "relat\xc3\xb3rio.pdf");
+    d->attachments[0].mime_type = talloc_strdup(d, "application/pdf");
+    d->attachments[0].data = bytes;
+    d->attachments[0].size = sizeof bytes;
+    return d;
+}
+
+static int test_compose_round_trip(void)
+{
+    struct imap_conn *c = wconn();
+    struct imap_draft *d = sample_draft(), *t;
+    struct imap_attachment *att;
+    struct mapistore_message *data;
+    enum MAPITAGS tags[] = { PidTagBody, PidTagHtml, PidTagDisplayTo, PidTagDisplayCc, PidTagSenderName };
+    struct mapistore_property_data v[5];
+    const char **rcpts;
+    void *folder, *msg;
+    char *raw;
+    size_t len = 0;
+    uint64_t mid;
+    uint32_t i;
+    CHECK(c != NULL);
+    raw = imap_compose(root, d, "alice@example.invalid", "Alice \xc3\x81vila", 1793000000, &len);
+    CHECK(raw && len == strlen(raw));
+    CHECK(strstr(raw, "x@example.invalid") == NULL && strstr(raw, "Hidden") == NULL);   /* Bcc: envelope only */
+    CHECK(strstr(raw, "\r\nMessage-ID: <") && strstr(raw, "@example.invalid>\r\n"));
+    CHECK(strstr(raw, "\r\nDate: Mon, 26 Oct 2026 07:33:20 +0000\r\n"));
+    CHECK(strstr(raw, "multipart/mixed") && strstr(raw, "multipart/alternative"));
+    for (i = 0; i < len; i++) CHECK((unsigned char) raw[i] < 0x80);                      /* 7-bit on the wire */
+    CHECK(imap_draft_envelope(d, root, &rcpts) == 3);
+    CHECK(strcmp(rcpts[0], "ana@example.invalid") == 0 && strcmp(rcpts[2], "x@example.invalid") == 0);
+    /* Through Dovecot and the read path Outlook uses. */
+    CHECK(mailimap_create(imap_conn_session(c), "C1") == MAILIMAP_NO_ERROR);
+    CHECK(imap_append(c, "C1", raw, len, 0, NULL, NULL) == 0);
+    mid = mid_by_subject("C1", d->subject, &folder);
+    CHECK(mid && imap_folder_open_message(folder, root, mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(imap_properties_get(msg, root, 5, tags, v) == MAPISTORE_SUCCESS);
+    CHECK(!v[0].error && strstr(v[0].data, "Ol\xc3\xa1"));
+    CHECK(!v[1].error && ((struct Binary_r *) v[1].data)->cb >= 11 &&
+          memmem(((struct Binary_r *) v[1].data)->lpb, ((struct Binary_r *) v[1].data)->cb, "<p>Ol\xc3\xa1</p>", 11));
+    CHECK(!v[2].error && strcmp(v[2].data, "Ana Souza") == 0);
+    CHECK(!v[3].error && strstr(v[3].data, "Bruno"));
+    CHECK(!v[4].error && strcmp(v[4].data, "Alice \xc3\x81vila") == 0);
+    CHECK(imap_message_open_attachment(msg, root, 0, (void **) &att) == MAPISTORE_SUCCESS);
+    CHECK(att->filename && strcmp(att->filename, "relat\xc3\xb3rio.pdf") == 0);
+    CHECK(att->size == 256 && memcmp(att->data, d->attachments[0].data, 256) == 0);
+    CHECK(imap_message_get_data(msg, root, &data) == MAPISTORE_SUCCESS && data->recipients_count == 3);
+    /* Text only: one text/plain part. */
+    t = talloc_zero(root, struct imap_draft);
+    t->subject = talloc_strdup(t, "Plain");
+    t->body = talloc_strdup(t, "Just text\r\n");
+    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len);
+    CHECK(raw && strstr(raw, "Content-Type: text/plain; charset=\"utf-8\"") && !strstr(raw, "multipart"));
+    CHECK(strstr(raw, "From: alice@example.invalid\r\n") || strstr(raw, "From: <alice@example.invalid>\r\n"));
+    /* A header line break smuggled into a field never reaches the wire as a header. */
+    t->subject = talloc_strdup(t, "Hi\r\nBcc: evil@example.invalid");
+    raw = imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len);
+    CHECK(raw && !strstr(raw, "\nBcc:"));
+    t->recipient_count = 1;
+    t->recipients = talloc_zero_array(t, struct imap_recipient, 1);
+    t->recipients[0] = (struct imap_recipient) { MAPI_TO, NULL, "a@example.invalid>\r\nX: y" };
+    CHECK(imap_compose(root, t, "alice@example.invalid", NULL, 1793000000, &len) == NULL);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1545,7 +1632,7 @@ int main(int argc, char **argv)
         test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle() ||
         test_backend_move_binds_target_mid() || test_backend_hard_delete() || test_read_and_follow_up_flags() ||
         test_refused_move_keeps_index() || test_create_folder_named_utf8() || test_rename_keeps_mids() ||
-        test_delete_folder_rules()) {
+        test_delete_folder_rules() || test_compose_round_trip()) {
         return 1;
     }
     talloc_free(root);
