@@ -146,6 +146,10 @@ struct mapistore_contexts_list {
 	struct mapistore_contexts_list	*next;
 };
 
+/* Submit flag beside MS-OXOMSG's SubmitFlags (0x01, 0x02): the client files its own copy of the sent
+   message (RopTransportSend in cached mode), so the backend files none. */
+#define MAPISTORE_SUBMIT_CLIENT_FILES_SENT	0x8000
+
 struct indexing_context {
 	enum mapistore_error	(*add_fmid)(struct indexing_context *, const char *, uint64_t, const char *);
 	enum mapistore_error	(*update_fmid)(struct indexing_context *, const char *, uint64_t, const char *);

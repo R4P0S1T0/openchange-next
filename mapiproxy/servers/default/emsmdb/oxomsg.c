@@ -444,8 +444,10 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopTransportSend(TALLOC_CTX *mem_ctx,
 			OC_DEBUG(0, "Failing to create sharing metadata for a sharing object: %s\n", mapi_get_errstr(retval));
 		}
 		{
+			/* Outlook (cached mode) files its own copy in Sent Items after a TransportSend. */
 			enum mapistore_error ret = mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object),
-									    object->backend_object, 0);
+									    object->backend_object,
+									    (enum SubmitFlags) MAPISTORE_SUBMIT_CLIENT_FILES_SENT);
 
 			/* As RopSubmitMessage: a refused send is reported, and the message stays where it was. */
 			if (ret != MAPISTORE_SUCCESS) {

@@ -1859,6 +1859,10 @@ static enum mapistore_error submit(void *message, enum SubmitFlags flags)
 		return (r == -1 && code >= 500) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
 	}
 	old_uid = m->row.uid;
+	/* Outlook files its own copy after RopTransportSend: a second one would be a duplicate. */
+	if (flags & MAPISTORE_SUBMIT_CLIENT_FILES_SENT) {
+		d->delete_after_submit = true;
+	}
 	if (!d->delete_after_submit) {
 		sent = sent_mailbox(conn, tmp);
 		if (sent && imap_append(conn, sent, wire, wlen, IMAP_FLAG_SEEN, &validity, &uid) == 0) {

@@ -2183,6 +2183,27 @@ static int test_client_change_key_kept(void)
     return 0;
 }
 
+/* RopTransportSend: cached-mode Outlook files its own copy in Sent Items, so the server sends and
+   drops the Outbox copy without filing a second one. */
+static int test_transport_send_no_sent_copy(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg;
+    uint32_t outbox_before, sent_before;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9601, "Via TransportSend");
+    CHECK(msg);
+    outbox_before = count_of(c, "Outbox");
+    sent_before = count_of(c, "Sent");
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, MAPISTORE_SUBMIT_CLIENT_FILES_SENT) == MAPISTORE_SUCCESS);
+    imap_backend_set_state(&tunnel, false);
+    CHECK(read_file(smtp_data, NULL) != NULL);
+    CHECK(count_of(c, "Outbox") == outbox_before - 1 && count_of(c, "Sent") == sent_before);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2227,7 +2248,7 @@ int main(int argc, char **argv)
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
-        test_client_change_key_kept()) {
+        test_client_change_key_kept() || test_transport_send_no_sent_copy()) {
         return 1;
     }
     talloc_free(root);
