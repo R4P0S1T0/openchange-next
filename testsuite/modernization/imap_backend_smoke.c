@@ -2036,6 +2036,22 @@ static int test_submit_unresolved_recipient(void)
     return 0;
 }
 
+/* Change numbers come from the indexing ID counter, the one GetLocalReplicaIds reserves Outlook's
+   ranges from: a webmail change after an Outlook upload must number above what Outlook used. */
+static int test_change_numbers_from_id_counter(void)
+{
+    struct imap_folder *inbox = context_for("INBOX");
+    uint64_t cn = 0, next;
+    time_t when;
+    CHECK(inbox);
+    imap_backend_set_cn_source(NULL);
+    next = fidx.next;
+    CHECK(imap_change_number(inbox->ctx, "imap://alice%40example.invalid/INBOX/1_999", "state-a", &cn, &when) == MAPISTORE_SUCCESS);
+    CHECK(fidx.next == next + 1 && cn == ((exchange_globcnt(next) << 16) | 0x0001));
+    imap_backend_set_cn_source(fake_cn);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2077,7 +2093,8 @@ int main(int argc, char **argv)
         test_delete_folder_rules() || test_compose_round_trip() || test_draft_save_and_edit() ||
         test_fai_create_denied() || test_outbox_provisioned() || test_submit_sends_and_files() ||
         test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused() ||
-        test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient()) {
+        test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
+        test_change_numbers_from_id_counter()) {
         return 1;
     }
     talloc_free(root);

@@ -966,19 +966,24 @@ struct change {
 };
 static struct change *changes;
 
-static enum mapistore_error openchangedb_cn(struct imap_context *ctx, uint64_t *cn)
+/* Change numbers share the indexing ID counter with the ranges RopGetLocalReplicaIds reserves for
+   Outlook's own uploads; openchangedb's change counter runs far below that, and once Outlook had
+   uploaded a change every later server change looked already seen. */
+static enum mapistore_error id_counter_cn(struct imap_context *ctx, uint64_t *cn)
 {
-	if (!ctx->oc_ctx) {
-		return MAPISTORE_ERR_NOT_INITIALIZED;
+	uint64_t		raw;
+	enum mapistore_error	ret = ctx->ictx->allocate_fmid(ctx->ictx, ctx->username, &raw);
+
+	if (ret == MAPISTORE_SUCCESS) {
+		*cn = (exchange_globcnt(raw) << 16) | 0x0001;
 	}
-	return openchangedb_get_new_changeNumber(ctx->oc_ctx, ctx->username, cn) == MAPI_E_SUCCESS
-		? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	return ret;
 }
-static imap_cn_source cn_source = openchangedb_cn;
+static imap_cn_source cn_source = id_counter_cn;
 
 _PUBLIC_ void imap_backend_set_cn_source(imap_cn_source source)
 {
-	cn_source = source ? source : openchangedb_cn;
+	cn_source = source ? source : id_counter_cn;
 }
 
 _PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state,
