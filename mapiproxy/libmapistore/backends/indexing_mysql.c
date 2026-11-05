@@ -776,7 +776,7 @@ static enum mapistore_error mysql_record_update_uri_prefix(struct indexing_conte
 
 	/* memcached maps URI -> fmid: drop the old URIs, or they would keep answering. */
 	if (ictx->cache) {
-		sql = talloc_asprintf(mem_ctx, "SELECT url FROM %s WHERE username = '%s' AND url LIKE '%s'",
+		sql = talloc_asprintf(mem_ctx, "SELECT url FROM %s WHERE username = '%s' AND url LIKE BINARY '%s'",
 				      INDEXING_TABLE, e_user, e_like);
 		MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 		ret = select_without_fetch(MYSQL(ictx), sql, &res);
@@ -790,7 +790,7 @@ static enum mapistore_error mysql_record_update_uri_prefix(struct indexing_conte
 	}
 	sql = talloc_asprintf(mem_ctx,
 		"UPDATE %s SET url = CONCAT('%s', SUBSTRING(url, CHAR_LENGTH('%s') + 1)) "
-		"WHERE username = '%s' AND url LIKE '%s'",
+		"WHERE username = '%s' AND url LIKE BINARY '%s'",
 		INDEXING_TABLE, e_new, e_old, e_user, e_like);
 	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
 	ret = execute_query(MYSQL(ictx), sql);

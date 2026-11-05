@@ -1667,7 +1667,11 @@ static int test_draft_save_and_edit(void)
     CHECK(subject_of(drafts, 0x9101) && strcmp(subject_of(drafts, 0x9101), "v2") == 0);
     CHECK(imap_folder_open_message(drafts, root, 0x9101, false, &again) == MAPISTORE_SUCCESS);
     CHECK(imap_message_open_attachment(again, root, 0, &att) == MAPISTORE_SUCCESS);
-    CHECK(((struct imap_attachment *) att)->filename && strcmp(((struct imap_attachment *) att)->filename, "a.txt") == 0);
+    {
+        enum MAPITAGS tag = PidTagAttachLongFilename;
+        struct mapistore_property_data d;
+        CHECK(imap_properties_get(att, root, 1, &tag, &d) == MAPISTORE_SUCCESS && !d.error && strcmp(d.data, "a.txt") == 0);
+    }
     CHECK(imap_message_get_data(again, root, &data) == MAPISTORE_SUCCESS && data->recipients_count == 1);
     {
         char *flags;
@@ -1933,6 +1937,84 @@ static int test_submit_size_refused(void)
     return 0;
 }
 
+/* Final review fixes. */
+
+/* An attachment opened on a draft reopened from IMAP stays valid while more are added (#2), and
+   received mail takes CreateAttach as an ignored edit (#1). */
+static int test_reopened_draft_attachments(void)
+{
+    struct imap_conn *c = wconn();
+    void *drafts, *msg, *first, *second, *received, *ignored;
+    uint32_t aid = 0, before;
+    uint64_t mid;
+    enum MAPITAGS tag = PidTagAttachLongFilename;
+    struct mapistore_property_data d;
+    CHECK(c != NULL && ops());
+    drafts = context_for("Drafts");
+    CHECK(drafts && imap_folder_open_message(drafts, root, 0x9101, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(imap_message_open_attachment(msg, root, 0, &first) == MAPISTORE_SUCCESS);
+    CHECK(*(uint32_t *) first == IMAP_OBJ_DRAFT_ATTACHMENT);
+    if (set_string(first, PidTagAttachMimeTag, "text/csv")) return 1;      /* editable */
+    CHECK(ops()->message.create_attachment(msg, root, &second, &aid) == MAPISTORE_SUCCESS && aid == 1);
+    CHECK(imap_properties_get(first, root, 1, &tag, &d) == MAPISTORE_SUCCESS && !d.error && strcmp(d.data, "a.txt") == 0);
+    /* Received mail: accepted and dropped, nothing rewritten. */
+    mid = mid_by_subject("W5", "one", &received);
+    CHECK(mid && imap_folder_open_message(received, root, mid, true, &msg) == MAPISTORE_SUCCESS);
+    before = count_of(c, "W5");
+    CHECK(ops()->message.create_attachment(msg, root, &ignored, &aid) == MAPISTORE_SUCCESS);
+    if (set_string(ignored, PidTagAttachLongFilename, "x.bin")) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS && count_of(c, "W5") == before);
+    talloc_free(c);
+    return 0;
+}
+
+/* A long non-ASCII filename survives (#5). */
+static int test_long_attachment_name(void)
+{
+    static const char *name = "Relat\xc3\xb3rio financeiro trimestral \xe2\x80\x93 vers\xc3\xa3o final.pdf";
+    struct imap_conn *c = wconn();
+    struct imap_draft *d = sample_draft();
+    struct imap_attachment *att;
+    void *folder, *msg;
+    char *raw;
+    size_t len;
+    uint64_t mid;
+    CHECK(c != NULL);
+    d->subject = talloc_strdup(d, "Nome longo");
+    d->attachments[0].filename = talloc_strdup(d, name);
+    raw = imap_compose(root, d, "alice@example.invalid", NULL, 1793000000, false, &len);
+    CHECK(raw && imap_append(c, "C1", raw, len, 0, NULL, NULL) == 0);
+    mid = mid_by_subject("C1", "Nome longo", &folder);
+    CHECK(mid && imap_folder_open_message(folder, root, mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(imap_message_open_attachment(msg, root, 0, (void **) &att) == MAPISTORE_SUCCESS);
+    CHECK(att->filename && strcmp(att->filename, name) == 0);
+    talloc_free(c);
+    return 0;
+}
+
+/* A recipient without an SMTP address fails the send instead of vanishing (#6). */
+static int test_submit_unresolved_recipient(void)
+{
+    void *msg;
+    enum MAPITAGS tags[] = { PR_DISPLAY_NAME_UNICODE, PR_EMAIL_ADDRESS_UNICODE };
+    struct SPropTagArray columns = { .cValues = 2, .aulPropTag = tags };
+    struct mapistore_message_recipient r[2];
+    void *d0[2] = { "Ana", "ana@example.invalid" };
+    void *d1[2] = { "Carlos", "/o=First Organization/ou=Exchange/cn=Recipients/cn=carlos" };
+    CHECK(ops());
+    msg = outbox_draft(0x9205, "Sem SMTP");
+    CHECK(msg);
+    memset(r, 0, sizeof r);
+    r[0].type = MAPI_TO; r[0].data = d0;
+    r[1].type = MAPI_TO; r[1].data = d1;
+    CHECK(ops()->message.modify_recipients(msg, &columns, 2, r) == MAPISTORE_SUCCESS);
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(read_file(smtp_log, NULL) == NULL);
+    imap_backend_set_state(&tunnel, false);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1973,7 +2055,8 @@ int main(int argc, char **argv)
         test_refused_move_keeps_index() || test_create_folder_named_utf8() || test_rename_keeps_mids() ||
         test_delete_folder_rules() || test_compose_round_trip() || test_draft_save_and_edit() ||
         test_fai_create_denied() || test_outbox_provisioned() || test_submit_sends_and_files() ||
-        test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused()) {
+        test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused() ||
+        test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient()) {
         return 1;
     }
     talloc_free(root);

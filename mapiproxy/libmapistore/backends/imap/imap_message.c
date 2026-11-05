@@ -29,6 +29,8 @@
 #include "libmapi/libmapi_private.h"
 #include "imap_backend.h"
 
+static struct imap_draft *ensure_draft(struct imap_message *m);
+
 /* Rows of one message table; larger mailboxes show their first (oldest) messages only.
    shortcut: a full envelope fetch per table open; page with UID ranges when mailboxes grow. */
 #define MAX_TABLE_ROWS 100000
@@ -1129,7 +1131,8 @@ _PUBLIC_ enum mapistore_error imap_message_open_attachment(void *object, TALLOC_
 	if (number >= m->attachment_count) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
-	if (m->draft) {
+	/* An unsent message is editable: hand out a handle that survives the array growing. */
+	if (ensure_draft(m)) {
 		struct imap_draft_attachment *h = talloc_zero(m, struct imap_draft_attachment);
 
 		if (!h) {
@@ -1319,7 +1322,7 @@ static enum mapistore_error attachment_set_properties(struct imap_draft_attachme
 	uint32_t		i, tag;
 
 	if (!a) {
-		return MAPISTORE_ERR_NOT_FOUND;
+		return h->message->draft ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_SUCCESS; /* received mail: dropped */
 	}
 	for (i = 0; i < row->cValues; i++) {
 		const struct SPropValue	*p = &row->lpProps[i];
@@ -1435,8 +1438,9 @@ static enum mapistore_error modify_recipients(void *message, struct SPropTagArra
 		n++;
 	}
 	if (skipped) {
-		OC_DEBUG(1, "IMAP backend: %u recipient(s) without an SMTP address left out\n", skipped);
+		OC_DEBUG(1, "IMAP backend: %u recipient(s) without an SMTP address\n", skipped);
 	}
+	d->unresolved = skipped;
 	d->recipients = out;
 	d->recipient_count = n;
 	d->dirty = true;
@@ -1456,7 +1460,18 @@ static enum mapistore_error create_attachment(void *message, TALLOC_CTX *mem_ctx
 	}
 	d = ensure_draft(m);
 	if (!d) {
-		return MAPISTORE_ERR_DENIED; /* received mail is never rewritten */
+		/* Received mail is never rewritten: a full-message upload (ICS) of it still succeeds, its
+		   attachments dropped like other edits. */
+		h = talloc_zero(m, struct imap_draft_attachment);
+		if (!h) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		h->type = IMAP_OBJ_DRAFT_ATTACHMENT;
+		h->message = m;
+		h->number = UINT32_MAX;
+		*attachment = h;
+		*aid = m->attachment_count;
+		return MAPISTORE_SUCCESS;
 	}
 	a = talloc_realloc(d, d->attachments, struct imap_attachment, d->attachment_count + 1);
 	h = a ? talloc_zero(m, struct imap_draft_attachment) : NULL;
@@ -1714,7 +1729,8 @@ static enum mapistore_error submit(void *message, enum SubmitFlags flags)
 		}
 	}
 	tmp = talloc_new(NULL);
-	n = tmp ? imap_draft_envelope(d, tmp, &rcpts) : 0;
+	/* Sending to some of the recipients only would look like a success to the user. */
+	n = (tmp && !d->unresolved) ? imap_draft_envelope(d, tmp, &rcpts) : 0;
 	if (!n) {
 		talloc_free(tmp);
 		return MAPISTORE_ERR_INVALID_PARAMETER;

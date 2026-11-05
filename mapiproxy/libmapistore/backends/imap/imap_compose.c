@@ -56,7 +56,7 @@ static char *base64(TALLOC_CTX *mem_ctx, const uint8_t *p, size_t n)
 
 /* Header text as is when it is plain printable ASCII, else as UTF-8 encoded words, each holding
    whole characters, separated by a fold. Line breaks never survive as such. */
-static char *header_text(TALLOC_CTX *mem_ctx, const char *s)
+static char *header_words(TALLOC_CTX *mem_ctx, const char *s, const char *separator)
 {
 	const unsigned char	*p = (const unsigned char *) s;
 	bool			plain = true;
@@ -77,7 +77,7 @@ static char *header_text(TALLOC_CTX *mem_ctx, const char *s)
 			end--; /* never split a UTF-8 sequence */
 		}
 		word = base64(mem_ctx, p + start, end - start);
-		out = word ? (out ? talloc_asprintf_append_buffer(out, "\r\n =?UTF-8?B?%s?=", word)
+		out = word ? (out ? talloc_asprintf_append_buffer(out, "%s=?UTF-8?B?%s?=", separator, word)
 				  : talloc_asprintf(mem_ctx, "=?UTF-8?B?%s?=", word)) : NULL;
 		talloc_free(word);
 		if (!out) {
@@ -85,6 +85,11 @@ static char *header_text(TALLOC_CTX *mem_ctx, const char *s)
 		}
 	}
 	return out ? out : talloc_strdup(mem_ctx, "");
+}
+
+static char *header_text(TALLOC_CTX *mem_ctx, const char *s)
+{
+	return header_words(mem_ctx, s, "\r\n ");
 }
 
 /* An addr-spec Outlook gave us: one token, no header syntax inside. */
@@ -244,7 +249,8 @@ static struct mailmime *attachment_part(TALLOC_CTX *mem_ctx, const struct imap_a
 	struct mailmime_mechanism	*mech;
 	struct mailmime			*part;
 	const char			*fname = a->filename && a->filename[0] ? a->filename : "attachment";
-	char				*encoded = header_text(mem_ctx, fname);
+	/* Inside a quoted parameter the words are joined by a space; libetpan folds the line. */
+	char				*encoded = header_words(mem_ctx, fname, " ");
 	char				*cid = NULL;
 
 	/* RFC 2047 words inside the quoted parameters: what Outlook and Exchange send, and what the

@@ -594,8 +594,9 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSaveChangesMessage(TALLOC_CTX *mem_ctx,
                 contextID = emsmdbp_get_contextID(object);
 		messageID = object->object.message->messageID;
 		ret = mapistore_message_save(emsmdbp_ctx->mstore_ctx, contextID, object->backend_object, mem_ctx);
-		if (ret == MAPISTORE_ERR_DENIED) {
-			mapi_repl->error_code = MAPI_E_NO_ACCESS;
+		/* Not saved (refused, store unreachable, unsendable content): a success reply would lose it. */
+		if (ret != MAPISTORE_SUCCESS) {
+			mapi_repl->error_code = ret == MAPISTORE_ERR_DENIED ? MAPI_E_NO_ACCESS : mapistore_error_to_mapi(ret);
 			goto end;
 		}
 		owner = emsmdbp_get_owner(object);

@@ -35,8 +35,9 @@ static bool has_uidplus(mailimap *imap)
 	if (mailimap_has_uidplus(imap)) {
 		return true;
 	}
-	if (mailimap_capability(imap, &cap) == MAILIMAP_NO_ERROR && cap) {
-		mailimap_capability_data_free(cap);
+	if (mailimap_capability(imap, &cap) == MAILIMAP_NO_ERROR && cap &&
+	    !(imap->imap_connection_info && imap->imap_connection_info->imap_capability == cap)) {
+		mailimap_capability_data_free(cap); /* ours only when libetpan did not keep it as the session's */
 	}
 	return mailimap_has_uidplus(imap);
 }

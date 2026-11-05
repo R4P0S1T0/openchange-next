@@ -430,7 +430,7 @@ START_TEST(test_get_fmid) {
 START_TEST(test_update_uri_prefix) {
 	static const struct { uint64_t fmid; const char *uri; } rows[] = {
 		{ 1, "imap://u/A/" }, { 2, "imap://u/A/B/" }, { 3, "imap://u/A/B/7_1" },
-		{ 4, "imap://u/AB/" }, { 5, "imap://u/A_/" }, { 6, "imap://u/A/9_1" },
+		{ 4, "imap://u/AB/" }, { 5, "imap://u/A_/" }, { 6, "imap://u/A/9_1" }, { 8, "imap://u/a/" },
 	};
 	char		*uri = NULL;
 	bool		soft = false;
@@ -457,6 +457,9 @@ START_TEST(test_update_uri_prefix) {
 	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 6, &uri, &soft), MAPISTORE_SUCCESS);
 	ck_assert_str_eq(uri, "imap://u/Z/9_1");
 	ck_assert(soft);
+	/* IMAP names are case-sensitive: "a" is another folder. */
+	ck_assert_int_eq(g_ictx->get_uri(g_ictx, g_test_username, g_ictx, 8, &uri, &soft), MAPISTORE_SUCCESS);
+	ck_assert_str_eq(uri, "imap://u/a/");
 
 	ck_assert_int_eq(g_ictx->get_fmid(g_ictx, g_test_username, "imap://u/Z/B/", false, &fmid, &soft), MAPISTORE_SUCCESS);
 	ck_assert(fmid == 2);
