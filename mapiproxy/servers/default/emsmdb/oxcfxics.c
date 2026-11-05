@@ -763,41 +763,6 @@ static void oxcfxics_push_messageChange_attachments(struct emsmdbp_context *emsm
 	talloc_free(table_object);
 }
 
-static void oxcfxics_table_set_cn_restriction(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object *table_object, const char *owner, struct idset *cnset_seen)
-{
-	struct mapi_SRestriction cn_restriction;
-	struct idset *local_cnset;
-	uint16_t repl_id;
-	uint8_t state;
-
-	if (!emsmdbp_is_mapistore(table_object)) {
-		OC_DEBUG(5, "table restrictions not supported by non-mapistore tables\n");
-		return;
-	}
-
-	local_cnset = cnset_seen;
-	while (local_cnset && (emsmdbp_guid_to_replid(emsmdbp_ctx, owner, &local_cnset->repl.guid, &repl_id) != MAPI_E_SUCCESS || repl_id != 1)) {
-		local_cnset = local_cnset->next;
-	}
-
-	if (!local_cnset) {
-		OC_DEBUG(5, "no change set available -> no table restrictions\n");
-		return;
-	}
-	if (local_cnset->range_count != 1) {
-		OC_DEBUG(5, "no valid change set available (range_count = %d) -> no table restrictions\n", local_cnset->range_count);
-		return;
-	}
-
-	cn_restriction.rt = RES_PROPERTY;
-	cn_restriction.res.resProperty.relop = RELOP_GT;
-	cn_restriction.res.resProperty.ulPropTag = PidTagChangeNumber;
-	cn_restriction.res.resProperty.lpProp.ulPropTag = PidTagChangeNumber;
-	cn_restriction.res.resProperty.lpProp.value.d = (cnset_seen->ranges[0].high << 16) | repl_id;
-
-	mapistore_table_set_restrictions(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(table_object), table_object->backend_object, &cn_restriction, &state);
-}
-
 static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object_synccontext *synccontext, const char *owner, struct oxcfxics_sync_data *sync_data, struct emsmdbp_object *folder_object)
 {
 	TALLOC_CTX			*mem_ctx, *msg_ctx;
@@ -862,7 +827,9 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
 		table_object->object.table->prop_count = table_props_count;
 		table_object->object.table->properties = (enum MAPITAGS *)table_prop_tags;
 
-		oxcfxics_table_set_cn_restriction(emsmdbp_ctx, table_object, owner, original_cnset_seen);
+		/* No "ChangeNumber > highest seen" table restriction: change numbers hold their GLOBCNT
+		   byte-swapped, so numeric order is not change order and new changes were filtered out.
+		   Every row is checked against cnset_seen below (IDSET_includes_guid_glob). */
 		message_sync_data->max = 0;
 		if (emsmdbp_is_mapistore(table_object)) {
 			contextID = emsmdbp_get_contextID(folder_object);
@@ -1422,7 +1389,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 
 	table_object->object.table->prop_count = synccontext->properties.cValues;
 	table_object->object.table->properties = synccontext->properties.aulPropTag;
-	oxcfxics_table_set_cn_restriction(emsmdbp_ctx, table_object, owner, synccontext->cnset_seen);
+	/* No change-number table restriction here either (see oxcfxics_push_messageChange): rows are
+	   checked against cnset_seen one by one. */
 	if (emsmdbp_is_mapistore(table_object)) {
 		mapistore_table_set_columns(emsmdbp_ctx->mstore_ctx, contextID,
 					    table_object->backend_object, synccontext->properties.cValues, synccontext->properties.aulPropTag);

@@ -861,6 +861,11 @@ static char *describe(TALLOC_CTX *mem_ctx, const struct mapi_SRestriction *r, in
 		}
 		return out ? talloc_strdup_append_buffer(out, ")") : NULL;
 	case RES_PROPERTY:
+		/* A change number is an ID, never personal data: shown, to debug ICS. */
+		if ((r->res.resProperty.ulPropTag & 0xFFFF) == PT_I8) {
+			return talloc_asprintf(mem_ctx, "PROP(%u,%.8x,0x%"PRIx64")", r->res.resProperty.relop,
+					       r->res.resProperty.ulPropTag, r->res.resProperty.lpProp.value.d);
+		}
 		return talloc_asprintf(mem_ctx, "PROP(%u,%.8x)", r->res.resProperty.relop, r->res.resProperty.ulPropTag);
 	case RES_BITMASK:
 		return talloc_asprintf(mem_ctx, "BITMASK(%u,%.8x,%.8x)", r->res.resBitmask.relMBR, r->res.resBitmask.ulPropTag, r->res.resBitmask.ulMask);
