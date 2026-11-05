@@ -329,6 +329,17 @@ static enum mapistore_error fi_update_fmid(struct indexing_context *c, const cha
     }
     return MAPISTORE_ERR_NOT_FOUND;
 }
+static enum mapistore_error fi_update_uri_prefix(struct indexing_context *c, const char *u, const char *old_prefix,
+                                                const char *new_prefix)
+{
+    size_t i, len = strlen(old_prefix);
+    for (i = 0; i < fidx.n; i++) {
+        if (strncmp(fidx.uri[i], old_prefix, len) == 0) {
+            fidx.uri[i] = talloc_asprintf(root, "%s%s", new_prefix, fidx.uri[i] + len);
+        }
+    }
+    return MAPISTORE_SUCCESS;
+}
 static enum mapistore_error fi_del_fmid(struct indexing_context *c, const char *u, uint64_t fmid, uint8_t flags)
 {
     size_t i;
@@ -1370,6 +1381,133 @@ static int test_refused_move_keeps_index(void)
     return 0;
 }
 
+/* M4 Task 4: folder writes. */
+
+static struct SRow *name_row(const char *name, const char *container_class)
+{
+    struct SRow *row = talloc_zero(root, struct SRow);
+    row->lpProps = talloc_zero_array(row, struct SPropValue, 2);
+    row->lpProps[0].ulPropTag = PidTagDisplayName;
+    row->lpProps[0].value.lpszW = name;
+    row->cValues = 1;
+    if (container_class) {
+        row->lpProps[1].ulPropTag = PidTagContainerClass;
+        row->lpProps[1].value.lpszW = container_class;
+        row->cValues = 2;
+    }
+    return row;
+}
+
+static const char *folder_name(void *folder)
+{
+    enum MAPITAGS tag = PidTagDisplayName;
+    struct mapistore_property_data d;
+    if (imap_properties_get(folder, root, 1, &tag, &d) != MAPISTORE_SUCCESS || d.error) return NULL;
+    return d.data;
+}
+
+static int test_create_folder_named_utf8(void)
+{
+    struct imap_conn *c = wconn();
+    struct imap_mailbox *list;
+    void *parent, *child = NULL, *again = NULL;
+    size_t n;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "F1") == MAILIMAP_NO_ERROR);
+    parent = context_for("F1");
+    CHECK(parent != NULL);
+    CHECK(ops()->folder.create_folder(parent, root, 0x7001, name_row("Relat\xc3\xb3rios", "IPF.Note"), &child) == MAPISTORE_SUCCESS);
+    CHECK(child && ((struct imap_folder *) child)->fid == 0x7001);
+    CHECK(imap_list(c, c, &list, &n) == MAPISTORE_SUCCESS && find(list, n, "F1/Relat&APM-rios"));
+    CHECK(subscribed(c, "F1/Relat&APM-rios"));
+    CHECK(imap_folder_open_folder(parent, root, 0x7001, &again) == MAPISTORE_SUCCESS);
+    CHECK(folder_name(again) && strcmp(folder_name(again), "Relat\xc3\xb3rios") == 0);
+    /* Names IMAP cannot hold as one level, and non-mail folders, are refused. */
+    CHECK(ops()->folder.create_folder(parent, root, 0x7002, name_row("a/b", NULL), &child) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(ops()->folder.create_folder(parent, root, 0x7002, name_row("a*", NULL), &child) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(ops()->folder.create_folder(parent, root, 0x7002, name_row("", NULL), &child) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(ops()->folder.create_folder(parent, root, 0x7002, name_row("Agenda", "IPF.Appointment"), &child) == MAPISTORE_ERR_DENIED);
+    CHECK(strcmp(imap_mailbox_name(root, "a&b \xf0\x9f\x98\x80", '/'), "a&-b &2D3eAA-") == 0);
+    CHECK(imap_mailbox_name(root, "bad \xc3", '/') == NULL);
+    CHECK(imap_mailbox_name(root, "v1.2", '.') == NULL && strcmp(imap_mailbox_name(root, "v1.2", '/'), "v1.2") == 0);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_rename_keeps_mids(void)
+{
+    struct imap_conn *c = wconn();
+    void *top, *mid_folder = NULL, *kid = NULL, *msg, *target;
+    struct imap_folder *mf;
+    uint64_t msg_mid, kid_fid, next;
+    mailimap *imap;
+    CHECK(c != NULL && ops());
+    imap = imap_conn_session(c);
+    CHECK(mailimap_create(imap, "F2") == MAILIMAP_NO_ERROR && mailimap_create(imap, "F2/Mid") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap, "F2/Mid/Kid") == MAILIMAP_NO_ERROR && mailimap_create(imap, "F3") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_subscribe(imap, "F2/Mid") == MAILIMAP_NO_ERROR);
+    if (append(imap, "F2/Mid", w_msg1)) return 1;
+    msg_mid = mid_by_subject("F2/Mid", "one", &mid_folder);
+    kid = context_for("F2/Mid/Kid");
+    top = context_for("F2");
+    target = context_for("F3");
+    CHECK(msg_mid && mid_folder && kid && top && target);
+    kid_fid = ((struct imap_folder *) kid)->fid;
+    mf = mid_folder;
+    next = fidx.next;
+    /* Rename in place. */
+    CHECK(ops()->properties.set_properties(mid_folder, name_row("Renomeada", NULL)) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(mf->mailbox, "F2/Renomeada") == 0 && subscribed(c, "F2/Renomeada"));
+    CHECK(folder_name(mid_folder) && strcmp(folder_name(mid_folder), "Renomeada") == 0);
+    CHECK(imap_folder_open_message(mid_folder, root, msg_mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(imap_folder_open_folder(mid_folder, root, kid_fid, &kid) == MAPISTORE_SUCCESS);
+    CHECK(fidx.next == next);
+    /* Move below another folder, with a new name. */
+    CHECK(ops()->folder.move_folder(mid_folder, target, root, "Movida") == MAPISTORE_SUCCESS);
+    CHECK(strcmp(mf->mailbox, "F3/Movida") == 0);
+    CHECK(imap_folder_open_message(mid_folder, root, msg_mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(imap_folder_open_folder(target, root, kid_fid, &kid) == MAPISTORE_SUCCESS);
+    CHECK(fidx.next == next);
+    /* A name clash is refused and changes nothing. */
+    CHECK(mailimap_create(imap, "F3/Taken") == MAILIMAP_NO_ERROR);
+    CHECK(ops()->properties.set_properties(mid_folder, name_row("Taken", NULL)) == MAPISTORE_ERR_DENIED);
+    CHECK(strcmp(mf->mailbox, "F3/Movida") == 0);
+    CHECK(imap_folder_open_message(mid_folder, root, msg_mid, false, &msg) == MAPISTORE_SUCCESS);
+    talloc_free(c);
+    return 0;
+}
+
+static int test_delete_folder_rules(void)
+{
+    struct imap_conn *c = wconn();
+    struct imap_mailbox *list;
+    void *full, *empty, *parent, *inbox, *sent;
+    mailimap *imap;
+    size_t n;
+    CHECK(c != NULL && ops());
+    imap = imap_conn_session(c);
+    CHECK(mailimap_create(imap, "F4") == MAILIMAP_NO_ERROR && mailimap_create(imap, "F4/Full") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap, "F4/Empty") == MAILIMAP_NO_ERROR);
+    if (append(imap, "F4/Full", w_msg1)) return 1;
+    full = context_for("F4/Full");
+    empty = context_for("F4/Empty");
+    parent = context_for("F4");
+    inbox = context_for("INBOX");
+    sent = context_for("Sent");
+    CHECK(full && empty && parent && inbox && sent);
+    CHECK(ops()->folder.delete(full) == MAPISTORE_ERR_EXIST);
+    CHECK(ops()->folder.delete(parent) == MAPISTORE_ERR_EXIST); /* has children */
+    CHECK(ops()->folder.delete(empty) == MAPISTORE_SUCCESS);
+    CHECK(imap_list(c, c, &list, &n) == MAPISTORE_SUCCESS && !find(list, n, "F4/Empty") && find(list, n, "F4/Full"));
+    CHECK(ops()->folder.delete(inbox) == MAPISTORE_ERR_DENIED);
+    CHECK(ops()->folder.delete(sent) == MAPISTORE_ERR_DENIED);
+    CHECK(ops()->properties.set_properties(sent, name_row("Enviados", NULL)) == MAPISTORE_ERR_DENIED);
+    CHECK(ops()->folder.move_folder(inbox, parent, root, NULL) == MAPISTORE_ERR_DENIED);
+    CHECK(ops()->properties.set_properties(full, name_row("a/b", NULL)) == MAPISTORE_ERR_INVALID_PARAMETER);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1392,6 +1530,7 @@ int main(int argc, char **argv)
     ictx.allocate_fmid = fi_allocate;
     ictx.update_fmid = fi_update_fmid;
     ictx.del_fmid = fi_del_fmid;
+    ictx.update_uri_prefix = fi_update_uri_prefix;
     fidx.next = 0x2000;
     imap_backend_set_cn_source(fake_cn); /* no openchangedb here */
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
@@ -1405,7 +1544,8 @@ int main(int argc, char **argv)
         test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_silent_server_times_out() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers() ||
         test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle() ||
         test_backend_move_binds_target_mid() || test_backend_hard_delete() || test_read_and_follow_up_flags() ||
-        test_refused_move_keeps_index()) {
+        test_refused_move_keeps_index() || test_create_folder_named_utf8() || test_rename_keeps_mids() ||
+        test_delete_folder_rules()) {
         return 1;
     }
     talloc_free(root);

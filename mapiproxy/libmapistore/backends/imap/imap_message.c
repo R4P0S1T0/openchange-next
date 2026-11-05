@@ -1216,6 +1216,8 @@ static enum mapistore_error set_properties(void *object, struct SRow *row)
 	switch (type) {
 	case IMAP_OBJ_MESSAGE:
 		return message_set_properties(object, row);
+	case IMAP_OBJ_FOLDER:
+		return imap_folder_set_properties(object, row);
 	default:
 		return MAPISTORE_ERR_NOT_IMPLEMENTED;
 	}

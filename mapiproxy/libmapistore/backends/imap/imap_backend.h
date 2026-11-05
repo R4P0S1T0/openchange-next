@@ -143,6 +143,9 @@ int imap_uri_parse(TALLOC_CTX *mem_ctx, const char *uri, char delimiter, char **
 /* The leaf of `mailbox`, modified UTF-7 decoded to UTF-8 (raw when malformed). */
 char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter);
 
+/* One mailbox level from a UTF-8 display name, modified UTF-7; NULL when IMAP cannot hold it as one level. */
+char *imap_mailbox_name(TALLOC_CTX *mem_ctx, const char *utf8, char delimiter);
+
 /* Replaces the settings (tests; NULL with !broken = not configured). */
 void imap_backend_set_state(const struct imap_settings *settings, bool broken);
 bool imap_backend_broken(void);
@@ -161,6 +164,7 @@ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct mapistore_c
 					 struct indexing_context *ictx, const char *uri, void **backend_object);
 enum mapistore_error imap_create_root_folder(const char *username, enum mapistore_context_role role, uint64_t fid,
 					     const char *name, TALLOC_CTX *mem_ctx, char **uri);
+enum mapistore_error imap_folder_set_properties(struct imap_folder *f, struct SRow *row);
 enum mapistore_error imap_folder_open_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, void **child);
 enum mapistore_error imap_folder_get_child_count(void *folder, enum mapistore_table_type type, uint32_t *count);
 enum mapistore_error imap_folder_open_table(void *folder, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
