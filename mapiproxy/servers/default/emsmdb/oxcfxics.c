@@ -3060,6 +3060,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageMove(TALLOC_CTX *mem_ctx,
 	struct emsmdbp_object			*source_folder_object;
 	char					*owner;
 	enum MAPISTATUS				retval;
+	enum mapistore_error			ret;
 	bool					mapistore;
 
 	OC_DEBUG(4, "exchange_emsmdb: [OXCFXICS] SyncImportMessageMove (0x78)\n");
@@ -3138,11 +3139,17 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageMove(TALLOC_CTX *mem_ctx,
 	predecessor_change_list->lpb = request->PredecessorChangeList;
 
 	if (mapistore) {
-		/* We invoke the backend method */
-		mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID,
-						    synccontext_object->parent_object->backend_object,
-						    source_folder_object->backend_object, mem_ctx, 1, &sourceMID, &destMID,
-						    &change_key, &predecessor_change_list, false);
+		/* We invoke the backend method; a refused move (IMAP said NO) leaves the message where it was. */
+		ret = mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID,
+							  synccontext_object->parent_object->backend_object,
+							  source_folder_object->backend_object, mem_ctx, 1, &sourceMID, &destMID,
+							  &change_key, &predecessor_change_list, false);
+		if (ret != MAPISTORE_SUCCESS) {
+			OC_DEBUG(3, "ImportMessageMove of mid 0x%"PRIx64" refused: %s\n", sourceMID, mapistore_errstr(ret));
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
+			talloc_free(source_folder_object);
+			goto end;
+		}
 	}
 	else {
 		OC_DEBUG(0, "mapistore support not implemented yet - shouldn't occur\n");
@@ -3391,7 +3398,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 	struct mapi_handles			*synccontext_rec;
 	struct emsmdbp_object			*synccontext_object, *folder_object, *message_object;
 	enum MAPISTATUS				retval;
-	enum mapistore_error			ret;
+	enum mapistore_error			ret, last_error = MAPISTORE_SUCCESS;
+	uint32_t				tried = 0, failed = 0;
 	struct MessageReadState			*read_states;
 	uint32_t				read_states_size;
 	struct Binary_r				*bin_data;
@@ -3493,9 +3501,15 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 				flag = CLEAR_READ_FLAG | CLEAR_NRN_PENDING;
 			}
 
+			tried++;
 			ret = emsmdbp_object_message_open(NULL, emsmdbp_ctx, folder_object, folder_object->object.folder->folderID, mid, true, &message_object, &msg);
 			if (ret == MAPISTORE_SUCCESS) {
-				mapistore_message_set_read_flag(emsmdbp_ctx->mstore_ctx, contextID, message_object->backend_object, flag);
+				ret = mapistore_message_set_read_flag(emsmdbp_ctx->mstore_ctx, contextID, message_object->backend_object, flag);
+				if (ret != MAPISTORE_SUCCESS) {
+					OC_DEBUG(3, "[oxcfxics]: read state of message 0x%"PRIx64" not written: %s\n", mid, mapistore_errstr(ret));
+					failed++;
+					last_error = ret;
+				}
 
 				/* Store the mid in the involved fmids
 				 * of the upload operations */
@@ -3506,7 +3520,13 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 				talloc_free(message_object);
 			} else {
 				OC_DEBUG(5, "[oxcfxics]: Failed to open message 0x%"PRIx64": %s\n", mid, mapistore_errstr(ret));
+				failed++;
+				last_error = ret;
 			}
+		}
+		/* One message gone or refused must not fail the batch; all of them failing is an error. */
+		if (tried && failed == tried) {
+			mapi_repl->error_code = mapistore_error_to_mapi(last_error);
 		}
 	}
 	else {
