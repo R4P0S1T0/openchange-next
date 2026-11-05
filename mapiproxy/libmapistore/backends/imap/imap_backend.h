@@ -107,6 +107,8 @@ struct imap_draft_attachment {
 /* A message Outlook is writing (drafts, Outbox): what imap_compose renders. */
 struct imap_draft {
 	char			*subject;	/* UTF-8 */
+	char			*subject_prefix, *normalized_subject;	/* replies send these, not PidTagSubject */
+	bool			subject_set;	/* PidTagSubject was given: it wins */
 	char			*body;		/* PidTagBody, UTF-8 */
 	uint8_t			*html;		/* PidTagHtml, in html_codepage */
 	uint32_t		html_len;

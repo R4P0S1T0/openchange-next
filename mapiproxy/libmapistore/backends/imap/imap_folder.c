@@ -1205,7 +1205,7 @@ static const enum MAPITAGS message_candidates[] = {
 	PidTagHasAttachments, PidTagMessageClass, PidTagInternetMessageId, PidTagImportance, PidTagSensitivity,
 	PidTagPriority, PidTagIconIndex, PidTagFlagStatus, PidTagMid, PidTagFolderId, PidTagParentFolderId,
 	PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList, PidTagBody, PidTagHtml, PidTagNativeBody,
-	PidTagInternetCodepage, PidTagTransportMessageHeaders,
+	PidTagInternetCodepage, PidTagTransportMessageHeaders, PidTagSenderEntryId, PidTagSentRepresentingEntryId,
 };
 
 static const enum MAPITAGS attachment_candidates[] = {

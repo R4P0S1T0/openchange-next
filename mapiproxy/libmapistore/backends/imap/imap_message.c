@@ -510,6 +510,59 @@ static char *dup_or_empty(TALLOC_CTX *mem_ctx, const char *s)
 }
 
 /* One property of a message row (plan Decision 5); NULL when the message has no such value. */
+/* A one-off EntryID (MS-OXCDATA 2.2.5.1): display name and SMTP address in UTF-16LE, so Outlook
+   replies to the address instead of looking the name up in the address book. */
+static struct Binary_r *one_off_entry_id(TALLOC_CTX *mem_ctx, const char *name, const char *address)
+{
+	static const uint8_t head[] = {
+		0x00, 0x00, 0x00, 0x00,						/* Flags */
+		0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19,			/* one-off provider UID */
+		0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
+		0x00, 0x00,							/* Version */
+		0x01, 0x90,							/* Unicode, no rich info */
+	};
+	const char	*parts[3] = { name && name[0] ? name : address, "SMTP", address };
+	struct Binary_r	*b;
+	iconv_t		cd;
+	size_t		i, cap;
+
+	if (!address || !address[0]) {
+		return NULL;
+	}
+	cap = sizeof head;
+	for (i = 0; i < 3; i++) {
+		cap += 2 * strlen(parts[i]) + 2;	/* UTF-16 never takes more units than UTF-8 bytes */
+	}
+	b = talloc_zero(mem_ctx, struct Binary_r);
+	if (!b || !(b->lpb = talloc_array(b, uint8_t, cap))) {
+		talloc_free(b);
+		return NULL;
+	}
+	memcpy(b->lpb, head, sizeof head);
+	b->cb = sizeof head;
+	cd = iconv_open("UTF-16LE", "UTF-8");
+	if (cd == (iconv_t) -1) {
+		talloc_free(b);
+		return NULL;
+	}
+	for (i = 0; i < 3; i++) {
+		char	*in = discard_const_p(char, parts[i]), *out = (char *) b->lpb + b->cb;
+		size_t	inleft = strlen(parts[i]), outleft = cap - b->cb - 2;
+
+		iconv(cd, NULL, NULL, NULL, NULL);
+		if (iconv(cd, &in, &inleft, &out, &outleft) == (size_t) -1) {
+			iconv_close(cd);
+			talloc_free(b);
+			return NULL;
+		}
+		b->cb = out - (char *) b->lpb;
+		b->lpb[b->cb++] = 0;
+		b->lpb[b->cb++] = 0;
+	}
+	iconv_close(cd);
+	return b;
+}
+
 _PUBLIC_ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, const struct imap_folder *f,
 			      enum MAPITAGS tag)
 {
@@ -582,6 +635,9 @@ _PUBLIC_ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row
 		return imap_long(mem_ctx, row->answered ? 0x105 : row->seen ? 0x100 : 0x101);
 	case PidTagFlagStatus:
 		return row->flagged ? imap_long(mem_ctx, 2) : NULL; /* followupFlagged */
+	case PidTagSenderEntryId:
+	case PidTagSentRepresentingEntryId:
+		return one_off_entry_id(mem_ctx, row->from_name, row->from_address);
 	case PidTagMid:
 		return imap_i8(mem_ctx, row->mid);
 	case PidTagFolderId:
@@ -1016,6 +1072,7 @@ _PUBLIC_ enum mapistore_error imap_message_properties(void *object, TALLOC_CTX *
 /* Recipient columns: SMTP recipients only, so emsmdb never searches the directory by name. */
 static const enum MAPITAGS recipient_columns[] = {
 	PidTagDisplayName, PidTagEmailAddress, PidTagAddressType, PidTagSmtpAddress, PidTagRecipientDisplayName,
+	PidTagEntryId,
 };
 #define N_RECIPIENT_COLUMNS (sizeof recipient_columns / sizeof recipient_columns[0])
 
@@ -1056,6 +1113,7 @@ _PUBLIC_ enum mapistore_error imap_message_get_data(void *object, TALLOC_CTX *me
 		d[2] = talloc_strdup(d, "SMTP");
 		d[3] = talloc_strdup(d, r->address);
 		d[4] = talloc_strdup(d, r->name);
+		d[5] = one_off_entry_id(d, r->name, r->address);
 		msg->recipients[i].type = r->type;
 		msg->recipients[i].username = NULL;
 		msg->recipients[i].data = d;
@@ -1282,8 +1340,9 @@ static enum mapistore_error draft_set_properties(struct imap_message *m, struct 
 		char			**field = NULL;
 
 		switch (tag) {
-		case PidTagSubject:			field = &d->subject; break;
-		case PidTagNormalizedSubject:		field = d->subject ? NULL : &d->subject; break;
+		case PidTagSubject:			field = &d->subject; d->subject_set = true; break;
+		case PidTagSubjectPrefix:		field = &d->subject_prefix; break;
+		case PidTagNormalizedSubject:		field = &d->normalized_subject; break;
 		case PidTagBody:			field = &d->body; break;
 		case PidTagInternetMessageId:		field = &d->message_id; break;
 		case PidTagInReplyToId:			field = &d->in_reply_to; break;
@@ -1308,6 +1367,13 @@ static enum mapistore_error draft_set_properties(struct imap_message *m, struct 
 			if (!*field) {
 				return MAPISTORE_ERR_NO_MEMORY;
 			}
+		}
+	}
+	if (!d->subject_set && (d->subject_prefix || d->normalized_subject)) {
+		d->subject = talloc_asprintf(d, "%s%s", d->subject_prefix ? d->subject_prefix : "",
+					     d->normalized_subject ? d->normalized_subject : "");
+		if (!d->subject) {
+			return MAPISTORE_ERR_NO_MEMORY;
 		}
 	}
 	d->dirty = true;

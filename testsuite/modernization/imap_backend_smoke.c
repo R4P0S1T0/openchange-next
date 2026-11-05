@@ -2052,6 +2052,55 @@ static int test_change_numbers_from_id_counter(void)
     return 0;
 }
 
+/* Reply and reply-all need the sender and each recipient as a one-off EntryID (name + SMTP), or
+   Outlook looks the display name up in the address book and asks "Check Names". */
+static int check_one_off(const struct Binary_r *bin, const char *name, const char *address)
+{
+    struct OneOffEntryId *e;
+    CHECK(bin && bin->cb > 24);
+    CHECK((e = get_OneOffEntryId(root, (struct Binary_r *) bin)) != NULL);
+    CHECK(e->OneOffEntryIdFlags & 0x8000);
+    CHECK(strcmp(e->DisplayName.lpszW, name) == 0 && strcmp(e->AddressType.lpszW, "SMTP") == 0);
+    CHECK(strcmp(e->EmailAddress.lpszW, address) == 0);
+    return 0;
+}
+
+static int test_one_off_entry_ids(void)
+{
+    void *msg;
+    struct mapistore_property_data d[6], e[2];
+    enum MAPITAGS tags[] = { PidTagSenderEntryId, PidTagSentRepresentingEntryId };
+    struct mapistore_message *m;
+    const char *v;
+    struct SPropTagArray *avail;
+    if (open_message("INBOX", 0, &msg, d)) return 1;
+    CHECK(imap_properties_get(msg, root, 2, tags, e) == MAPISTORE_SUCCESS && !e[0].error && !e[1].error);
+    if (check_one_off(e[0].data, "Ana", "ana@example.invalid") || check_one_off(e[1].data, "Ana", "ana@example.invalid")) return 1;
+    CHECK(imap_message_get_data(msg, root, &m) == MAPISTORE_SUCCESS);
+    if (recipient(m, 0, "PidTagEntryId", PidTagEntryId, &v)) return 1;
+    if (check_one_off((const struct Binary_r *) v, "Alice", "alice@example.invalid")) return 1;
+    /* ICS full sync sends what the message offers. */
+    CHECK(imap_properties_available(msg, root, &avail) == MAPISTORE_SUCCESS);
+    CHECK(has_tag(avail, PidTagSenderEntryId) && has_tag(avail, PidTagSentRepresentingEntryId));
+    return 0;
+}
+
+/* A reply carries its subject as prefix + normalized subject, without PidTagSubject. */
+static int test_reply_subject_prefix(void)
+{
+    void *drafts = context_for("Drafts"), *msg = NULL;
+    enum MAPITAGS tag = PidTagSubject;
+    struct mapistore_property_data d;
+    CHECK(drafts && ops());
+    CHECK(ops()->folder.create_message(drafts, root, 0x9301, 0, &msg) == MAPISTORE_SUCCESS);
+    if (set_string(msg, PidTagSubjectPrefix, "RES: ") || set_string(msg, PidTagNormalizedSubject, "Teste 5")) return 1;
+    CHECK(imap_properties_get(msg, root, 1, &tag, &d) == MAPISTORE_SUCCESS && !d.error && strcmp(d.data, "RES: Teste 5") == 0);
+    /* An explicit subject still wins. */
+    if (set_string(msg, PidTagSubject, "Outro")) return 1;
+    CHECK(imap_properties_get(msg, root, 1, &tag, &d) == MAPISTORE_SUCCESS && strcmp(d.data, "Outro") == 0);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2094,7 +2143,8 @@ int main(int argc, char **argv)
         test_fai_create_denied() || test_outbox_provisioned() || test_submit_sends_and_files() ||
         test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused() ||
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
-        test_change_numbers_from_id_counter()) {
+        test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
+        test_reply_subject_prefix()) {
         return 1;
     }
     talloc_free(root);

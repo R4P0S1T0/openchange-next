@@ -443,7 +443,16 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopTransportSend(TALLOC_CTX *mem_ctx,
 		if (retval != MAPI_E_SUCCESS) {
 			OC_DEBUG(0, "Failing to create sharing metadata for a sharing object: %s\n", mapi_get_errstr(retval));
 		}
-		mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object), object->backend_object, 0);
+		{
+			enum mapistore_error ret = mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object),
+									    object->backend_object, 0);
+
+			/* As RopSubmitMessage: a refused send is reported, and the message stays where it was. */
+			if (ret != MAPISTORE_SUCCESS) {
+				mapi_repl->error_code = mapistore_error_to_mapi(ret);
+				break;
+			}
+		}
 
 		oxomsg_mapistore_handle_message_relocation(emsmdbp_ctx, object);
 		/* mapistore_indexing_record_add_mid(emsmdbp_ctx->mstore_ctx, contextID, messageID); */
