@@ -1310,6 +1310,8 @@ static struct imap_draft *ensure_draft(struct imap_message *m)
 	d->attachments = m->attachments;
 	d->attachment_count = m->attachment_count;
 	m->draft = d;
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" loaded from UID %u with %u attachment(s)\n",
+		 m->row.mid, m->row.uid, d->attachment_count);
 	return d;
 }
 
@@ -1553,6 +1555,7 @@ static enum mapistore_error create_attachment(void *message, TALLOC_CTX *mem_ctx
 	h->type = IMAP_OBJ_DRAFT_ATTACHMENT;
 	h->message = m;
 	h->number = d->attachment_count++;
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" attachment %u created\n", m->row.mid, h->number);
 	d->dirty = true;
 	mirror(m);
 	*attachment = h;
@@ -1606,8 +1609,27 @@ static enum mapistore_error set_properties(void *object, struct SRow *row)
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	switch (type) {
-	case IMAP_OBJ_MESSAGE:
+	case IMAP_OBJ_MESSAGE: {
+		struct imap_message	*m = object;
+		uint32_t		i;
+
+		/* ICS uploads carry Outlook's change key and PCL: kept for the change it is making. */
+		for (i = 0; i < row->cValues; i++) {
+			const struct SPropValue *p = &row->lpProps[i];
+
+			if (p->ulPropTag == PidTagChangeKey || p->ulPropTag == PidTagPredecessorChangeList) {
+				struct Binary_r **dst = p->ulPropTag == PidTagChangeKey ? &m->client_ck : &m->client_pcl;
+
+				talloc_free(*dst);
+				*dst = talloc_zero(m, struct Binary_r);
+				if (!*dst || (p->value.bin.cb && !((*dst)->lpb = talloc_memdup(*dst, p->value.bin.lpb, p->value.bin.cb)))) {
+					return MAPISTORE_ERR_NO_MEMORY;
+				}
+				(*dst)->cb = p->value.bin.cb;
+			}
+		}
 		return message_set_properties(object, row);
+	}
 	case IMAP_OBJ_FOLDER:
 		return imap_folder_set_properties(object, row);
 	case IMAP_OBJ_DRAFT_ATTACHMENT:
@@ -1615,6 +1637,23 @@ static enum mapistore_error set_properties(void *object, struct SRow *row)
 	default:
 		return MAPISTORE_ERR_NOT_IMPLEMENTED;
 	}
+}
+
+/* After a write Outlook made, its change key/PCL stand for the message's new state. */
+static void record_client_change(struct imap_message *m)
+{
+	char *uri;
+
+	if (!m->client_ck || !m->client_pcl) {
+		return;
+	}
+	uri = imap_message_uri(m, m->folder, m->row.uidvalidity, m->row.uid);
+	if (!uri || imap_change_set_client(m->folder->ctx, uri, m->client_ck, m->client_pcl) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: change key of mid 0x%"PRIx64" not kept\n", m->row.mid);
+	}
+	talloc_free(uri);
+	TALLOC_FREE(m->client_ck);
+	TALLOC_FREE(m->client_pcl);
 }
 
 /* A new version of the draft in IMAP, then the old one expunged; the mid follows the new UID. */
@@ -1660,10 +1699,13 @@ static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn 
 	if (ret != MAPISTORE_SUCCESS) {
 		OC_DEBUG(1, "IMAP backend: index update of draft mid 0x%"PRIx64" failed: %s\n", m->row.mid, mapistore_errstr(ret));
 	}
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" saved as UID %u (was %u) with %u attachment(s)\n",
+		 m->row.mid, uid, old_uid, d->attachment_count);
 	m->row.uid = uid;
 	m->row.uidvalidity = validity;
 	m->row.message_id = d->message_id;
 	d->dirty = false;
+	record_client_change(m);
 	return MAPISTORE_SUCCESS;
 }
 
@@ -1680,6 +1722,7 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 		return conn ? save_draft(m, conn) : MAPISTORE_ERR_CONN_REFUSED;
 	}
 	if (!m->flags_add && !m->flags_remove) {
+		record_client_change(m);
 		return MAPISTORE_SUCCESS;
 	}
 	conn = imap_context_conn(m->folder->ctx);
@@ -1691,6 +1734,7 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 	}
 	row_apply_flags(&m->row, m->flags_add, m->flags_remove);
 	m->flags_add = m->flags_remove = 0;
+	record_client_change(m);
 	return MAPISTORE_SUCCESS;
 }
 

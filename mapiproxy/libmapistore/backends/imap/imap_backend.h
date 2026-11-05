@@ -95,6 +95,7 @@ struct imap_message {
 	uint32_t		attachment_count;
 	uint32_t		flags_add, flags_remove;	/* IMAP_FLAG_*, written by save */
 	struct imap_draft	*draft;		/* set once Outlook writes to an unsent message */
+	struct Binary_r		*client_ck, *client_pcl;	/* Outlook's change key/PCL of its upload */
 };
 
 /* An attachment of a draft by number: the draft's array moves as attachments are added. */
@@ -222,6 +223,9 @@ typedef enum mapistore_error (*imap_cn_source)(struct imap_context *ctx, uint64_
 void imap_backend_set_cn_source(imap_cn_source source);
 enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state, uint64_t *cn,
 					time_t *when);
+/* Records that Outlook uploaded the object at `uri` with this change key and PCL (see imap_folder.c). */
+enum mapistore_error imap_change_set_client(struct imap_context *ctx, const char *uri, const struct Binary_r *ck,
+					    const struct Binary_r *pcl);
 /* PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList or PidTagLastModificationTime of a change. */
 void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when, enum MAPITAGS tag);
 

@@ -1687,6 +1687,7 @@ static int test_draft_save_and_edit(void)
     CHECK(count_of(c, "Drafts") == before + 1);
     CHECK(subject_of(drafts, 0x9101) && strcmp(subject_of(drafts, 0x9101), "v2") == 0);
     CHECK(imap_folder_open_message(drafts, root, 0x9101, false, &again) == MAPISTORE_SUCCESS);
+    CHECK(((struct imap_message *) again)->attachment_count == 1);   /* an edit keeps one copy */
     CHECK(imap_message_open_attachment(again, root, 0, &att) == MAPISTORE_SUCCESS);
     {
         enum MAPITAGS tag = PidTagAttachLongFilename;
@@ -2148,6 +2149,40 @@ static int test_created_sent_item_not_draft(void)
     return 0;
 }
 
+/* Outlook's own upload keeps Outlook's change key, or its next edit opens a conflict and re-sends
+   the whole message (attachments doubled). A later server-side change gets the server's key. */
+static int test_client_change_key_kept(void)
+{
+    struct imap_conn *c = wconn();
+    void *drafts, *msg, *again;
+    static uint8_t ck[22] = { 0xAA, 0xBB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0x31, 0x32, 0x33, 0x34 };
+    static uint8_t pcl[23] = { 22, 0xAA, 0xBB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0x31, 0x32, 0x33, 0x34 };
+    enum MAPITAGS tags[] = { PidTagChangeKey, PidTagPredecessorChangeList };
+    struct mapistore_property_data v[2];
+    struct SPropValue p[3];
+    struct SRow row = { .cValues = 3, .lpProps = p };
+    CHECK(c && ops());
+    drafts = context_for("Drafts");
+    CHECK(drafts && ops()->folder.create_message(drafts, root, 0x9501, 0, &msg) == MAPISTORE_SUCCESS);
+    memset(p, 0, sizeof p);
+    p[0].ulPropTag = PidTagSubject; p[0].value.lpszW = "Chave do Outlook";
+    p[1].ulPropTag = PidTagChangeKey; p[1].value.bin.cb = sizeof ck; p[1].value.bin.lpb = ck;
+    p[2].ulPropTag = PidTagPredecessorChangeList; p[2].value.bin.cb = sizeof pcl; p[2].value.bin.lpb = pcl;
+    CHECK(ops()->properties.set_properties(msg, &row) == MAPISTORE_SUCCESS);
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(imap_folder_open_message(drafts, root, 0x9501, false, &again) == MAPISTORE_SUCCESS);
+    CHECK(imap_properties_get(again, root, 2, tags, v) == MAPISTORE_SUCCESS && !v[0].error && !v[1].error);
+    CHECK(((struct Binary_r *) v[0].data)->cb == sizeof ck && memcmp(((struct Binary_r *) v[0].data)->lpb, ck, sizeof ck) == 0);
+    CHECK(((struct Binary_r *) v[1].data)->cb == sizeof pcl && memcmp(((struct Binary_r *) v[1].data)->lpb, pcl, sizeof pcl) == 0);
+    /* Changed on the server (webmail flags it): the server's own key again. */
+    CHECK(imap_uid_set_flags(c, "Drafts", ((struct imap_message *) again)->row.uid, IMAP_FLAG_FLAGGED, 0) == 0);
+    CHECK(imap_folder_open_message(drafts, root, 0x9501, false, &again) == MAPISTORE_SUCCESS);
+    CHECK(imap_properties_get(again, root, 1, tags, v) == MAPISTORE_SUCCESS && !v[0].error);
+    CHECK(memcmp(((struct Binary_r *) v[0].data)->lpb, ck, 2) != 0);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2191,7 +2226,8 @@ int main(int argc, char **argv)
         test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused() ||
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
-        test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft()) {
+        test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
+        test_client_change_key_kept()) {
         return 1;
     }
     talloc_free(root);
