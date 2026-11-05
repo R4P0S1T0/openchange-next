@@ -118,6 +118,7 @@ struct imap_draft {
 	char			*references;	/* PidTagInternetReferences */
 	char			*from_name;	/* PidTagSentRepresentingName or PidTagSenderName */
 	bool			delete_after_submit;
+	bool			sent;		/* PidTagMessageFlags without MSGFLAG_UNSENT: stored as mail, not a draft */
 	uint32_t		unresolved;	/* recipients without an SMTP address: submit refuses */
 	struct imap_recipient	*recipients;
 	uint32_t		recipient_count;

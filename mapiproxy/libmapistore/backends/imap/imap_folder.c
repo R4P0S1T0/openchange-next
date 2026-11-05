@@ -1341,6 +1341,19 @@ static enum mapistore_error move_copy_messages(void *target_folder, void *source
 		talloc_free(tmp);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
+	/* Already in the target (the server filed a sent message in Sent before Outlook moved its own
+	   Outbox item there): the move is done; Outlook's target mid takes the message over. */
+	if (count == 1 && !want_copy && imap_mid_uid(dst, tmp, src_mids[0], &validity, dest) == MAPISTORE_SUCCESS) {
+		char *uri = imap_message_uri(tmp, dst, validity, dest[0]);
+
+		ictx = dst->ctx->ictx;
+		if (uri && t_mids && t_mids[0] && t_mids[0] != src_mids[0] &&
+		    ictx->del_fmid(ictx, dst->ctx->username, src_mids[0], MAPISTORE_PERMANENT_DELETE) == MAPISTORE_SUCCESS) {
+			ictx->add_fmid(ictx, dst->ctx->username, t_mids[0], uri);
+		}
+		talloc_free(tmp);
+		return MAPISTORE_SUCCESS;
+	}
 	ret = mids_to_uids(src, conn, tmp, count, src_mids, &uids);
 	if (ret != MAPISTORE_SUCCESS) {
 		talloc_free(tmp);

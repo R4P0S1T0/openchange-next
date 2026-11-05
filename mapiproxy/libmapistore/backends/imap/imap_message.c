@@ -1359,6 +1359,7 @@ static enum mapistore_error draft_set_properties(struct imap_message *m, struct 
 			d->html_len = p->value.bin.cb;
 			break;
 		case PidTagInternetCodepage:		d->html_codepage = p->value.l; break;
+		case PidTagMessageFlags:		d->sent = !(p->value.l & MSGFLAG_UNSENT); break;
 		case PidTagDeleteAfterSubmit:		d->delete_after_submit = p->value.b; break;
 		default:				break;
 		}
@@ -1640,7 +1641,8 @@ static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn 
 		id += strlen("\r\nMessage-ID: ");
 		d->message_id = talloc_strndup(d, id, strcspn(id, "\r"));
 	}
-	ret = imap_append(conn, f->mailbox, raw, len, IMAP_FLAG_DRAFT | IMAP_FLAG_SEEN, &validity, &uid);
+	ret = imap_append(conn, f->mailbox, raw, len, d->sent ? IMAP_FLAG_SEEN : IMAP_FLAG_DRAFT | IMAP_FLAG_SEEN,
+			  &validity, &uid);
 	talloc_free(raw);
 	if (ret) {
 		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;

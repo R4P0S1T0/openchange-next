@@ -2101,6 +2101,53 @@ static int test_reply_subject_prefix(void)
     return 0;
 }
 
+/* After a send, Outlook moves its Outbox item to Sent Items; the server already filed it there.
+   The move succeeds onto the filed copy, so Outlook does not upload a second one. */
+static int test_move_already_filed(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg, *outbox, *sent, *again;
+    uint64_t target = 0x9402;
+    uint32_t sent_before;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9401, "Ja enviada");
+    CHECK(msg);
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_SUCCESS);
+    imap_backend_set_state(&tunnel, false);
+    sent_before = count_of(c, "Sent");
+    outbox = context_for("Outbox");
+    sent = context_for("Sent");
+    CHECK(outbox && sent);
+    uint64_t src = 0x9401;
+    CHECK(ops()->folder.move_copy_messages(sent, outbox, root, 1, &src, &target, NULL, NULL, 0) == MAPISTORE_SUCCESS);
+    CHECK(count_of(c, "Sent") == sent_before);
+    CHECK(imap_folder_open_message(sent, root, target, false, &again) == MAPISTORE_SUCCESS);
+    CHECK(subject_of(sent, target) && strcmp(subject_of(sent, target), "Ja enviada") == 0);
+    talloc_free(c);
+    return 0;
+}
+
+/* A message created already sent (a sent item, one dragged from a PST) is not stored as a draft. */
+static int test_created_sent_item_not_draft(void)
+{
+    struct imap_conn *c = wconn();
+    void *folder, *msg;
+    struct imap_message *m;
+    char *flags;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W9") == MAILIMAP_NO_ERROR);
+    folder = context_for("W9");
+    CHECK(folder && ops()->folder.create_message(folder, root, 0x9403, 0, &msg) == MAPISTORE_SUCCESS);
+    if (set_string(msg, PidTagSubject, "Item enviado") || set_long(msg, PidTagMessageFlags, MSGFLAG_READ) ||
+        add_recipient(msg, MAPI_TO, "Ana", "ana@example.invalid")) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    m = msg;
+    CHECK(uid_info(c, "W9", m->row.uid, &flags, NULL) && has_flag(flags, "\\Seen") && !has_flag(flags, "\\Draft"));
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2144,7 +2191,7 @@ int main(int argc, char **argv)
         test_submit_refusal_keeps_outbox() || test_submit_delete_after() || test_submit_size_refused() ||
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
-        test_reply_subject_prefix()) {
+        test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft()) {
         return 1;
     }
     talloc_free(root);
