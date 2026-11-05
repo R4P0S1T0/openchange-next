@@ -321,6 +321,26 @@ static enum mapistore_error fi_allocate(struct indexing_context *c, const char *
     *fmid = fidx.next++;
     return MAPISTORE_SUCCESS;
 }
+static enum mapistore_error fi_update_fmid(struct indexing_context *c, const char *u, uint64_t fmid, const char *uri)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.fmid[i] == fmid) { fidx.uri[i] = talloc_strdup(root, uri); return MAPISTORE_SUCCESS; }
+    }
+    return MAPISTORE_ERR_NOT_FOUND;
+}
+static enum mapistore_error fi_del_fmid(struct indexing_context *c, const char *u, uint64_t fmid, uint8_t flags)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.fmid[i] == fmid) {
+            fidx.fmid[i] = fidx.fmid[fidx.n - 1];
+            fidx.uri[i] = fidx.uri[--fidx.n];
+            return MAPISTORE_SUCCESS;
+        }
+    }
+    return MAPISTORE_SUCCESS;
+}
 
 static struct mapistore_connection_info conn_info = { .username = "alice@example.invalid",
     .replica_guid = { .time_low = 0x11223344, .time_mid = 0x5566, .time_hi_and_version = 0x7788 } };
@@ -1180,6 +1200,176 @@ static int test_mailbox_lifecycle(void)
     return 0;
 }
 
+/* M4 Task 3: message writes through the backend operations. */
+
+static struct mapistore_backend *ops(void)
+{
+    static struct mapistore_backend b;
+    static bool filled;
+    if (!filled) {
+        memset(&b, 0, sizeof b);
+        if (mapistore_backend_init_defaults(&b) != MAPISTORE_SUCCESS) return NULL;
+        imap_backend_fill(&b);
+        imap_message_fill(&b);
+        filled = true;
+    }
+    return &b;
+}
+
+/* The mid of the message with this subject in `mailbox`'s message table (0 if none). */
+static uint64_t mid_by_subject(const char *mailbox, const char *subject, void **folderp)
+{
+    void *table;
+    struct mapistore_property_data *r;
+    uint32_t count, i;
+    *folderp = context_for(mailbox);
+    if (!*folderp || imap_folder_open_table(*folderp, root, MAPISTORE_MESSAGE_TABLE, 9, &table, &count) != MAPISTORE_SUCCESS ||
+        imap_table_set_columns(table, N_MESSAGE_COLUMNS, message_columns) != MAPISTORE_SUCCESS) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (imap_table_get_row(table, root, MAPISTORE_PREFILTERED_QUERY, i, &r) == MAPISTORE_SUCCESS &&
+            !r[0].error && !r[10].error && strcmp(r[0].data, subject) == 0) {
+            return *(uint64_t *) r[10].data;
+        }
+    }
+    return 0;
+}
+
+static const char *subject_of(void *folder, uint64_t mid)
+{
+    void *msg;
+    enum MAPITAGS tag = PidTagSubject;
+    struct mapistore_property_data d;
+    if (imap_folder_open_message(folder, root, mid, false, &msg) != MAPISTORE_SUCCESS ||
+        imap_properties_get(msg, root, 1, &tag, &d) != MAPISTORE_SUCCESS || d.error) return NULL;
+    return d.data;
+}
+
+static int test_backend_move_binds_target_mid(void)
+{
+    struct imap_conn *c = wconn();
+    void *projects, *archive, *msg;
+    uint64_t mid, copy_mid = 0x9002, move_mid = 0x9001;
+    uint32_t before;
+    CHECK(c != NULL && ops());
+    mid = mid_by_subject("Projects", "With attachment", &projects);
+    archive = context_for("Archive");
+    CHECK(mid && projects && archive);
+    before = count_of(c, "Archive");
+    /* Copy: both open. */
+    CHECK(ops()->folder.move_copy_messages(archive, projects, root, 1, &mid, &copy_mid, NULL, NULL, 1) == MAPISTORE_SUCCESS);
+    CHECK(subject_of(archive, copy_mid) && strcmp(subject_of(archive, copy_mid), "With attachment") == 0);
+    CHECK(subject_of(projects, mid) != NULL);
+    /* Move: the target mid opens in Archive, the old one is gone. */
+    CHECK(ops()->folder.move_copy_messages(archive, projects, root, 1, &mid, &move_mid, NULL, NULL, 0) == MAPISTORE_SUCCESS);
+    CHECK(subject_of(archive, move_mid) && strcmp(subject_of(archive, move_mid), "With attachment") == 0);
+    CHECK(imap_folder_open_message(projects, root, mid, false, &msg) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(count_of(c, "Archive") == before + 2);
+    /* A folder of another backend (not an IMAP folder object) is refused. */
+    {
+        uint32_t not_a_folder = 0;
+        CHECK(ops()->folder.move_copy_messages(&not_a_folder, archive, root, 1, &move_mid, &copy_mid, NULL, NULL, 0) == MAPISTORE_ERR_DENIED);
+    }
+    talloc_free(c);
+    return 0;
+}
+
+static int test_backend_hard_delete(void)
+{
+    struct imap_conn *c = wconn();
+    void *folder, *msg;
+    uint64_t mid;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W4") == MAILIMAP_NO_ERROR);
+    if (append(imap_conn_session(c), "W4", w_msg1) || append(imap_conn_session(c), "W4", w_msg2)) return 1;
+    mid = mid_by_subject("W4", "one", &folder);
+    CHECK(mid && folder);
+    CHECK(ops()->folder.delete_message(folder, mid, MAPISTORE_SOFT_DELETE) == MAPISTORE_SUCCESS);
+    CHECK(imap_folder_open_message(folder, root, mid, false, &msg) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(count_of(c, "W4") == 1);
+    {
+        char *uri; bool soft;
+        CHECK(fi_get_uri(&ictx, "alice@example.invalid", root, mid, &uri, &soft) == MAPISTORE_ERR_NOT_FOUND);
+    }
+    talloc_free(c);
+    return 0;
+}
+
+static int set_long(void *object, uint32_t tag, uint32_t value)
+{
+    struct SPropValue v;
+    struct SRow row = { .cValues = 1, .lpProps = &v };
+    memset(&v, 0, sizeof v);
+    v.ulPropTag = tag;
+    v.value.l = value;
+    CHECK(ops()->properties.set_properties(object, &row) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static int test_read_and_follow_up_flags(void)
+{
+    struct imap_conn *c = wconn();
+    void *folder, *msg;
+    uint64_t mid;
+    uint32_t uid = 1;
+    char *flags;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W5") == MAILIMAP_NO_ERROR);
+    CHECK(imap_append(c, "W5", w_msg1, strlen(w_msg1), IMAP_FLAG_SEEN, NULL, &uid) == 0);
+    mid = mid_by_subject("W5", "one", &folder);
+    CHECK(mid && imap_folder_open_message(folder, root, mid, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(ops()->message.set_read_flag(msg, CLEAR_READ_FLAG) == MAPISTORE_SUCCESS);
+    CHECK(uid_info(c, "W5", uid, &flags, NULL) && !has_flag(flags, "\\Seen"));
+    CHECK(ops()->message.set_read_flag(msg, 0) == MAPISTORE_SUCCESS);
+    CHECK(uid_info(c, "W5", uid, &flags, NULL) && has_flag(flags, "\\Seen"));
+    /* Follow-up and reply on received mail: flags only; the subject edit is dropped. */
+    if (set_long(msg, PidTagFlagStatus, 2) || set_long(msg, PidTagLastVerbExecuted, 102)) return 1;
+    {
+        struct SPropValue v;
+        struct SRow row = { .cValues = 1, .lpProps = &v };
+        memset(&v, 0, sizeof v);
+        v.ulPropTag = PidTagSubject;
+        v.value.lpszW = "changed";
+        CHECK(ops()->properties.set_properties(msg, &row) == MAPISTORE_SUCCESS);
+    }
+    CHECK(uid_info(c, "W5", uid, &flags, NULL) && !has_flag(flags, "\\Flagged")); /* nothing before save */
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(uid_info(c, "W5", uid, &flags, NULL) && has_flag(flags, "\\Flagged") && has_flag(flags, "\\Answered"));
+    CHECK(has_flag(flags, "\\Seen") && count_of(c, "W5") == 1);
+    CHECK(subject_of(folder, mid) && strcmp(subject_of(folder, mid), "one") == 0);
+    if (set_long(msg, PidTagFlagStatus, 0) || set_long(msg, PidTagLastVerbExecuted, 104)) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(uid_info(c, "W5", uid, &flags, NULL) && !has_flag(flags, "\\Flagged") && has_flag(flags, "$Forwarded"));
+    talloc_free(c);
+    return 0;
+}
+
+static int test_refused_move_keeps_index(void)
+{
+    struct imap_conn *c = wconn();
+    void *src, *dst;
+    uint64_t mid, target = 0x9003;
+    char *before, *after;
+    bool soft;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W6") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap_conn_session(c), "W7") == MAILIMAP_NO_ERROR);
+    if (append(imap_conn_session(c), "W6", w_msg1)) return 1;
+    mid = mid_by_subject("W6", "one", &src);
+    dst = context_for("W7");
+    CHECK(mid && src && dst);
+    CHECK(fi_get_uri(&ictx, "alice@example.invalid", root, mid, &before, &soft) == MAPISTORE_SUCCESS);
+    CHECK(mailimap_delete(imap_conn_session(c), "W7") == MAILIMAP_NO_ERROR); /* behind the backend's back */
+    CHECK(ops()->folder.move_copy_messages(dst, src, root, 1, &mid, &target, NULL, NULL, 0) != MAPISTORE_SUCCESS);
+    CHECK(fi_get_uri(&ictx, "alice@example.invalid", root, mid, &after, &soft) == MAPISTORE_SUCCESS);
+    CHECK(strcmp(before, after) == 0);
+    CHECK(fi_get_uri(&ictx, "alice@example.invalid", root, target, &after, &soft) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(count_of(c, "W6") == 1);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -1200,6 +1390,8 @@ int main(int argc, char **argv)
     ictx.get_uri = fi_get_uri;
     ictx.add_fmid = fi_add_fmid;
     ictx.allocate_fmid = fi_allocate;
+    ictx.update_fmid = fi_update_fmid;
+    ictx.del_fmid = fi_del_fmid;
     fidx.next = 0x2000;
     imap_backend_set_cn_source(fake_cn); /* no openchangedb here */
     if (setup_fixture(argv[1]) || populate() || test_list_fixture() || test_examine_counts() ||
@@ -1211,7 +1403,9 @@ int main(int argc, char **argv)
         test_open_html_message_and_attachment() || test_malformed_mime_opens() || test_expunged_mid_not_found() ||
         test_oversize_message_notice() || test_broken_config_is_an_error() || test_large_body_complete() ||
         test_reconnect_after_drop() || test_sort_and_restrict() || test_mistyped_restriction_ignored() || test_silent_server_times_out() || test_change_numbers() || test_defaults_cover_every_operation() || test_available_properties() || test_root_folder_takes_core_fid() || test_backend_registers() ||
-        test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle()) {
+        test_uid_move_copy() || test_expunge_only_given_uid() || test_append_and_flags() || test_mailbox_lifecycle() ||
+        test_backend_move_binds_target_mid() || test_backend_hard_delete() || test_read_and_follow_up_flags() ||
+        test_refused_move_keeps_index()) {
         return 1;
     }
     talloc_free(root);

@@ -868,6 +868,34 @@ static char *header_block(TALLOC_CTX *mem_ctx, const char *raw, size_t len)
 	return imap_utf8_clean(mem_ctx, raw, end ? (size_t) (end - raw) : len);
 }
 
+/* The UIDVALIDITY and UID `mid` stands for in folder `f`, from the index alone (no IMAP traffic). */
+_PUBLIC_ enum mapistore_error imap_mid_uid(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint64_t mid,
+					   uint32_t *uidvalidity, uint32_t *uid)
+{
+	char		*uri, *folder_uri, *raw, *end;
+	bool		soft_deleted = false;
+	unsigned long	v, u;
+
+	folder_uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
+	if (!folder_uri || f->ctx->ictx->get_uri(f->ctx->ictx, f->ctx->username, mem_ctx, mid, &uri, &soft_deleted)
+	    != MAPISTORE_SUCCESS || soft_deleted || strncmp(uri, folder_uri, strlen(folder_uri)) != 0) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = uri + strlen(folder_uri);
+	v = strtoul(raw, &end, 10);
+	if (end == raw || *end != '_') {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = end + 1;
+	u = strtoul(raw, &end, 10);
+	if (end == raw || *end || u == 0 || u > UINT32_MAX || v > UINT32_MAX) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	*uidvalidity = v;
+	*uid = u;
+	return MAPISTORE_SUCCESS;
+}
+
 /* Opens `mid` of folder `f`: only an ID of this folder, of the mailbox's current UIDVALIDITY,
    of a message that still exists, opens. */
 _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
@@ -881,9 +909,8 @@ _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX 
 	struct mailimap_set		*set;
 	struct imap_status		st;
 	struct mailmime			*mime = NULL;
-	char				*uri, *folder_uri, *raw, *end;
-	bool				soft_deleted = false;
-	unsigned long			uidvalidity, uid;
+	char				*raw;
+	uint32_t			uidvalidity, uid;
 	uint32_t			count;
 	size_t				len = 0, idx = 0;
 	enum mapistore_error		ret;
@@ -892,19 +919,7 @@ _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX 
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	*message = NULL;
-	folder_uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
-	if (!folder_uri || f->ctx->ictx->get_uri(f->ctx->ictx, f->ctx->username, mem_ctx, mid, &uri, &soft_deleted)
-	    != MAPISTORE_SUCCESS || soft_deleted || strncmp(uri, folder_uri, strlen(folder_uri)) != 0) {
-		return MAPISTORE_ERR_NOT_FOUND;
-	}
-	raw = uri + strlen(folder_uri);
-	uidvalidity = strtoul(raw, &end, 10);
-	if (end == raw || *end != '_') {
-		return MAPISTORE_ERR_NOT_FOUND;
-	}
-	raw = end + 1;
-	uid = strtoul(raw, &end, 10);
-	if (end == raw || *end || uid == 0 || uid > UINT32_MAX || uidvalidity > UINT32_MAX) {
+	if (imap_mid_uid(f, mem_ctx, mid, &uidvalidity, &uid) != MAPISTORE_SUCCESS) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
 	conn = imap_context_conn(f->ctx);
@@ -1118,9 +1133,114 @@ _PUBLIC_ enum mapistore_error imap_message_open_attachment(void *object, TALLOC_
 	return MAPISTORE_SUCCESS;
 }
 
-/* M3 is read-only: the read state Outlook sets stays in its own cache (STORE comes with M4). */
+static void row_apply_flags(struct imap_message_row *row, uint32_t add, uint32_t remove)
+{
+	if (add & IMAP_FLAG_SEEN) row->seen = true;
+	if (remove & IMAP_FLAG_SEEN) row->seen = false;
+	if (add & IMAP_FLAG_FLAGGED) row->flagged = true;
+	if (remove & IMAP_FLAG_FLAGGED) row->flagged = false;
+	if (add & IMAP_FLAG_ANSWERED) row->answered = true;
+}
+
+/* RopSetMessageReadFlag / ICS read state: \Seen, right away (MS-OXCMSG 2.2.3.6). */
 static enum mapistore_error set_read_flag(void *message, uint8_t flag)
 {
+	struct imap_message	*m = message;
+	struct imap_conn	*conn;
+	uint32_t		add = (flag & CLEAR_READ_FLAG) ? 0 : IMAP_FLAG_SEEN;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (flag & GENERATE_RECEIPT_ONLY) {
+		return MAPISTORE_SUCCESS;
+	}
+	conn = imap_context_conn(m->folder->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (imap_uid_set_flags(conn, m->folder->mailbox, m->row.uid, add, add ? 0 : IMAP_FLAG_SEEN)) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	row_apply_flags(&m->row, add, add ? 0 : IMAP_FLAG_SEEN);
+	return MAPISTORE_SUCCESS;
+}
+
+static void pending(struct imap_message *m, uint32_t add, uint32_t remove)
+{
+	m->flags_add = (m->flags_add | add) & ~remove;
+	m->flags_remove = (m->flags_remove | remove) & ~add;
+}
+
+/* Received mail is never rewritten: only the edits that map to IMAP flags are kept, for save. */
+static enum mapistore_error message_set_properties(struct imap_message *m, struct SRow *row)
+{
+	uint32_t	i, ignored = 0;
+
+	for (i = 0; i < row->cValues; i++) {
+		const struct SPropValue *p = &row->lpProps[i];
+
+		switch (p->ulPropTag) {
+		case PidTagFlagStatus:
+			pending(m, p->value.l == 2 ? IMAP_FLAG_FLAGGED : 0, p->value.l == 2 ? 0 : IMAP_FLAG_FLAGGED);
+			break;
+		case PidTagLastVerbExecuted:
+			/* NOTEIVERB_REPLYTOSENDER, _REPLYTOALL; _FORWARD (MS-OXOMSG 2.2.1.30) */
+			if (p->value.l == 102 || p->value.l == 103) {
+				pending(m, IMAP_FLAG_ANSWERED, 0);
+			} else if (p->value.l == 104) {
+				pending(m, IMAP_FLAG_FORWARDED, 0);
+			}
+			break;
+		case PidTagMessageFlags:
+			pending(m, (p->value.l & MSGFLAG_READ) ? IMAP_FLAG_SEEN : 0, (p->value.l & MSGFLAG_READ) ? 0 : IMAP_FLAG_SEEN);
+			break;
+		default:
+			ignored++;
+			break;
+		}
+	}
+	if (ignored) {
+		OC_DEBUG(5, "IMAP backend: %u property edit(s) on received mail not written\n", ignored);
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error set_properties(void *object, struct SRow *row)
+{
+	uint32_t type = object ? *(uint32_t *) object : 0;
+
+	if (!row) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	switch (type) {
+	case IMAP_OBJ_MESSAGE:
+		return message_set_properties(object, row);
+	default:
+		return MAPISTORE_ERR_NOT_IMPLEMENTED;
+	}
+}
+
+static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
+{
+	struct imap_message	*m = message;
+	struct imap_conn	*conn;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (!m->flags_add && !m->flags_remove) {
+		return MAPISTORE_SUCCESS;
+	}
+	conn = imap_context_conn(m->folder->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (imap_uid_set_flags(conn, m->folder->mailbox, m->row.uid, m->flags_add, m->flags_remove)) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	row_apply_flags(&m->row, m->flags_add, m->flags_remove);
+	m->flags_add = m->flags_remove = 0;
 	return MAPISTORE_SUCCESS;
 }
 
@@ -1139,6 +1259,8 @@ _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 	backend->folder.get_deleted_fmids = get_deleted_fmids;
 	backend->message.get_message_data = imap_message_get_data;
 	backend->message.set_read_flag = set_read_flag;
+	backend->message.save = save;
+	backend->properties.set_properties = set_properties;
 	backend->message.open_attachment = open_attachment;
 	backend->message.get_attachment_table = get_attachment_table;
 }

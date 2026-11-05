@@ -92,6 +92,7 @@ struct imap_message {
 	char			*headers;	/* transport headers, UTF-8 */
 	struct imap_attachment	*attachments;
 	uint32_t		attachment_count;
+	uint32_t		flags_add, flags_remove;	/* IMAP_FLAG_*, written by save */
 };
 
 struct openchangedb_context;
@@ -197,6 +198,8 @@ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, co
 enum mapistore_error imap_message_table_load(struct imap_table *t);
 enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
 				      struct mapistore_property_data *data);
+enum mapistore_error imap_mid_uid(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint64_t mid, uint32_t *uidvalidity,
+				  uint32_t *uid);
 enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
 					      void **message);
 enum mapistore_error imap_message_properties(void *message, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,

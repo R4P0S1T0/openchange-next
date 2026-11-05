@@ -1205,6 +1205,136 @@ _PUBLIC_ enum mapistore_error imap_table_available(void *object, TALLOC_CTX *mem
 }
 
 /* Write operations keep mapistore's defaults (MAPISTORE_ERR_NOT_IMPLEMENTED): M3 is read-only. */
+/* An IMAP write the server refused, or a connection that went away. */
+static enum mapistore_error write_error(struct imap_conn *conn)
+{
+	return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+}
+
+/* The UIDs of `mids` in `f`, all of the mailbox's current UIDVALIDITY. */
+static enum mapistore_error mids_to_uids(struct imap_folder *f, struct imap_conn *conn, TALLOC_CTX *mem_ctx,
+					 uint32_t count, const uint64_t *mids, uint32_t **uidsp)
+{
+	struct imap_status	st;
+	uint32_t		*uids, v, i;
+
+	if (imap_status(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	uids = talloc_array(mem_ctx, uint32_t, count);
+	if (!uids) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < count; i++) {
+		if (imap_mid_uid(f, uids, mids[i], &v, &uids[i]) != MAPISTORE_SUCCESS || v != st.uidvalidity) {
+			talloc_free(uids);
+			return MAPISTORE_ERR_NOT_FOUND;
+		}
+	}
+	*uidsp = uids;
+	return MAPISTORE_SUCCESS;
+}
+
+/* UID MOVE/COPY between two IMAP folders of the user; the index follows only once the server said OK. */
+static enum mapistore_error move_copy_messages(void *target_folder, void *source_folder, TALLOC_CTX *mem_ctx,
+					       uint32_t count, uint64_t *src_mids, uint64_t *t_mids,
+					       struct Binary_r **change_keys, struct Binary_r **predecessors,
+					       uint8_t want_copy)
+{
+	struct imap_folder	*dst = target_folder, *src = source_folder;
+	struct indexing_context	*ictx;
+	struct imap_conn	*conn;
+	uint32_t		*uids, *dest, validity = 0, i;
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+
+	/* Another backend's folder (openchangedb) cannot hold an IMAP message: emsmdb answers NO_SUPPORT. */
+	if (!dst || !src || dst->type != IMAP_OBJ_FOLDER || src->type != IMAP_OBJ_FOLDER ||
+	    strcmp(dst->ctx->username, src->ctx->username) != 0) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	if (count == 0) {
+		return MAPISTORE_SUCCESS;
+	}
+	if (!src_mids) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	conn = imap_context_conn(src->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	tmp = talloc_new(NULL);
+	dest = tmp ? talloc_zero_array(tmp, uint32_t, count) : NULL;
+	if (!dest) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	ret = mids_to_uids(src, conn, tmp, count, src_mids, &uids);
+	if (ret != MAPISTORE_SUCCESS) {
+		talloc_free(tmp);
+		return ret;
+	}
+	if (imap_uid_move(conn, src->mailbox, uids, count, dst->mailbox, want_copy, &validity, dest)) {
+		talloc_free(tmp);
+		return write_error(conn);
+	}
+	ictx = dst->ctx->ictx;
+	for (i = 0; i < count; i++) {
+		char *uri = imap_message_uri(tmp, dst, validity, dest[i]);
+		enum mapistore_error r = MAPISTORE_SUCCESS;
+
+		if (!uri) {
+			r = MAPISTORE_ERR_NO_MEMORY;
+		} else if (t_mids && t_mids[i]) {
+			/* emsmdb allocated the target mid: the message answers to it from now on. */
+			r = ictx->add_fmid(ictx, dst->ctx->username, t_mids[i], uri);
+			if (r == MAPISTORE_SUCCESS && !want_copy) {
+				r = ictx->del_fmid(ictx, src->ctx->username, src_mids[i], MAPISTORE_PERMANENT_DELETE);
+			}
+		} else if (!want_copy) {
+			r = ictx->update_fmid(ictx, dst->ctx->username, src_mids[i], uri);
+		}
+		if (r != MAPISTORE_SUCCESS) {
+			/* IMAP already moved it; the next listing gives it a fresh mid. */
+			OC_DEBUG(1, "IMAP backend: index update after %s of mid 0x%"PRIx64" failed: %s\n",
+				 want_copy ? "copy" : "move", src_mids[i], mapistore_errstr(r));
+		}
+	}
+	talloc_free(tmp);
+	return MAPISTORE_SUCCESS;
+}
+
+/* Shift+Delete, emptying Deleted Items, ICS deletes: gone from IMAP, exactly this UID. */
+static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
+{
+	struct imap_folder	*f = folder;
+	struct imap_conn	*conn;
+	uint32_t		*uid;
+	enum mapistore_error	ret;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	ret = mids_to_uids(f, conn, f, 1, &mid, &uid);
+	if (ret != MAPISTORE_SUCCESS) {
+		return ret;
+	}
+	if (imap_uid_expunge(conn, f->mailbox, uid, 1)) {
+		talloc_free(uid);
+		return write_error(conn);
+	}
+	talloc_free(uid);
+	ret = f->ctx->ictx->del_fmid(f->ctx->ictx, f->ctx->username, mid, MAPISTORE_PERMANENT_DELETE);
+	if (ret != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: index delete of mid 0x%"PRIx64" failed: %s\n", mid, mapistore_errstr(ret));
+	}
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 {
 	backend->backend.list_contexts = imap_list_contexts;
@@ -1216,6 +1346,8 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->folder.open_table = imap_folder_open_table;
 	backend->folder.get_child_count = imap_folder_get_child_count;
 	backend->folder.open_message = imap_folder_open_message;
+	backend->folder.move_copy_messages = move_copy_messages;
+	backend->folder.delete_message = delete_message;
 	backend->table.set_columns = imap_table_set_columns;
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;
