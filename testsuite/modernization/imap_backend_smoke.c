@@ -118,6 +118,9 @@ static int write_file(const char *path, const char *text, mode_t mode)
 static int setup_fixture(const char *imap_binary)
 {
     char *conf = talloc_asprintf(root, "%s/dovecot.conf", fixture);
+    /* CI runs the suite as root in a container: Dovecot refuses root on a socket ("started from inetd"),
+       so it runs as nobody, owning the fixture. */
+    bool as_root = geteuid() == 0;
     char *text = talloc_asprintf(root,
         "dovecot_config_version = 2.4.0\n"
         "dovecot_storage_version = 2.4.0\n"
@@ -138,11 +141,13 @@ static int setup_fixture(const char *imap_binary)
     CHECK(conf && text);
     CHECK(mkdir(fixture, 0700) == 0 || errno == EEXIST);
     if (write_file(conf, text, 0600)) return 1;
+    CHECK(!as_root || (chown(fixture, 65534, 65534) == 0 && chown(conf, 65534, 65534) == 0));
     tunnel.host = "127.0.0.1";
     tunnel.port = 143;
     tunnel.master_user = "openchange";
     tunnel.max_message_size = 32 * 1024 * 1024;
-    tunnel.tunnel = talloc_asprintf(root, "%s -c %s", imap_binary, conf);
+    tunnel.tunnel = talloc_asprintf(root, "%s%s -c %s", as_root ? "/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups " : "",
+                                    imap_binary, conf);
     CHECK(tunnel.tunnel != NULL);
     return 0;
 }
