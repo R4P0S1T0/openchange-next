@@ -1530,6 +1530,23 @@ _PUBLIC_ enum mapistore_error mapistore_message_set_read_flag(struct mapistore_c
 }
 
 /**
+   \details Empty a message before an ICS upload rewrites it whole: its properties,
+   recipients and attachments go, as MS-OXCFXICS 2.2.3.2.4.2 asks of the server.
+
+   \return MAPISTORE_SUCCESS on success, MAPISTORE_ERR_NOT_IMPLEMENTED when the backend
+   keeps the old content, otherwise MAPISTORE errors
+ */
+_PUBLIC_ enum mapistore_error mapistore_message_purge(struct mapistore_context *mstore_ctx, uint32_t context_id, void *message)
+{
+	struct backend_context	*backend_ctx;
+
+	MAPISTORE_SANITY_CHECKS(mstore_ctx, NULL);
+	backend_ctx = mapistore_backend_lookup(mstore_ctx->context_list, context_id);
+	MAPISTORE_RETVAL_IF(!backend_ctx, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	return mapistore_backend_message_purge(backend_ctx, message);
+}
+
+/**
    \details Commit the changes made to a message in mapistore
 
    \param mstore_ctx pointer to the mapistore context

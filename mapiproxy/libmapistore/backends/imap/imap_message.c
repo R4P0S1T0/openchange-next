@@ -1919,9 +1919,38 @@ static enum mapistore_error submit(void *message, enum SubmitFlags flags)
 	return MAPISTORE_SUCCESS;
 }
 
+/* Before an ICS upload of the whole draft: only its Message-ID outlives the old content. */
+static enum mapistore_error purge(void *message)
+{
+	struct imap_message	*m = message;
+	struct imap_draft	*old, *d;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	old = ensure_draft(m);
+	if (!old) {
+		return MAPISTORE_SUCCESS; /* received mail: its content is not rewritten */
+	}
+	d = talloc_zero(m, struct imap_draft);
+	if (!d) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	d->message_id = old->message_id ? talloc_strdup(d, old->message_id) : NULL;
+	if (old->message_id && !d->message_id) {
+		talloc_free(d);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	d->dirty = true;
+	m->draft = d;
+	talloc_free(old);
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 {
 	backend->message.submit = submit;
+	backend->message.purge = purge;
 	backend->folder.get_deleted_fmids = get_deleted_fmids;
 	backend->message.get_message_data = imap_message_get_data;
 	backend->message.set_read_flag = set_read_flag;

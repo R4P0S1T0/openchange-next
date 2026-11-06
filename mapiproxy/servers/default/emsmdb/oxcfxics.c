@@ -2312,6 +2312,17 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 		}
 		goto end;
 	}
+	/* The upload carries the whole message (MS-OXCFXICS 2.2.3.2.4.2): without this, attachments
+	   removed in Outlook stayed on the server. Backends without purge keep the old content. */
+	else if (emsmdbp_is_mapistore(synccontext_object->parent_object)) {
+		ret = mapistore_message_purge(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object),
+					      message_object->backend_object);
+		if (ret != MAPISTORE_SUCCESS && ret != MAPISTORE_ERR_NOT_IMPLEMENTED) {
+			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
+			goto end;
+		}
+	}
 
 	mapi_handles_set_private_data(message_object_handle, message_object);
 

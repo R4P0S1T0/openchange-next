@@ -209,6 +209,12 @@ static enum mapistore_error mapistore_op_defaults_set_read_flag(void *message_ob
 	return MAPISTORE_ERR_NOT_IMPLEMENTED;
 }
 
+static enum mapistore_error mapistore_op_defaults_purge(void *message_object)
+{
+	OC_DEBUG(3, "MAPISTORE defaults - MAPISTORE_ERR_NOT_IMPLEMENTED");
+	return MAPISTORE_ERR_NOT_IMPLEMENTED;
+}
+
 static enum mapistore_error mapistore_op_defaults_save(void *message_object, TALLOC_CTX *mem_ctx)
 {
 	OC_DEBUG(3, "MAPISTORE defaults - MAPISTORE_ERR_NOT_IMPLEMENTED");
@@ -415,6 +421,7 @@ extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_bac
 	backend->message.set_read_flag = mapistore_op_defaults_set_read_flag;
 	backend->message.save = mapistore_op_defaults_save;
 	backend->message.submit = mapistore_op_defaults_submit;
+	backend->message.purge = mapistore_op_defaults_purge;
 	backend->message.open_attachment = mapistore_op_defaults_open_attachment;
 	backend->message.create_attachment = mapistore_op_defaults_create_attachment;
 	backend->message.get_attachment_table = mapistore_op_defaults_get_attachment_table;

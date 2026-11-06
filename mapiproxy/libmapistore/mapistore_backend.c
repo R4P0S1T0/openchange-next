@@ -685,6 +685,11 @@ enum mapistore_error mapistore_backend_message_set_read_flag(struct backend_cont
 	return bctx->backend->message.set_read_flag(message, flag);
 }
 
+enum mapistore_error mapistore_backend_message_purge(struct backend_context *bctx, void *message)
+{
+	return bctx->backend->message.purge(message);
+}
+
 enum mapistore_error mapistore_backend_message_save(struct backend_context *bctx, void *message, TALLOC_CTX *mem_ctx)
 {
 	return bctx->backend->message.save(message, mem_ctx);

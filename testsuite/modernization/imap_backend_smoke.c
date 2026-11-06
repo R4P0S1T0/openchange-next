@@ -985,6 +985,7 @@ static int test_defaults_cover_every_operation(void)
     CHECK((void *) b.folder.move_folder != (void *) 0xA5A5A5A5A5A5A5A5ULL);
     CHECK((void *) b.folder.copy_folder != (void *) 0xA5A5A5A5A5A5A5A5ULL);
     CHECK((void *) b.message.create_embedded_message != (void *) 0xA5A5A5A5A5A5A5A5ULL);
+    CHECK((void *) b.message.purge != (void *) 0xA5A5A5A5A5A5A5A5ULL);
     CHECK(b.folder.preload_message_bodies(NULL, MAPISTORE_MESSAGE_TABLE, NULL) == MAPISTORE_SUCCESS);
     return 0;
 }
@@ -2258,6 +2259,31 @@ static int test_foreign_from_refused(void)
     return 0;
 }
 
+/* Cached-mode Outlook uploads an edited draft whole (ImportMessageChange) and the server starts
+   from an empty message: attachments removed in Outlook stayed on the server (lab 2026-11-06). */
+static int test_purge_before_import(void)
+{
+    void *drafts = context_for("Drafts"), *msg, *table, *received;
+    enum MAPITAGS tag = PidTagSubject;
+    struct mapistore_property_data d;
+    uint32_t count = 0;
+    uint64_t mid;
+    CHECK(drafts && ops());
+    CHECK(imap_folder_open_message(drafts, root, 0x9101, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(ops()->message.get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count > 0);
+    CHECK(ops()->message.purge(msg) == MAPISTORE_SUCCESS);
+    if (set_string(msg, PidTagSubject, "sem anexos")) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(imap_folder_open_message(drafts, root, 0x9101, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(ops()->message.get_attachment_table(msg, root, &table, &count) == MAPISTORE_SUCCESS && count == 0);
+    CHECK(imap_properties_get(msg, root, 1, &tag, &d) == MAPISTORE_SUCCESS && !d.error && strcmp(d.data, "sem anexos") == 0);
+    /* Received mail is not rewritten: nothing to purge. */
+    mid = mid_by_subject("W5", "one", &received);
+    CHECK(mid && imap_folder_open_message(received, root, mid, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(ops()->message.purge(msg) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2302,7 +2328,8 @@ int main(int argc, char **argv)
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
-        test_client_change_key_kept() || test_transport_send_no_sent_copy() || test_foreign_from_refused()) {
+        test_client_change_key_kept() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
+        test_purge_before_import()) {
         return 1;
     }
     talloc_free(root);
