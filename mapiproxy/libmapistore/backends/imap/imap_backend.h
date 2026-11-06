@@ -44,6 +44,7 @@ enum imap_object_type {
 	IMAP_OBJ_TABLE,
 	IMAP_OBJ_MESSAGE,
 	IMAP_OBJ_ATTACHMENT,
+	IMAP_OBJ_DRAFT_ATTACHMENT,	/* struct imap_draft_attachment */
 };
 
 struct imap_recipient {
@@ -92,6 +93,40 @@ struct imap_message {
 	char			*headers;	/* transport headers, UTF-8 */
 	struct imap_attachment	*attachments;
 	uint32_t		attachment_count;
+	uint32_t		flags_add, flags_remove;	/* IMAP_FLAG_*, written by save */
+	struct imap_draft	*draft;		/* set once Outlook writes to an unsent message */
+	struct Binary_r		*client_ck, *client_pcl;	/* Outlook's change key/PCL of its upload */
+};
+
+/* An attachment of a draft by number: the draft's array moves as attachments are added. */
+struct imap_draft_attachment {
+	uint32_t		type;		/* IMAP_OBJ_DRAFT_ATTACHMENT */
+	struct imap_message	*message;
+	uint32_t		number;
+};
+
+/* A message Outlook is writing (drafts, Outbox): what imap_compose renders. */
+struct imap_draft {
+	char			*subject;	/* UTF-8 */
+	char			*subject_prefix, *normalized_subject;	/* replies send these, not PidTagSubject */
+	bool			subject_set;	/* PidTagSubject was given: it wins */
+	char			*body;		/* PidTagBody, UTF-8 */
+	uint8_t			*html;		/* PidTagHtml, in html_codepage */
+	uint32_t		html_len;
+	uint32_t		html_codepage;	/* PidTagInternetCodepage; 0 = UTF-8 */
+	char			*message_id;	/* PidTagInternetMessageId */
+	char			*in_reply_to;	/* PidTagInReplyToId */
+	char			*references;	/* PidTagInternetReferences */
+	char			*from_name;	/* PidTagSentRepresentingName or PidTagSenderName */
+	char			*from_address;	/* PidTagSentRepresentingSmtpAddress or an SMTP EmailAddress: submit refuses another user's */
+	bool			delete_after_submit;
+	bool			sent;		/* PidTagMessageFlags without MSGFLAG_UNSENT: stored as mail, not a draft */
+	uint32_t		unresolved;	/* recipients without an SMTP address: submit refuses */
+	struct imap_recipient	*recipients;
+	uint32_t		recipient_count;
+	struct imap_attachment	*attachments;	/* content_id set: inline in the HTML */
+	uint32_t		attachment_count;
+	bool			dirty;
 };
 
 struct openchangedb_context;
@@ -142,6 +177,9 @@ int imap_uri_parse(TALLOC_CTX *mem_ctx, const char *uri, char delimiter, char **
 /* The leaf of `mailbox`, modified UTF-7 decoded to UTF-8 (raw when malformed). */
 char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter);
 
+/* One mailbox level from a UTF-8 display name, modified UTF-7; NULL when IMAP cannot hold it as one level. */
+char *imap_mailbox_name(TALLOC_CTX *mem_ctx, const char *utf8, char delimiter);
+
 /* Replaces the settings (tests; NULL with !broken = not configured). */
 void imap_backend_set_state(const struct imap_settings *settings, bool broken);
 bool imap_backend_broken(void);
@@ -160,6 +198,7 @@ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct mapistore_c
 					 struct indexing_context *ictx, const char *uri, void **backend_object);
 enum mapistore_error imap_create_root_folder(const char *username, enum mapistore_context_role role, uint64_t fid,
 					     const char *name, TALLOC_CTX *mem_ctx, char **uri);
+enum mapistore_error imap_folder_set_properties(struct imap_folder *f, struct SRow *row);
 enum mapistore_error imap_folder_open_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, void **child);
 enum mapistore_error imap_folder_get_child_count(void *folder, enum mapistore_table_type type, uint32_t *count);
 enum mapistore_error imap_folder_open_table(void *folder, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
@@ -185,8 +224,19 @@ typedef enum mapistore_error (*imap_cn_source)(struct imap_context *ctx, uint64_
 void imap_backend_set_cn_source(imap_cn_source source);
 enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state, uint64_t *cn,
 					time_t *when);
+/* Records that Outlook uploaded the object at `uri` with this change key and PCL (see imap_folder.c). */
+enum mapistore_error imap_change_set_client(struct imap_context *ctx, const char *uri, const struct Binary_r *ck,
+					    const struct Binary_r *pcl);
 /* PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList or PidTagLastModificationTime of a change. */
 void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when, enum MAPITAGS tag);
+
+/* imap_compose.c */
+/* RFC 5322 + MIME, 7-bit; Bcc in the headers only with_bcc (stored drafts). NULL when an address
+   is not a plain addr-spec. */
+char *imap_compose(TALLOC_CTX *mem_ctx, const struct imap_draft *d, const char *from_address, const char *from_name,
+		   time_t now, bool with_bcc, size_t *len);
+/* To, Cc and Bcc addresses, without case-insensitive duplicates. */
+uint32_t imap_draft_envelope(const struct imap_draft *d, TALLOC_CTX *mem_ctx, const char ***rcpts);
 
 /* imap_message.c */
 char *imap_utf8_clean(TALLOC_CTX *mem_ctx, const char *s, size_t len);
@@ -197,6 +247,8 @@ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, co
 enum mapistore_error imap_message_table_load(struct imap_table *t);
 enum mapistore_error imap_message_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
 				      struct mapistore_property_data *data);
+enum mapistore_error imap_mid_uid(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint64_t mid, uint32_t *uidvalidity,
+				  uint32_t *uid);
 enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
 					      void **message);
 enum mapistore_error imap_message_properties(void *message, TALLOC_CTX *mem_ctx, uint16_t count, enum MAPITAGS *tags,
@@ -206,6 +258,8 @@ enum mapistore_error imap_attachment_properties(struct imap_attachment *a, TALLO
 enum mapistore_error imap_message_get_data(void *message, TALLOC_CTX *mem_ctx, struct mapistore_message **msg);
 enum mapistore_error imap_message_get_attachment_table(void *message, TALLOC_CTX *mem_ctx, void **table,
 						       uint32_t *row_count);
+/* The attachment a draft attachment handle points at (NULL when gone). */
+struct imap_attachment *imap_draft_attachment_get(void *handle);
 enum mapistore_error imap_message_open_attachment(void *message, TALLOC_CTX *mem_ctx, uint32_t number,
 						  void **attachment);
 

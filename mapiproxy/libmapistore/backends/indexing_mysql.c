@@ -729,6 +729,76 @@ static enum mapistore_error mysql_record_get_fmid(struct indexing_context *ictx,
 }
 
 
+/* `s` as a LIKE pattern matching itself literally (backslash is MySQL's LIKE escape). */
+static char *_like_literal(TALLOC_CTX *mem_ctx, const char *s)
+{
+	char	*out = talloc_array(mem_ctx, char, 2 * strlen(s) + 1);
+	size_t	j = 0;
+
+	if (!out) {
+		return NULL;
+	}
+	for (; *s; s++) {
+		if (*s == '%' || *s == '_' || *s == '\\') {
+			out[j++] = '\\';
+		}
+		out[j++] = *s;
+	}
+	out[j] = '\0';
+	return out;
+}
+
+static enum mapistore_error mysql_record_update_uri_prefix(struct indexing_context *ictx,
+							   const char *username,
+							   const char *old_prefix,
+							   const char *new_prefix)
+{
+	const char	*e_user, *e_old, *e_new, *e_like;
+	char		*like, *sql;
+	MYSQL_RES	*res = NULL;
+	MYSQL_ROW	row;
+	TALLOC_CTX	*mem_ctx;
+	int		ret;
+
+	MAPISTORE_RETVAL_IF(!ictx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !old_prefix || !old_prefix[0] || !new_prefix, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+
+	mem_ctx = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!mem_ctx, MAPISTORE_ERR_NO_MEMORY, NULL);
+	like = _like_literal(mem_ctx, old_prefix);
+	like = like ? talloc_strdup_append(like, "%") : NULL;
+	MAPISTORE_RETVAL_IF(!like, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	e_user = _sql(mem_ctx, username);
+	e_old = _sql(mem_ctx, old_prefix);
+	e_new = _sql(mem_ctx, new_prefix);
+	e_like = _sql(mem_ctx, like);
+	MAPISTORE_RETVAL_IF(!e_user || !e_old || !e_new || !e_like, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+
+	/* memcached maps URI -> fmid: drop the old URIs, or they would keep answering. */
+	if (ictx->cache) {
+		sql = talloc_asprintf(mem_ctx, "SELECT url FROM %s WHERE username = '%s' AND url LIKE BINARY '%s'",
+				      INDEXING_TABLE, e_user, e_like);
+		MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+		ret = select_without_fetch(MYSQL(ictx), sql, &res);
+		MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS && ret != MYSQL_NOT_FOUND, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
+		while (res && (row = mysql_fetch_row(res))) {
+			_memcached_delete_record(ictx, row[0]);
+		}
+		if (res) {
+			mysql_free_result(res);
+		}
+	}
+	sql = talloc_asprintf(mem_ctx,
+		"UPDATE %s SET url = CONCAT('%s', SUBSTRING(url, CHAR_LENGTH('%s') + 1)) "
+		"WHERE username = '%s' AND url LIKE BINARY '%s'",
+		INDEXING_TABLE, e_new, e_old, e_user, e_like);
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, mem_ctx);
+	ret = execute_query(MYSQL(ictx), sql);
+	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS, MAPISTORE_ERR_DATABASE_OPS, mem_ctx);
+	talloc_free(mem_ctx);
+	return MAPISTORE_SUCCESS;
+}
+
 static enum mapistore_error mysql_record_allocate_fmids(struct indexing_context *ictx,
 						      const char *username,
 						      int count,
@@ -898,6 +968,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_mysql_init(struct mapistore_con
 	ictx->get_fmid = mysql_record_get_fmid;
 	ictx->allocate_fmid = mysql_record_allocate_fmid;
 	ictx->allocate_fmids = mysql_record_allocate_fmids;
+	ictx->update_uri_prefix = mysql_record_update_uri_prefix;
 
 	/* Data pointers */
 	cache_url = mapistore_get_default_cache_url();

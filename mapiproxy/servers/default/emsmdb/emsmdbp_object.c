@@ -89,13 +89,79 @@ bool emsmdbp_is_mapistore(struct emsmdbp_object *object)
 		if (object->object.folder->mapistore_root) {
 			return true;
 		}
-	default:
-		if (object->parent_object) {
-			return emsmdbp_is_mapistore(object->parent_object);
+		break;
+	case EMSMDBP_OBJECT_MESSAGE:
+		if (object->object.message->native_fai) {
+			return false;
 		}
+		break;
+	case EMSMDBP_OBJECT_TABLE:
+		if (object->object.table->ulType == MAPISTORE_FAI_TABLE && emsmdbp_fai_is_native(object->parent_object)) {
+			return false;
+		}
+		break;
+	default:
+		break;
+	}
+	if (object->parent_object) {
+		return emsmdbp_is_mapistore(object->parent_object);
 	}
 
 	return false;
+}
+
+/**
+   \details Whether the FAI messages (rules, views) of a folder live in openchangedb although the
+   folder is a backend's: the root folder of a mapistore context has an openchangedb record, and
+   backends such as IMAP cannot store FAI messages. Subfolders of a backend keep them in the backend.
+ */
+bool emsmdbp_fai_is_native(struct emsmdbp_object *folder)
+{
+	return folder && folder->type == EMSMDBP_OBJECT_FOLDER && folder->object.folder->mapistore_root;
+}
+
+/**
+   \details Commit the streams still open on a message (by its handle): a stream is otherwise committed
+   when released, which Outlook does after RopSaveChangesMessage or RopSubmitMessage.
+ */
+void emsmdbp_message_commit_streams(struct emsmdbp_context *emsmdbp_ctx, uint32_t message_handle)
+{
+	struct mapi_handles	*h, *rec;
+	void			*data;
+
+	for (h = emsmdbp_ctx->handles_ctx->handles; h; h = h->next) {
+		if (h->parent_handle != message_handle ||
+		    mapi_handles_search(emsmdbp_ctx->handles_ctx, h->handle, &rec) != MAPI_E_SUCCESS ||
+		    mapi_handles_get_private_data(rec, &data) != MAPI_E_SUCCESS || !data) {
+			continue;
+		}
+		if (((struct emsmdbp_object *) data)->type == EMSMDBP_OBJECT_STREAM) {
+			emsmdbp_object_stream_commit((struct emsmdbp_object *) data);
+		}
+	}
+}
+
+/* The openchangedb position of a row an openchangedb table shows, once a Restrict filtered it. */
+uint32_t emsmdbp_table_row_position(struct emsmdbp_object_table *table, uint32_t row)
+{
+	return table->view && row < table->denominator ? table->view[row] : row;
+}
+
+/**
+   \details Delete a message of a backend folder; one the backend does not know may be a FAI
+   message of its root folder (emsmdbp_fai_is_native), deleted from openchangedb.
+ */
+enum mapistore_error emsmdbp_folder_delete_message(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object *folder,
+						   uint64_t mid, uint8_t flags)
+{
+	enum mapistore_error ret;
+
+	ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(folder), folder->backend_object, mid, flags);
+	if (ret == MAPISTORE_ERR_NOT_FOUND && emsmdbp_fai_is_native(folder)) {
+		ret = mapi_error_to_mapistore(openchangedb_message_delete(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username,
+									  folder->object.folder->folderID, mid));
+	}
+	return ret;
 }
 
 static struct emsmdbp_object *emsmdbp_get_mailbox(struct emsmdbp_object *object)
@@ -741,7 +807,13 @@ static int emsmdbp_object_destructor(void *data)
 	struct timeval		request_end, request_delta;
 
 	if (!data) return -1;
-	if (!emsmdbp_is_mapistore(object)) goto nomapistore;
+	if (!emsmdbp_is_mapistore(object)) {
+		/* Outlook releases its rules blob stream before it saves the openchangedb message. */
+		if (object->type == EMSMDBP_OBJECT_STREAM) {
+			emsmdbp_object_stream_commit(object);
+		}
+		goto nomapistore;
+	}
 
 	OC_DEBUG(4, "emsmdbp %s object released\n", emsmdbp_getstr_type(object));
 
@@ -1842,7 +1914,8 @@ _PUBLIC_ struct emsmdbp_object *emsmdbp_folder_open_table(TALLOC_CTX *mem_ctx,
 	if (table_object) {
 		table_object->object.table->handle = handle_id;
 		table_object->object.table->ulType = table_type;
-		if (emsmdbp_is_mapistore(parent_object)) {
+		/* The table, not its folder: a backend root folder's FAI table is openchangedb's. */
+		if (emsmdbp_is_mapistore(table_object)) {
 			switch (table_type) {
 			case MAPISTORE_MESSAGE_TABLE:
 				mstore_type = MAPISTORE_MESSAGE_TABLE;
@@ -1910,7 +1983,7 @@ _PUBLIC_ struct emsmdbp_object *emsmdbp_folder_open_table(TALLOC_CTX *mem_ctx,
 					return table_object;
 				}
 			}
-			if (!emsmdbp_is_mapistore(parent_object)) {
+			if (!emsmdbp_is_mapistore(table_object)) {
 				/* Retrieve folder ID */
 				switch (parent_object->type) {
 				case EMSMDBP_OBJECT_FOLDER:
@@ -2123,6 +2196,7 @@ _PUBLIC_ void **emsmdbp_object_table_get_row_props(TALLOC_CTX *mem_ctx, struct e
 			talloc_free(data_pointers);
 			return NULL;
 		}
+		row_id = emsmdbp_table_row_position(table, row_id);
 
 		/* 1. retrieve the object id from odb */
 		switch (table_object->object.table->ulType) {
@@ -2130,12 +2204,9 @@ _PUBLIC_ void **emsmdbp_object_table_get_row_props(TALLOC_CTX *mem_ctx, struct e
 			retval = openchangedb_table_get_property(odb_ctx, emsmdbp_ctx->oc_ctx, table_object->backend_object, PR_FID, row_id, (query_type == MAPISTORE_LIVEFILTERED_QUERY), (void **) &rowFMId);
 			break;
 		case MAPISTORE_MESSAGE_TABLE:
+		case MAPISTORE_FAI_TABLE:
 			retval = openchangedb_table_get_property(odb_ctx, emsmdbp_ctx->oc_ctx, table_object->backend_object, PR_MID, row_id, (query_type == MAPISTORE_LIVEFILTERED_QUERY), (void **) &rowFMId);
 			break;
-			/* case MAPISTORE_FAI_TABLE: 
-			   retval = openchangedb_table_get_property(odb_ctx, table_object->backend_object, emsmdbp_ctx->oc_ctx,
-			   PR_MID, row_id, (query_type == MAPISTORE_LIVEFILTERED_QUERY), (void **) &rowFMId);
-			   break; */
 		default:
 			OC_DEBUG(5, "table type %d not supported for non-mapistore table\n", table_object->object.table->ulType);
 			retval = MAPI_E_INVALID_OBJECT;
@@ -2160,6 +2231,7 @@ _PUBLIC_ void **emsmdbp_object_table_get_row_props(TALLOC_CTX *mem_ctx, struct e
 			}
 			break;
 		case MAPISTORE_MESSAGE_TABLE:
+		case MAPISTORE_FAI_TABLE:
 			ret = emsmdbp_object_message_open(odb_ctx, table_object->parent_object->emsmdbp_ctx, table_object->parent_object, parentFolderId, *(uint64_t *)rowFMId, false, &rowobject, NULL);
 			mapistore_folder = false;
 			break;
@@ -2598,30 +2670,22 @@ static enum MAPISTATUS emsmdbp_object_message_fill_freebusy_properties(struct em
 
 	TALLOC_CTX				*mem_ctx;
 	struct mapistore_freebusy_properties	*fb_props;
-	char					*subject, *username;
-	struct SPropTagArray			*props;
-	void					**data_pointers;
-	enum MAPISTATUS				*retvals = NULL;
+	char					*subject = NULL, *username;
 	enum MAPISTATUS				retval;
 
 	mem_ctx = talloc_new(NULL);
 	OPENCHANGE_RETVAL_IF(!mem_ctx, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
 
-	/* 1. retrieve subject and deduce username */
-	props = talloc_zero(mem_ctx, struct SPropTagArray);
-	OPENCHANGE_RETVAL_IF(!props, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
-	props->cValues = 1;
-	props->aulPropTag = talloc_zero(props, enum MAPITAGS);
-	OPENCHANGE_RETVAL_IF(!props->aulPropTag, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
-	props->aulPropTag[0] = PR_NORMALIZED_SUBJECT_UNICODE;
-	data_pointers = emsmdbp_object_get_properties(mem_ctx, message_object->emsmdbp_ctx, message_object, props, &retvals);
-	OPENCHANGE_RETVAL_IF(!data_pointers || retvals[0] != MAPI_E_SUCCESS, MAPI_E_NOT_FOUND, mem_ctx);
-
-	subject = data_pointers[0];
+	/* 1. retrieve subject and deduce username: an openchangedb message (the only caller's). Only public
+	   free/busy messages have a "USER-/CN=RECIPIENTS/CN=name" subject; other messages (Outlook's local
+	   free/busy, contact links) are no free/busy source and open as they are. */
+	if (openchangedb_message_get_property(mem_ctx, message_object->emsmdbp_ctx->oc_ctx, message_object->backend_object,
+					      PR_NORMALIZED_SUBJECT_UNICODE, (void **) &subject) != MAPI_E_SUCCESS || !subject ||
+	    !(username = strrchr(subject, '/')) || strncasecmp(username, "/CN=", 4) != 0) {
+		talloc_free(mem_ctx);
+		return MAPI_E_SUCCESS;
+	}
 	/* FIXME: this is wrong, as the CN attribute may differ from the user's username (sAMAccountName) */
-	// format is "..../CN="
-	username = strrchr(subject, '/');
-	OPENCHANGE_RETVAL_IF(!username, MAPI_E_BAD_VALUE, mem_ctx);
 	username += 4;  /* strlen("/CN=") == 4 */
 	username = talloc_strdup(mem_ctx, username);
 	OPENCHANGE_RETVAL_IF(!username, MAPI_E_NOT_ENOUGH_MEMORY, mem_ctx);
@@ -2688,6 +2752,17 @@ _PUBLIC_ enum mapistore_error emsmdbp_object_message_open(TALLOC_CTX *mem_ctx, s
 		if (ret != MAPISTORE_SUCCESS) {
 			talloc_free(message_object);
 		}
+		if (ret != MAPISTORE_ERR_NOT_FOUND || !emsmdbp_fai_is_native(folder_object)) {
+			break;
+		}
+		/* Unknown to the backend: maybe a FAI message of its root folder, kept in openchangedb. */
+		message_object = emsmdbp_object_message_init(mem_ctx, emsmdbp_ctx, messageID, folder_object);
+		ret = mapi_error_to_mapistore(openchangedb_message_open(mem_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID, &message_object->backend_object, (void **)msgp));
+		if (ret != MAPISTORE_SUCCESS) {
+			talloc_free(message_object);
+			break;
+		}
+		message_object->object.message->native_fai = true;
 	}
 
 end:

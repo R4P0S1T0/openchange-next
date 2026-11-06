@@ -244,6 +244,112 @@ end:
 }
 
 
+/* openchangedb tables take a single property restriction (LDB, MySQL): FindRow evaluates Outlook's
+   compound lookups, such as its junk e-mail rule search (AND of class, EXIST and name), row by row.
+   Unsupported terms match nothing, as the backends did. */
+/* Whether oxctabl_openchangedb_row_matches evaluates every term of a restriction. */
+static bool oxctabl_openchangedb_supported(struct mapi_SRestriction *res, int depth)
+{
+	uint32_t i;
+
+	if (!res || depth > 8) {
+		return false;
+	}
+	switch (res->rt) {
+	case RES_AND:
+		for (i = 0; i < res->res.resAnd.cRes; i++) {
+			if (!oxctabl_openchangedb_supported((struct mapi_SRestriction *) &res->res.resAnd.res[i], depth + 1)) {
+				return false;
+			}
+		}
+		return true;
+	case RES_OR:
+		for (i = 0; i < res->res.resOr.cRes; i++) {
+			if (!oxctabl_openchangedb_supported((struct mapi_SRestriction *) &res->res.resOr.res[i], depth + 1)) {
+				return false;
+			}
+		}
+		return true;
+	case RES_EXIST:
+		return true;
+	case RES_PROPERTY:
+		switch (res->res.resProperty.ulPropTag & 0xFFFF) {
+		case PT_UNICODE:
+		case PT_STRING8:
+		case PT_LONG:
+			return res->res.resProperty.relop <= RELOP_NE;
+		default:
+			return false;
+		}
+	default:
+		return false;
+	}
+}
+
+static bool oxctabl_openchangedb_row_matches(TALLOC_CTX *mem_ctx, struct emsmdbp_context *emsmdbp_ctx, void *table,
+					     uint32_t row, struct mapi_SRestriction *res, int depth)
+{
+	struct mapi_SPropertyRestriction	*prop;
+	void					*data = NULL;
+	uint32_t				i;
+	int					cmp;
+
+	if (!res || depth > 8) {
+		return false;
+	}
+	switch (res->rt) {
+	case RES_AND:
+		for (i = 0; i < res->res.resAnd.cRes; i++) {
+			if (!oxctabl_openchangedb_row_matches(mem_ctx, emsmdbp_ctx, table, row,
+							      (struct mapi_SRestriction *) &res->res.resAnd.res[i], depth + 1)) {
+				return false;
+			}
+		}
+		return true;
+	case RES_OR:
+		for (i = 0; i < res->res.resOr.cRes; i++) {
+			if (oxctabl_openchangedb_row_matches(mem_ctx, emsmdbp_ctx, table, row,
+							     (struct mapi_SRestriction *) &res->res.resOr.res[i], depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	case RES_EXIST:
+		return openchangedb_table_get_property(mem_ctx, emsmdbp_ctx->oc_ctx, table, res->res.resExist.ulPropTag,
+						       row, false, &data) == MAPI_E_SUCCESS && data;
+	case RES_PROPERTY:
+		prop = &res->res.resProperty;
+		if (openchangedb_table_get_property(mem_ctx, emsmdbp_ctx->oc_ctx, table, prop->ulPropTag, row, false, &data)
+		    != MAPI_E_SUCCESS || !data) {
+			return false;
+		}
+		switch (prop->ulPropTag & 0xFFFF) {
+		case PT_UNICODE:
+			cmp = strcasecmp((const char *) data, prop->lpProp.value.lpszW ? prop->lpProp.value.lpszW : "");
+			break;
+		case PT_STRING8:
+			cmp = strcasecmp((const char *) data, prop->lpProp.value.lpszA ? prop->lpProp.value.lpszA : "");
+			break;
+		case PT_LONG:
+			cmp = *(uint32_t *) data == prop->lpProp.value.l ? 0 : (*(uint32_t *) data < prop->lpProp.value.l ? -1 : 1);
+			break;
+		default:
+			return false;
+		}
+		switch (prop->relop) {
+		case RELOP_LT: return cmp < 0;
+		case RELOP_LE: return cmp <= 0;
+		case RELOP_GT: return cmp > 0;
+		case RELOP_GE: return cmp >= 0;
+		case RELOP_EQ: return cmp == 0;
+		case RELOP_NE: return cmp != 0;
+		default: return false;
+		}
+	default:
+		return false;
+	}
+}
+
 /**
    \details EcDoRpc SortTable (0x14) Rop. This operation establishes a
    filter for a table.
@@ -339,8 +445,32 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopRestrict(TALLOC_CTX *mem_ctx,
 
 		/* Parent folder doesn't have any mapistore context associated */
 	} else {
-		OC_DEBUG(0, "not mapistore Restrict: Not implemented yet\n");
-		goto end;
+		/* openchangedb tables take no compound restriction: keep the matching positions here. */
+		uint32_t i, n = 0;
+
+		if (!oxctabl_openchangedb_supported(&request.restrictions, 0)) {
+			/* As before: rows stay unfiltered rather than all hidden. */
+			OC_DEBUG(3, "Restrict on an openchangedb table: unsupported restriction type %u, ignored\n", request.restrictions.rt);
+			goto end;
+		}
+		if (!table->view) {
+			table->row_count = table->denominator;
+		}
+		talloc_free(table->view);
+		table->view = talloc_array(table, uint32_t, table->row_count ? table->row_count : 1);
+		if (!table->view) {
+			table->denominator = table->row_count;
+			mapi_repl->error_code = MAPI_E_NOT_ENOUGH_MEMORY;
+			goto end;
+		}
+		for (i = 0; i < table->row_count; i++) {
+			if (oxctabl_openchangedb_row_matches(mem_ctx, emsmdbp_ctx, object->backend_object, i, &request.restrictions, 0)) {
+				table->view[n++] = i;
+			}
+		}
+		table->numerator = 0;
+		table->denominator = n;
+		mapi_repl->u.mapi_Restrict.TableStatus = TBLSTAT_COMPLETE;
 	}
 
 end:
@@ -914,15 +1044,16 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopFindRow(TALLOC_CTX *mem_ctx,
 
 		break;
 	case false:
-		OC_DEBUG(0, "FindRow for openchangedb\n");
-		/* Restrict rows to be fetched */
-		retval = openchangedb_table_set_restrictions(emsmdbp_ctx->oc_ctx, object->backend_object, &request.res);
-		/* Then fetch rows */
 		/* Lookup the properties and check if we need to flag the PropertyRow blob */
 		while (!found && table->numerator < table->denominator) {
                         flagged = 0;
 
-			data_pointers = emsmdbp_object_table_get_row_props(NULL, emsmdbp_ctx, object, table->numerator, MAPISTORE_LIVEFILTERED_QUERY, &retvals);
+			if (!oxctabl_openchangedb_row_matches(mem_ctx, emsmdbp_ctx, object->backend_object,
+							      emsmdbp_table_row_position(table, table->numerator), &request.res, 0)) {
+				table->numerator++;
+				continue;
+			}
+			data_pointers = emsmdbp_object_table_get_row_props(NULL, emsmdbp_ctx, object, table->numerator, MAPISTORE_PREFILTERED_QUERY, &retvals);
 			if (data_pointers) {
 				found = true;
 				for (i = 0; i < table->prop_count; i++) {
@@ -964,9 +1095,6 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopFindRow(TALLOC_CTX *mem_ctx,
 				table->numerator++;
 			}
 		}
-		/* Reset restrictions */
-		openchangedb_table_set_restrictions(emsmdbp_ctx->oc_ctx, object->backend_object, NULL);
-
 		/* Adjust parameters */
 		if (found) {
 			mapi_repl->u.mapi_FindRow.HasRowData = 1;

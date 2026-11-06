@@ -29,6 +29,8 @@
 #include "libmapi/libmapi_private.h"
 #include "imap_backend.h"
 
+static struct imap_draft *ensure_draft(struct imap_message *m);
+
 /* Rows of one message table; larger mailboxes show their first (oldest) messages only.
    shortcut: a full envelope fetch per table open; page with UID ranges when mailboxes grow. */
 #define MAX_TABLE_ROWS 100000
@@ -507,7 +509,64 @@ static char *dup_or_empty(TALLOC_CTX *mem_ctx, const char *s)
 	return talloc_strdup(mem_ctx, s ? s : "");
 }
 
+static const uint8_t one_off_uid[16] = {
+	0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19, 0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
+};
+
 /* One property of a message row (plan Decision 5); NULL when the message has no such value. */
+/* A one-off EntryID (MS-OXCDATA 2.2.5.1): display name and SMTP address in UTF-16LE, so Outlook
+   replies to the address instead of looking the name up in the address book. */
+static struct Binary_r *one_off_entry_id(TALLOC_CTX *mem_ctx, const char *name, const char *address)
+{
+	static const uint8_t head[] = {
+		0x00, 0x00, 0x00, 0x00,						/* Flags */
+		0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19,			/* one_off_uid */
+		0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
+		0x00, 0x00,							/* Version */
+		0x01, 0x90,							/* Unicode, no rich info */
+	};
+	const char	*parts[3] = { name && name[0] ? name : address, "SMTP", address };
+	struct Binary_r	*b;
+	iconv_t		cd;
+	size_t		i, cap;
+
+	if (!address || !address[0]) {
+		return NULL;
+	}
+	cap = sizeof head;
+	for (i = 0; i < 3; i++) {
+		cap += 2 * strlen(parts[i]) + 2;	/* UTF-16 never takes more units than UTF-8 bytes */
+	}
+	b = talloc_zero(mem_ctx, struct Binary_r);
+	if (!b || !(b->lpb = talloc_array(b, uint8_t, cap))) {
+		talloc_free(b);
+		return NULL;
+	}
+	memcpy(b->lpb, head, sizeof head);
+	b->cb = sizeof head;
+	cd = iconv_open("UTF-16LE", "UTF-8");
+	if (cd == (iconv_t) -1) {
+		talloc_free(b);
+		return NULL;
+	}
+	for (i = 0; i < 3; i++) {
+		char	*in = discard_const_p(char, parts[i]), *out = (char *) b->lpb + b->cb;
+		size_t	inleft = strlen(parts[i]), outleft = cap - b->cb - 2;
+
+		iconv(cd, NULL, NULL, NULL, NULL);
+		if (iconv(cd, &in, &inleft, &out, &outleft) == (size_t) -1) {
+			iconv_close(cd);
+			talloc_free(b);
+			return NULL;
+		}
+		b->cb = out - (char *) b->lpb;
+		b->lpb[b->cb++] = 0;
+		b->lpb[b->cb++] = 0;
+	}
+	iconv_close(cd);
+	return b;
+}
+
 _PUBLIC_ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row *row, const struct imap_folder *f,
 			      enum MAPITAGS tag)
 {
@@ -580,6 +639,9 @@ _PUBLIC_ void *imap_row_value(TALLOC_CTX *mem_ctx, const struct imap_message_row
 		return imap_long(mem_ctx, row->answered ? 0x105 : row->seen ? 0x100 : 0x101);
 	case PidTagFlagStatus:
 		return row->flagged ? imap_long(mem_ctx, 2) : NULL; /* followupFlagged */
+	case PidTagSenderEntryId:
+	case PidTagSentRepresentingEntryId:
+		return one_off_entry_id(mem_ctx, row->from_name, row->from_address);
 	case PidTagMid:
 		return imap_i8(mem_ctx, row->mid);
 	case PidTagFolderId:
@@ -868,6 +930,34 @@ static char *header_block(TALLOC_CTX *mem_ctx, const char *raw, size_t len)
 	return imap_utf8_clean(mem_ctx, raw, end ? (size_t) (end - raw) : len);
 }
 
+/* The UIDVALIDITY and UID `mid` stands for in folder `f`, from the index alone (no IMAP traffic). */
+_PUBLIC_ enum mapistore_error imap_mid_uid(struct imap_folder *f, TALLOC_CTX *mem_ctx, uint64_t mid,
+					   uint32_t *uidvalidity, uint32_t *uid)
+{
+	char		*uri, *folder_uri, *raw, *end;
+	bool		soft_deleted = false;
+	unsigned long	v, u;
+
+	folder_uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
+	if (!folder_uri || f->ctx->ictx->get_uri(f->ctx->ictx, f->ctx->username, mem_ctx, mid, &uri, &soft_deleted)
+	    != MAPISTORE_SUCCESS || soft_deleted || strncmp(uri, folder_uri, strlen(folder_uri)) != 0) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = uri + strlen(folder_uri);
+	v = strtoul(raw, &end, 10);
+	if (end == raw || *end != '_') {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	raw = end + 1;
+	u = strtoul(raw, &end, 10);
+	if (end == raw || *end || u == 0 || u > UINT32_MAX || v > UINT32_MAX) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	*uidvalidity = v;
+	*uid = u;
+	return MAPISTORE_SUCCESS;
+}
+
 /* Opens `mid` of folder `f`: only an ID of this folder, of the mailbox's current UIDVALIDITY,
    of a message that still exists, opens. */
 _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
@@ -881,9 +971,8 @@ _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX 
 	struct mailimap_set		*set;
 	struct imap_status		st;
 	struct mailmime			*mime = NULL;
-	char				*uri, *folder_uri, *raw, *end;
-	bool				soft_deleted = false;
-	unsigned long			uidvalidity, uid;
+	char				*raw;
+	uint32_t			uidvalidity, uid;
 	uint32_t			count;
 	size_t				len = 0, idx = 0;
 	enum mapistore_error		ret;
@@ -892,19 +981,7 @@ _PUBLIC_ enum mapistore_error imap_folder_open_message(void *folder, TALLOC_CTX 
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	*message = NULL;
-	folder_uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
-	if (!folder_uri || f->ctx->ictx->get_uri(f->ctx->ictx, f->ctx->username, mem_ctx, mid, &uri, &soft_deleted)
-	    != MAPISTORE_SUCCESS || soft_deleted || strncmp(uri, folder_uri, strlen(folder_uri)) != 0) {
-		return MAPISTORE_ERR_NOT_FOUND;
-	}
-	raw = uri + strlen(folder_uri);
-	uidvalidity = strtoul(raw, &end, 10);
-	if (end == raw || *end != '_') {
-		return MAPISTORE_ERR_NOT_FOUND;
-	}
-	raw = end + 1;
-	uid = strtoul(raw, &end, 10);
-	if (end == raw || *end || uid == 0 || uid > UINT32_MAX || uidvalidity > UINT32_MAX) {
+	if (imap_mid_uid(f, mem_ctx, mid, &uidvalidity, &uid) != MAPISTORE_SUCCESS) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
 	conn = imap_context_conn(f->ctx);
@@ -999,6 +1076,7 @@ _PUBLIC_ enum mapistore_error imap_message_properties(void *object, TALLOC_CTX *
 /* Recipient columns: SMTP recipients only, so emsmdb never searches the directory by name. */
 static const enum MAPITAGS recipient_columns[] = {
 	PidTagDisplayName, PidTagEmailAddress, PidTagAddressType, PidTagSmtpAddress, PidTagRecipientDisplayName,
+	PidTagEntryId,
 };
 #define N_RECIPIENT_COLUMNS (sizeof recipient_columns / sizeof recipient_columns[0])
 
@@ -1039,6 +1117,7 @@ _PUBLIC_ enum mapistore_error imap_message_get_data(void *object, TALLOC_CTX *me
 		d[2] = talloc_strdup(d, "SMTP");
 		d[3] = talloc_strdup(d, r->address);
 		d[4] = talloc_strdup(d, r->name);
+		d[5] = one_off_entry_id(d, r->name, r->address);
 		msg->recipients[i].type = r->type;
 		msg->recipients[i].username = NULL;
 		msg->recipients[i].data = d;
@@ -1114,13 +1193,623 @@ _PUBLIC_ enum mapistore_error imap_message_open_attachment(void *object, TALLOC_
 	if (number >= m->attachment_count) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
+	/* An unsent message is editable: hand out a handle that survives the array growing. */
+	if (ensure_draft(m)) {
+		struct imap_draft_attachment *h = talloc_zero(m, struct imap_draft_attachment);
+
+		if (!h) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		h->type = IMAP_OBJ_DRAFT_ATTACHMENT;
+		h->message = m;
+		h->number = number;
+		*attachment = h;
+		return MAPISTORE_SUCCESS;
+	}
 	*attachment = &m->attachments[number];
 	return MAPISTORE_SUCCESS;
 }
 
-/* M3 is read-only: the read state Outlook sets stays in its own cache (STORE comes with M4). */
+_PUBLIC_ struct imap_attachment *imap_draft_attachment_get(void *handle)
+{
+	struct imap_draft_attachment *h = handle;
+
+	if (!h || h->type != IMAP_OBJ_DRAFT_ATTACHMENT || !h->message->draft ||
+	    h->number >= h->message->draft->attachment_count) {
+		return NULL;
+	}
+	return &h->message->draft->attachments[h->number];
+}
+
+static void row_apply_flags(struct imap_message_row *row, uint32_t add, uint32_t remove)
+{
+	if (add & IMAP_FLAG_SEEN) row->seen = true;
+	if (remove & IMAP_FLAG_SEEN) row->seen = false;
+	if (add & IMAP_FLAG_FLAGGED) row->flagged = true;
+	if (remove & IMAP_FLAG_FLAGGED) row->flagged = false;
+	if (add & IMAP_FLAG_ANSWERED) row->answered = true;
+}
+
+/* RopSetMessageReadFlag / ICS read state: \Seen, right away (MS-OXCMSG 2.2.3.6). */
 static enum mapistore_error set_read_flag(void *message, uint8_t flag)
 {
+	struct imap_message	*m = message;
+	struct imap_conn	*conn;
+	uint32_t		add = (flag & CLEAR_READ_FLAG) ? 0 : IMAP_FLAG_SEEN;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if ((flag & GENERATE_RECEIPT_ONLY) || !m->row.uid) {
+		return MAPISTORE_SUCCESS; /* nothing in IMAP yet: drafts are saved \Seen */
+	}
+	conn = imap_context_conn(m->folder->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (imap_uid_set_flags(conn, m->folder->mailbox, m->row.uid, add, add ? 0 : IMAP_FLAG_SEEN)) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	row_apply_flags(&m->row, add, add ? 0 : IMAP_FLAG_SEEN);
+	return MAPISTORE_SUCCESS;
+}
+
+static void pending(struct imap_message *m, uint32_t add, uint32_t remove)
+{
+	m->flags_add = (m->flags_add | add) & ~remove;
+	m->flags_remove = (m->flags_remove | remove) & ~add;
+}
+
+/* The message's read-side fields show the draft, so properties, recipients and attachments read
+   back what Outlook wrote. */
+static void mirror(struct imap_message *m)
+{
+	struct imap_draft	*d = m->draft;
+	char			*to = NULL, *cc = NULL;
+	uint32_t		i;
+
+	m->row.subject = d->subject;
+	m->body = d->body ? d->body : talloc_strdup(m, "");
+	m->html = (char *) d->html;
+	m->row.recipients = d->recipients;
+	m->row.recipient_count = d->recipient_count;
+	m->attachments = d->attachments;
+	m->attachment_count = d->attachment_count;
+	m->row.has_attachments = d->attachment_count > 0;
+	for (i = 0; i < d->recipient_count; i++) {
+		const struct imap_recipient *r = &d->recipients[i];
+		const char *n = r->name ? r->name : r->address;
+
+		if (r->type == MAPI_TO) {
+			to = to ? talloc_asprintf_append_buffer(to, "; %s", n) : talloc_strdup(m, n);
+		} else if (r->type == MAPI_CC) {
+			cc = cc ? talloc_asprintf_append_buffer(cc, "; %s", n) : talloc_strdup(m, n);
+		}
+	}
+	m->row.display_to = to;
+	m->row.display_cc = cc;
+}
+
+/* The draft of an unsent message, built from its IMAP content on the first write. */
+static struct imap_draft *ensure_draft(struct imap_message *m)
+{
+	struct imap_draft *d;
+
+	if (m->draft || !m->row.draft) {
+		return m->draft;
+	}
+	d = talloc_zero(m, struct imap_draft);
+	if (!d) {
+		return NULL;
+	}
+	/* shortcut: In-Reply-To/References of a reopened draft are not read back from IMAP; a
+	   reply saved as draft and sent later loses its threading headers. */
+	d->subject = m->row.subject;
+	d->body = m->body;
+	d->html = (uint8_t *) m->html;
+	d->html_len = m->html ? strlen(m->html) : 0;
+	d->message_id = m->row.message_id;
+	d->recipients = m->row.recipients;
+	d->recipient_count = m->row.recipient_count;
+	d->attachments = m->attachments;
+	d->attachment_count = m->attachment_count;
+	m->draft = d;
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" loaded from UID %u with %u attachment(s)\n",
+		 m->row.mid, m->row.uid, d->attachment_count);
+	return d;
+}
+
+/* A string property in UTF-8 whatever its wire type, with the PT_UNICODE tag. */
+static const char *prop_string(const struct SPropValue *p, uint32_t *tag)
+{
+	switch (p->ulPropTag & 0xFFFF) {
+	case PT_UNICODE:
+		*tag = p->ulPropTag;
+		return p->value.lpszW;
+	case PT_STRING8:
+		*tag = (p->ulPropTag & 0xFFFF0000) | PT_UNICODE;
+		return p->value.lpszA;
+	default:
+		*tag = p->ulPropTag;
+		return NULL;
+	}
+}
+
+static enum mapistore_error draft_set_properties(struct imap_message *m, struct SRow *row)
+{
+	struct imap_draft	*d = m->draft;
+	uint32_t		i, tag;
+
+	for (i = 0; i < row->cValues; i++) {
+		const struct SPropValue	*p = &row->lpProps[i];
+		const char		*str = prop_string(p, &tag);
+		char			**field = NULL;
+
+		switch (tag) {
+		case PidTagSubject:			field = &d->subject; d->subject_set = true; break;
+		case PidTagSubjectPrefix:		field = &d->subject_prefix; break;
+		case PidTagNormalizedSubject:		field = &d->normalized_subject; break;
+		case PidTagBody:			field = &d->body; break;
+		case PidTagInternetMessageId:		field = &d->message_id; break;
+		case PidTagInReplyToId:			field = &d->in_reply_to; break;
+		case PidTagInternetReferences:		field = &d->references; break;
+		case PidTagSentRepresentingName:	field = &d->from_name; break;
+		case PidTagSenderName:			field = d->from_name ? NULL : &d->from_name; break;
+		case PidTagSentRepresentingSmtpAddress:	field = &d->from_address; break;
+		case PidTagSentRepresentingEntryId:	/* Outlook's "From: other address" comes only as a one-off */
+			if (p->value.bin.cb > 24 && memcmp(p->value.bin.lpb + 4, one_off_uid, sizeof one_off_uid) == 0) {
+				struct OneOffEntryId *e = get_OneOffEntryId(d, (struct Binary_r *) &p->value.bin);
+				bool w = e && (e->OneOffEntryIdFlags & 0x8000);
+				const char *type = e ? (w ? e->AddressType.lpszW : e->AddressType.lpszA) : NULL;
+
+				if (!e) {
+					str = "(unreadable one-off)"; /* submit refuses: a send-as must not slip through */
+					field = &d->from_address;
+				} else if (type && strcasecmp(type, "SMTP") == 0) {
+					str = w ? e->EmailAddress.lpszW : e->EmailAddress.lpszA;
+					field = &d->from_address;
+				}
+			}
+			break;
+		case PidTagSentRepresentingEmailAddress:	/* an EX DN names a directory entry, not an address */
+			field = (str && strchr(str, '@') && str[0] != '/') ? &d->from_address : NULL;
+			break;
+		case PidTagHtml:
+			d->html = talloc_array(d, uint8_t, p->value.bin.cb + 1);
+			if (!d->html) {
+				return MAPISTORE_ERR_NO_MEMORY;
+			}
+			memcpy(d->html, p->value.bin.lpb, p->value.bin.cb);
+			d->html[p->value.bin.cb] = '\0';
+			d->html_len = p->value.bin.cb;
+			break;
+		case PidTagInternetCodepage:		d->html_codepage = p->value.l; break;
+		case PidTagMessageFlags:		d->sent = !(p->value.l & MSGFLAG_UNSENT); break;
+		case PidTagDeleteAfterSubmit:		d->delete_after_submit = p->value.b; break;
+		default:				break;
+		}
+		if (field && str) {
+			*field = talloc_strdup(d, str);
+			if (!*field) {
+				return MAPISTORE_ERR_NO_MEMORY;
+			}
+		}
+	}
+	if (!d->subject_set && (d->subject_prefix || d->normalized_subject)) {
+		d->subject = talloc_asprintf(d, "%s%s", d->subject_prefix ? d->subject_prefix : "",
+					     d->normalized_subject ? d->normalized_subject : "");
+		if (!d->subject) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+	}
+	d->dirty = true;
+	mirror(m);
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error attachment_set_properties(struct imap_draft_attachment *h, struct SRow *row)
+{
+	struct imap_attachment	*a = imap_draft_attachment_get(h);
+	struct imap_draft	*d = h->message->draft;
+	uint32_t		i, tag;
+
+	if (!a) {
+		return h->message->draft ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_SUCCESS; /* received mail: dropped */
+	}
+	for (i = 0; i < row->cValues; i++) {
+		const struct SPropValue	*p = &row->lpProps[i];
+		const char		*str = prop_string(p, &tag);
+
+		switch (tag) {
+		case PidTagAttachLongFilename:
+			a->filename = str ? talloc_strdup(d, str) : a->filename;
+			break;
+		case PidTagAttachFilename:
+		case PidTagDisplayName:
+			if (!a->filename && str) a->filename = talloc_strdup(d, str);
+			break;
+		case PidTagAttachMimeTag:
+			a->mime_type = str ? talloc_strdup(d, str) : a->mime_type;
+			break;
+		case PidTagAttachContentId:
+			a->content_id = str ? talloc_strdup(d, str) : a->content_id;
+			break;
+		case PidTagAttachDataBinary:
+			a->data = talloc_memdup(d, p->value.bin.lpb, p->value.bin.cb ? p->value.bin.cb : 1);
+			a->size = p->value.bin.cb;
+			if (!a->data) {
+				return MAPISTORE_ERR_NO_MEMORY;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	d->dirty = true;
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error create_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, uint8_t associated,
+					   void **message)
+{
+	struct imap_folder	*f = folder;
+	struct imap_message	*m;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER || !message) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (associated) {
+		return MAPISTORE_ERR_DENIED; /* FAI (views, rules) have no IMAP form */
+	}
+	m = talloc_zero(mem_ctx, struct imap_message);
+	if (!m || !(m->draft = talloc_zero(m, struct imap_draft))) {
+		talloc_free(m);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	m->type = IMAP_OBJ_MESSAGE;
+	m->folder = f;
+	m->row.mid = mid;
+	m->row.draft = true;
+	m->row.seen = true;
+	m->row.date = m->row.internal = time(NULL);
+	m->draft->dirty = true;
+	mirror(m);
+	*message = m;
+	return MAPISTORE_SUCCESS;
+}
+
+/* Replaces the recipients (emsmdb sends the whole set; RemoveAllRecipients sends none). */
+static enum mapistore_error modify_recipients(void *message, struct SPropTagArray *columns, uint16_t count,
+					      struct mapistore_message_recipient *recipients)
+{
+	struct imap_message	*m = message;
+	struct imap_draft	*d;
+	struct imap_recipient	*out;
+	int			smtp = -1;
+	uint32_t		i, j, n = 0, skipped = 0;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE || (count && (!columns || !recipients))) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	d = ensure_draft(m);
+	if (!d) {
+		return MAPISTORE_SUCCESS; /* received mail keeps its recipients */
+	}
+	for (j = 0; columns && j < columns->cValues; j++) {
+		if (columns->aulPropTag[j] == PidTagSmtpAddress) {
+			smtp = j;
+		}
+	}
+	out = talloc_zero_array(d, struct imap_recipient, count ? count : 1);
+	if (!out) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < count; i++) {
+		const struct mapistore_message_recipient *r = &recipients[i];
+		const char *name = columns->cValues > 0 ? r->data[0] : NULL;
+		const char *email = columns->cValues > 1 ? r->data[1] : NULL;
+		const char *address = smtp >= 0 ? r->data[smtp] : NULL;
+
+		/* A directory entry (EX) is known by its SMTP column, or by the login emsmdb resolved. */
+		if (!address && r->username && strchr(r->username, '@')) {
+			address = r->username;
+		}
+		if (!address && email && strchr(email, '@') && email[0] != '/') {
+			address = email;
+		}
+		if (!address) {
+			skipped++;
+			continue;
+		}
+		out[n].type = r->type;
+		out[n].name = talloc_strdup(out, name ? name : address);
+		out[n].address = talloc_strdup(out, address);
+		if (!out[n].name || !out[n].address) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		n++;
+	}
+	if (skipped) {
+		OC_DEBUG(1, "IMAP backend: %u recipient(s) without an SMTP address\n", skipped);
+	}
+	d->unresolved = skipped;
+	d->recipients = out;
+	d->recipient_count = n;
+	d->dirty = true;
+	mirror(m);
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error create_attachment(void *message, TALLOC_CTX *mem_ctx, void **attachment, uint32_t *aid)
+{
+	struct imap_message		*m = message;
+	struct imap_draft		*d;
+	struct imap_attachment		*a;
+	struct imap_draft_attachment	*h;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE || !attachment || !aid) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	d = ensure_draft(m);
+	if (!d) {
+		/* Received mail is never rewritten: a full-message upload (ICS) of it still succeeds, its
+		   attachments dropped like other edits. */
+		h = talloc_zero(m, struct imap_draft_attachment);
+		if (!h) {
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		h->type = IMAP_OBJ_DRAFT_ATTACHMENT;
+		h->message = m;
+		h->number = UINT32_MAX;
+		*attachment = h;
+		*aid = m->attachment_count;
+		return MAPISTORE_SUCCESS;
+	}
+	a = talloc_realloc(d, d->attachments, struct imap_attachment, d->attachment_count + 1);
+	h = a ? talloc_zero(m, struct imap_draft_attachment) : NULL;
+	if (!a || !h) {
+		if (a) d->attachments = a;
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	memset(&a[d->attachment_count], 0, sizeof *a);
+	a[d->attachment_count].type = IMAP_OBJ_ATTACHMENT;
+	a[d->attachment_count].number = d->attachment_count;
+	d->attachments = a;
+	h->type = IMAP_OBJ_DRAFT_ATTACHMENT;
+	h->message = m;
+	h->number = d->attachment_count++;
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" attachment %u created\n", m->row.mid, h->number);
+	d->dirty = true;
+	mirror(m);
+	*attachment = h;
+	*aid = h->number;
+	return MAPISTORE_SUCCESS;
+}
+
+/* Received mail is never rewritten: only the edits that map to IMAP flags are kept, for save. */
+static enum mapistore_error message_set_properties(struct imap_message *m, struct SRow *row)
+{
+	uint32_t	i, ignored = 0;
+
+	if (ensure_draft(m)) {
+		return draft_set_properties(m, row);
+	}
+
+	for (i = 0; i < row->cValues; i++) {
+		const struct SPropValue *p = &row->lpProps[i];
+
+		switch (p->ulPropTag) {
+		case PidTagFlagStatus:
+			pending(m, p->value.l == 2 ? IMAP_FLAG_FLAGGED : 0, p->value.l == 2 ? 0 : IMAP_FLAG_FLAGGED);
+			break;
+		case PidTagLastVerbExecuted:
+			/* NOTEIVERB_REPLYTOSENDER, _REPLYTOALL; _FORWARD (MS-OXOMSG 2.2.1.30) */
+			if (p->value.l == 102 || p->value.l == 103) {
+				pending(m, IMAP_FLAG_ANSWERED, 0);
+			} else if (p->value.l == 104) {
+				pending(m, IMAP_FLAG_FORWARDED, 0);
+			}
+			break;
+		case PidTagMessageFlags:
+			pending(m, (p->value.l & MSGFLAG_READ) ? IMAP_FLAG_SEEN : 0, (p->value.l & MSGFLAG_READ) ? 0 : IMAP_FLAG_SEEN);
+			break;
+		default:
+			ignored++;
+			break;
+		}
+	}
+	if (ignored) {
+		OC_DEBUG(5, "IMAP backend: %u property edit(s) on received mail not written\n", ignored);
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error set_properties(void *object, struct SRow *row)
+{
+	uint32_t type = object ? *(uint32_t *) object : 0;
+
+	if (!row) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	switch (type) {
+	case IMAP_OBJ_MESSAGE: {
+		struct imap_message	*m = object;
+		uint32_t		i;
+
+		/* ICS uploads carry Outlook's change key and PCL: kept for the change it is making. */
+		for (i = 0; i < row->cValues; i++) {
+			const struct SPropValue *p = &row->lpProps[i];
+
+			if (p->ulPropTag == PidTagChangeKey || p->ulPropTag == PidTagPredecessorChangeList) {
+				struct Binary_r **dst = p->ulPropTag == PidTagChangeKey ? &m->client_ck : &m->client_pcl;
+
+				talloc_free(*dst);
+				*dst = talloc_zero(m, struct Binary_r);
+				if (!*dst || (p->value.bin.cb && !((*dst)->lpb = talloc_memdup(*dst, p->value.bin.lpb, p->value.bin.cb)))) {
+					return MAPISTORE_ERR_NO_MEMORY;
+				}
+				(*dst)->cb = p->value.bin.cb;
+			}
+		}
+		return message_set_properties(object, row);
+	}
+	case IMAP_OBJ_FOLDER:
+		return imap_folder_set_properties(object, row);
+	case IMAP_OBJ_DRAFT_ATTACHMENT:
+		return attachment_set_properties(object, row);
+	default:
+		return MAPISTORE_ERR_NOT_IMPLEMENTED;
+	}
+}
+
+/* After a write Outlook made, its change key/PCL stand for the message's new state. */
+static void record_client_change(struct imap_message *m)
+{
+	char *uri;
+
+	if (!m->client_ck || !m->client_pcl) {
+		return;
+	}
+	uri = imap_message_uri(m, m->folder, m->row.uidvalidity, m->row.uid);
+	if (!uri || imap_change_set_client(m->folder->ctx, uri, m->client_ck, m->client_pcl) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: change key of mid 0x%"PRIx64" not kept\n", m->row.mid);
+	}
+	talloc_free(uri);
+	TALLOC_FREE(m->client_ck);
+	TALLOC_FREE(m->client_pcl);
+}
+
+/* A new version of the draft in IMAP, then the old one expunged; the mid follows the new UID. */
+/* Outlook moves a message itself (a client rule, an offline move) as a new upload in the target plus a
+   delete in the source; rebuilt from its MAPI properties it loses sender, date and attachments. The
+   original, found by Message-ID in another mailbox, is copied instead (its flags come with it). */
+#define MAX_ORIGINAL_SEARCH 500 /* shortcut: one SEARCH per mailbox, bounded; index Message-IDs if accounts with more folders need it */
+static bool copy_original(struct imap_message *m, struct imap_conn *conn, uint32_t *validity, uint32_t *uid)
+{
+	struct imap_folder	*f = m->folder;
+	struct imap_mailbox	*mbs = NULL;
+	size_t			n = 0, i;
+	uint32_t		src;
+	bool			copied = false;
+	/* The subject too: a repeated Message-ID must not copy another message. */
+	const char		*subject = m->draft->normalized_subject ? m->draft->normalized_subject : m->draft->subject;
+	TALLOC_CTX		*tmp;
+	const struct imap_settings	*settings = imap_backend_settings();
+	const char		*expunged = settings && settings->expunged_mailbox && *settings->expunged_mailbox
+				    ? settings->expunged_mailbox : NULL;
+
+	if (!subject || !*subject) {
+		return false;
+	}
+	tmp = talloc_new(NULL);
+	if (!tmp || imap_list(conn, tmp, &mbs, &n) != 0) {
+		talloc_free(tmp);
+		return false;
+	}
+	for (i = 0; i < n && i < MAX_ORIGINAL_SEARCH && !copied; i++) {
+		if ((mbs[i].flags & (IMAP_MB_NOSELECT | IMAP_MB_NONEXISTENT)) || strcmp(mbs[i].name, f->mailbox) == 0 ||
+		    (expunged && strcmp(mbs[i].name, expunged) == 0)) {
+			continue;
+		}
+		src = imap_uid_by_message_id(conn, mbs[i].name, m->draft->message_id, subject, false);
+		if (src && imap_uid_move(conn, mbs[i].name, &src, 1, f->mailbox, true, validity, uid) == 0 && *uid) {
+			OC_DEBUG(3, "IMAP backend: mid 0x%"PRIx64" is a copy of UID %u of another mailbox\n", m->row.mid, src);
+			copied = true;
+		}
+	}
+	/* Outlook may send the source's delete first: the original is then the newest match of the
+	   lazy_expunge mailbox (older matches there may be copies rebuilt before). */
+	if (!copied && expunged && (src = imap_uid_by_message_id(conn, expunged, m->draft->message_id, subject, true)) &&
+	    imap_uid_move(conn, expunged, &src, 1, f->mailbox, true, validity, uid) == 0 && *uid) {
+		OC_DEBUG(3, "IMAP backend: mid 0x%"PRIx64" is a copy of UID %u of the expunged mailbox\n", m->row.mid, src);
+		copied = true;
+	}
+	talloc_free(tmp);
+	return copied;
+}
+
+static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn *conn)
+{
+	struct imap_folder	*f = m->folder;
+	struct imap_draft	*d = m->draft;
+	struct indexing_context	*ictx = f->ctx->ictx;
+	uint32_t		old_uid = m->row.uid, validity = 0, uid = 0;
+	char			*raw, *uri, *id, *old_uri;
+	bool			soft;
+	size_t			len = 0;
+	enum mapistore_error	ret;
+
+	if (!d->dirty && old_uid) {
+		return MAPISTORE_SUCCESS;
+	}
+	if (!old_uid && d->sent && d->message_id && copy_original(m, conn, &validity, &uid)) {
+		goto saved;
+	}
+	raw = imap_compose(m, d, f->ctx->username, d->from_name, time(NULL), true, &len);
+	if (!raw) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	/* Every version, and the message finally sent, keep the first version's Message-ID. */
+	if (!d->message_id && (id = strstr(raw, "\r\nMessage-ID: "))) {
+		id += strlen("\r\nMessage-ID: ");
+		d->message_id = talloc_strndup(d, id, strcspn(id, "\r"));
+	}
+	ret = imap_append(conn, f->mailbox, raw, len, d->sent ? IMAP_FLAG_SEEN : IMAP_FLAG_DRAFT | IMAP_FLAG_SEEN,
+			  &validity, &uid);
+	talloc_free(raw);
+	if (ret) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (old_uid && imap_uid_expunge(conn, f->mailbox, &old_uid, 1)) {
+		OC_DEBUG(1, "IMAP backend: the previous version of draft mid 0x%"PRIx64" stays in IMAP\n", m->row.mid);
+	}
+saved:
+	uri = imap_message_uri(m, f, validity, uid);
+	if (!uri) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	ret = ictx->get_uri(ictx, f->ctx->username, m, m->row.mid, &old_uri, &soft) == MAPISTORE_SUCCESS
+		? ictx->update_fmid(ictx, f->ctx->username, m->row.mid, uri)
+		: ictx->add_fmid(ictx, f->ctx->username, m->row.mid, uri);
+	if (ret != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: index update of draft mid 0x%"PRIx64" failed: %s\n", m->row.mid, mapistore_errstr(ret));
+	}
+	OC_DEBUG(3, "IMAP backend: draft mid 0x%"PRIx64" saved as UID %u (was %u) with %u attachment(s)\n",
+		 m->row.mid, uid, old_uid, d->attachment_count);
+	m->row.uid = uid;
+	m->row.uidvalidity = validity;
+	m->row.message_id = d->message_id;
+	d->dirty = false;
+	record_client_change(m);
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
+{
+	struct imap_message	*m = message;
+	struct imap_conn	*conn;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (m->draft) {
+		conn = imap_context_conn(m->folder->ctx);
+		return conn ? save_draft(m, conn) : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (!m->flags_add && !m->flags_remove) {
+		record_client_change(m);
+		return MAPISTORE_SUCCESS;
+	}
+	conn = imap_context_conn(m->folder->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (imap_uid_set_flags(conn, m->folder->mailbox, m->row.uid, m->flags_add, m->flags_remove)) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	row_apply_flags(&m->row, m->flags_add, m->flags_remove);
+	m->flags_add = m->flags_remove = 0;
+	record_client_change(m);
 	return MAPISTORE_SUCCESS;
 }
 
@@ -1134,11 +1823,194 @@ static enum mapistore_error get_attachment_table(void *message, TALLOC_CTX *mem_
 	return imap_message_get_attachment_table(message, mem_ctx, table, count);
 }
 
+/* The header block without its Bcc field (and that field's folded lines). */
+static char *without_bcc(TALLOC_CTX *mem_ctx, const char *raw, size_t len, size_t *out_len)
+{
+	char	*out = talloc_array(mem_ctx, char, len + 1);
+	size_t	i = 0, n = 0, eol;
+	bool	skipping = false, in_headers = true;
+
+	if (!out) {
+		return NULL;
+	}
+	while (i < len) {
+		const char *nl = memchr(raw + i, '\n', len - i);
+
+		eol = nl ? (size_t) (nl - raw) + 1 : len;
+		if (in_headers) {
+			if (eol - i <= 2 && (raw[i] == '\r' || raw[i] == '\n')) {
+				in_headers = false;
+				skipping = false;
+			} else if (raw[i] == ' ' || raw[i] == '\t') {
+				/* a continuation belongs to the field before it */
+			} else {
+				skipping = eol - i >= 4 && strncasecmp(raw + i, "Bcc:", 4) == 0;
+			}
+		}
+		if (!skipping) {
+			memcpy(out + n, raw + i, eol - i);
+			n += eol - i;
+		}
+		i = eol;
+	}
+	out[n] = '\0';
+	*out_len = n;
+	return out;
+}
+
+static char *sent_mailbox(struct imap_conn *conn, TALLOC_CTX *mem_ctx)
+{
+	struct imap_mailbox	*mbs;
+	size_t			n, i;
+	char			*name = NULL;
+
+	if (imap_list(conn, mem_ctx, &mbs, &n) != MAPISTORE_SUCCESS) {
+		return NULL;
+	}
+	for (i = 0; i < n && !name; i++) {
+		if (mbs[i].flags & IMAP_MB_SENT) {
+			name = talloc_steal(mem_ctx, mbs[i].name);
+		}
+	}
+	talloc_free(mbs);
+	return name;
+}
+
+/* Sends the stored draft through submission; on success files the bytes sent in Sent (or drops
+   them on PidTagDeleteAfterSubmit) and removes the Outbox copy. On failure nothing moves. */
+static enum mapistore_error submit(void *message, enum SubmitFlags flags)
+{
+	struct imap_message		*m = message;
+	const struct imap_settings	*settings = imap_backend_settings();
+	struct imap_folder		*f, sent_folder;
+	struct indexing_context		*ictx;
+	struct imap_draft		*d;
+	struct imap_conn		*conn;
+	struct imap_status		st;
+	TALLOC_CTX			*tmp;
+	const char			**rcpts;
+	char				*raw, *wire, *sent, *uri;
+	size_t				len = 0, wlen = 0;
+	uint32_t			n, old_uid, validity = 0, uid = 0;
+	int				code = 0, r;
+	enum mapistore_error		ret;
+	bool				filed = false;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	f = m->folder;
+	ictx = f->ctx->ictx;
+	d = ensure_draft(m);
+	if (!d) {
+		return MAPISTORE_ERR_INVALID_DATA; /* received mail is not sent again */
+	}
+	/* No send-as: the message would leave as this user under another user's name. */
+	if (d->from_address && strcasecmp(d->from_address, f->ctx->username) != 0) {
+		OC_DEBUG(1, "IMAP backend: send as %s refused for %s\n", d->from_address, f->ctx->username);
+		return MAPISTORE_ERR_DENIED;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!settings || !conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (d->dirty || !m->row.uid) {
+		ret = save_draft(m, conn);
+		if (ret != MAPISTORE_SUCCESS) {
+			return ret;
+		}
+	}
+	tmp = talloc_new(NULL);
+	/* Sending to some of the recipients only would look like a success to the user. */
+	n = (tmp && !d->unresolved) ? imap_draft_envelope(d, tmp, &rcpts) : 0;
+	if (!n) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (imap_examine(conn, f->mailbox, &st) != MAPISTORE_SUCCESS || st.uidvalidity != m->row.uidvalidity ||
+	    !(raw = fetch_body(tmp, conn, m->row.uid, &len)) || !(wire = without_bcc(tmp, raw, len, &wlen))) {
+		talloc_free(tmp);
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	r = imap_smtp_send(settings, f->ctx->username, f->ctx->username, rcpts, n, wire, wlen, &code);
+	if (r != 0) {
+		talloc_free(tmp);
+		/* A refusal (5xx: sender, recipient, size) is final; transport and 4xx may pass later. */
+		return (r == -1 && code >= 500) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	old_uid = m->row.uid;
+	/* Outlook files its own copy after RopTransportSend: a second one would be a duplicate. */
+	if (flags & MAPISTORE_SUBMIT_CLIENT_FILES_SENT) {
+		d->delete_after_submit = true;
+	}
+	if (!d->delete_after_submit) {
+		sent = sent_mailbox(conn, tmp);
+		if (sent && imap_append(conn, sent, wire, wlen, IMAP_FLAG_SEEN, &validity, &uid) == 0) {
+			sent_folder = *f;
+			sent_folder.mailbox = sent;
+			uri = imap_message_uri(tmp, &sent_folder, validity, uid);
+			if (!uri || ictx->update_fmid(ictx, f->ctx->username, m->row.mid, uri) != MAPISTORE_SUCCESS) {
+				OC_DEBUG(1, "IMAP backend: sent copy of mid 0x%"PRIx64" filed but not indexed\n", m->row.mid);
+			}
+			filed = true;
+		} else {
+			/* shortcut: the message left but its copy stays in the Outbox; upgrade with a retry queue
+			   if this shows up. */
+			OC_DEBUG(0, "IMAP backend: message sent, but its copy could not be filed in Sent\n");
+		}
+	}
+	if ((filed || d->delete_after_submit) && imap_uid_expunge(conn, f->mailbox, &old_uid, 1)) {
+		OC_DEBUG(1, "IMAP backend: sent message mid 0x%"PRIx64" stays in the Outbox\n", m->row.mid);
+	}
+	if (d->delete_after_submit) {
+		ictx->del_fmid(ictx, f->ctx->username, m->row.mid, MAPISTORE_PERMANENT_DELETE);
+	}
+	m->row.draft = false;
+	m->draft = NULL;
+	talloc_free(tmp);
+	return MAPISTORE_SUCCESS;
+}
+
+/* Before an ICS upload of the whole draft: only its Message-ID outlives the old content. */
+static enum mapistore_error purge(void *message)
+{
+	struct imap_message	*m = message;
+	struct imap_draft	*old, *d;
+
+	if (!m || m->type != IMAP_OBJ_MESSAGE) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	old = ensure_draft(m);
+	if (!old) {
+		return MAPISTORE_SUCCESS; /* received mail: its content is not rewritten */
+	}
+	d = talloc_zero(m, struct imap_draft);
+	if (!d) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	d->message_id = old->message_id ? talloc_strdup(d, old->message_id) : NULL;
+	if (old->message_id && !d->message_id) {
+		talloc_free(d);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	d->dirty = true;
+	m->draft = d;
+	talloc_free(old);
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ void imap_message_fill(struct mapistore_backend *backend)
 {
+	backend->message.submit = submit;
+	backend->message.purge = purge;
 	backend->folder.get_deleted_fmids = get_deleted_fmids;
 	backend->message.get_message_data = imap_message_get_data;
 	backend->message.set_read_flag = set_read_flag;
+	backend->message.save = save;
+	backend->message.modify_recipients = modify_recipients;
+	backend->message.create_attachment = create_attachment;
+	backend->folder.create_message = create_message;
+	backend->properties.set_properties = set_properties;
 	backend->message.open_attachment = open_attachment;
 	backend->message.get_attachment_table = get_attachment_table;
 }

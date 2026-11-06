@@ -199,33 +199,22 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSubmitMessage(TALLOC_CTX *mem_ctx,
 		break;
 	case true:
 		/* Check if we still have uncommitted streams attached to this message */
-		{
-			struct mapi_handles 	*handles;
-
-			for (handles = emsmdbp_ctx->handles_ctx->handles; handles; handles = handles->next) {
-				if (handles->parent_handle == rec->handle) {
-					struct emsmdbp_object	*object2 = NULL;
-					void			*private_data2;
-					struct mapi_handles	*rec2 = NULL;
-
-					retval = mapi_handles_search(emsmdbp_ctx->handles_ctx, handles->handle, &rec2);
-					if (retval) {
-						continue;
-					}
-					retval = mapi_handles_get_private_data(rec2, &private_data2);
-					object2 = (struct emsmdbp_object *)private_data2;
-					if (object2->type == EMSMDBP_OBJECT_STREAM) {
-						emsmdbp_object_stream_commit(object2);
-					}
-				}
-			}
-		}
+		emsmdbp_message_commit_streams(emsmdbp_ctx, rec->handle);
 
 		messageID = object->object.message->messageID;
 		contextID = emsmdbp_get_contextID(object);
 		flags = mapi_req->u.mapi_SubmitMessage.SubmitFlags;
 		owner = emsmdbp_get_owner(object);
-		mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object), object->backend_object, flags);
+		{
+			enum mapistore_error ret = mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object),
+									    object->backend_object, flags);
+
+			/* A refused send stays where it was (Outbox): Outlook shows the error. */
+			if (ret != MAPISTORE_SUCCESS) {
+				mapi_repl->error_code = mapistore_error_to_mapi(ret);
+				break;
+			}
+		}
 		oxomsg_mapistore_handle_message_relocation(emsmdbp_ctx, object);
 		mapistore_indexing_record_add_mid(emsmdbp_ctx->mstore_ctx, contextID, owner, messageID);
 		break;
@@ -434,7 +423,18 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopTransportSend(TALLOC_CTX *mem_ctx,
 		if (retval != MAPI_E_SUCCESS) {
 			OC_DEBUG(0, "Failing to create sharing metadata for a sharing object: %s\n", mapi_get_errstr(retval));
 		}
-		mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object), object->backend_object, 0);
+		{
+			/* Outlook (cached mode) files its own copy in Sent Items after a TransportSend. */
+			enum mapistore_error ret = mapistore_message_submit(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object),
+									    object->backend_object,
+									    (enum SubmitFlags) MAPISTORE_SUBMIT_CLIENT_FILES_SENT);
+
+			/* As RopSubmitMessage: a refused send is reported, and the message stays where it was. */
+			if (ret != MAPISTORE_SUCCESS) {
+				mapi_repl->error_code = mapistore_error_to_mapi(ret);
+				break;
+			}
+		}
 
 		oxomsg_mapistore_handle_message_relocation(emsmdbp_ctx, object);
 		/* mapistore_indexing_record_add_mid(emsmdbp_ctx->mstore_ctx, contextID, messageID); */

@@ -84,6 +84,27 @@ enum MAPISTATUS openchangedb_message_save(struct openchangedb_context *oc_ctx,
 }
 
 /**
+   \details Delete a saved message and its properties
+
+   \param oc_ctx pointer to the openchangedb context
+   \param username the name of the mailbox where the message's folder is
+   \param folderID the identifier of the folder where the message is stored
+   \param messageID the identifier of the message to delete
+
+   \return MAPI_E_SUCCESS on success, MAPI_E_NOT_FOUND when there is no such message, otherwise MAPI error
+ */
+_PUBLIC_
+enum MAPISTATUS openchangedb_message_delete(struct openchangedb_context *oc_ctx, const char *username,
+					    uint64_t folderID, uint64_t messageID)
+{
+	OPENCHANGE_RETVAL_IF(!oc_ctx, MAPI_E_NOT_INITIALIZED, NULL);
+	OPENCHANGE_RETVAL_IF(!username, MAPI_E_INVALID_PARAMETER, NULL);
+	OPENCHANGE_RETVAL_IF(!oc_ctx->message_delete, MAPI_E_NO_SUPPORT, NULL);
+
+	return oc_ctx->message_delete(oc_ctx, username, folderID, messageID);
+}
+
+/**
    \details Initialize and open a message object
 
    \param mem_ctx pointer to the memory context to use for allocation

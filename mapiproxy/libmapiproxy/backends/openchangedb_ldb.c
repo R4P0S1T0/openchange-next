@@ -2024,6 +2024,10 @@ static enum MAPISTATUS table_get_property(TALLOC_CTX *mem_ctx,
 	}
 	PidTagAttr = openchangedb_property_get_attribute(proptag);
 	OPENCHANGE_RETVAL_IF(!PidTagAttr, MAPI_E_NOT_FOUND, NULL);
+	/* Messages keep their ID as PidTagMessageId (message_create), as the MySQL backend's mid column. */
+	if (table->table_type != 0x1 && proptag == PR_MID) {
+		PidTagAttr = "PidTagMessageId";
+	}
 
 	/* Ensure the element exists */
 	OPENCHANGE_RETVAL_IF(!ldb_msg_find_element(res->msgs[pos], PidTagAttr), MAPI_E_NOT_FOUND, NULL);
@@ -2179,6 +2183,26 @@ static enum MAPISTATUS message_save(struct openchangedb_context *self,
 	/* FIXME: Deal with SaveFlags */
 
 	return MAPI_E_SUCCESS;
+}
+
+/* Found as message_open finds it: by parent folder and message ID, unique in the store. */
+static enum MAPISTATUS message_delete(struct openchangedb_context *self, const char *username,
+				      uint64_t folderID, uint64_t messageID)
+{
+	struct ldb_context	*ldb_ctx = self->data;
+	TALLOC_CTX		*mem_ctx;
+	struct ldb_result	*res = NULL;
+	const char * const	attrs[] = { NULL };
+	int			ret;
+
+	mem_ctx = talloc_named(NULL, 0, "message_delete");
+	OPENCHANGE_RETVAL_IF(!mem_ctx, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+	ret = ldb_search(ldb_ctx, mem_ctx, &res, ldb_get_default_basedn(ldb_ctx), LDB_SCOPE_SUBTREE, attrs,
+			 "(&(PidTagParentFolderId=%"PRIu64")(PidTagMessageId=%"PRIu64"))", folderID, messageID);
+	OPENCHANGE_RETVAL_IF(ret != LDB_SUCCESS || !res->count, MAPI_E_NOT_FOUND, mem_ctx);
+	ret = ldb_delete(ldb_ctx, res->msgs[0]->dn);
+	talloc_free(mem_ctx);
+	return ret == LDB_SUCCESS ? MAPI_E_SUCCESS : MAPI_E_CALL_FAILED;
 }
 
 static enum MAPISTATUS message_open(TALLOC_CTX *mem_ctx,
@@ -2458,6 +2482,7 @@ _PUBLIC_ enum MAPISTATUS openchangedb_ldb_initialize(TALLOC_CTX *mem_ctx,
 	oc_ctx->message_create = message_create;
 	oc_ctx->message_save = message_save;
 	oc_ctx->message_open = message_open;
+	oc_ctx->message_delete = message_delete;
 	oc_ctx->message_get_property = message_get_property;
 	oc_ctx->message_set_properties = message_set_properties;
 

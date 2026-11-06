@@ -245,3 +245,103 @@ _PUBLIC_ char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char 
 	name = mutf7_decode(mem_ctx, leaf);
 	return name ? name : talloc_strdup(mem_ctx, leaf);
 }
+
+/* Next code point of UTF-8 `s` (advancing it), or -1 when malformed. */
+static int32_t utf8_next(const unsigned char **s)
+{
+	const unsigned char	*p = *s;
+	uint32_t		cp;
+	int			n, i;
+
+	if (p[0] < 0x80) { cp = p[0]; n = 0; }
+	else if ((p[0] & 0xE0) == 0xC0) { cp = p[0] & 0x1F; n = 1; }
+	else if ((p[0] & 0xF0) == 0xE0) { cp = p[0] & 0x0F; n = 2; }
+	else if ((p[0] & 0xF8) == 0xF0) { cp = p[0] & 0x07; n = 3; }
+	else return -1;
+	for (i = 1; i <= n; i++) {
+		if ((p[i] & 0xC0) != 0x80) {
+			return -1;
+		}
+		cp = cp << 6 | (p[i] & 0x3F);
+	}
+	/* Overlong forms, surrogates and values past Unicode are not characters. */
+	if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) ||
+	    (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+		return -1;
+	}
+	*s = p + n + 1;
+	return cp;
+}
+
+static char *flush_b64(char *out, const uint16_t *units, size_t n)
+{
+	uint32_t	bits = 0;
+	int		nbits = 0;
+	size_t		i;
+
+	out = talloc_strdup_append_buffer(out, "&");
+	for (i = 0; out && i < n; i++) {
+		bits = bits << 16 | units[i];
+		nbits += 16;
+		while (out && nbits >= 6) {
+			nbits -= 6;
+			out = talloc_asprintf_append_buffer(out, "%c", b64[(bits >> nbits) & 0x3F]);
+		}
+	}
+	if (out && nbits > 0) {
+		out = talloc_asprintf_append_buffer(out, "%c", b64[(bits << (6 - nbits)) & 0x3F]);
+	}
+	return out ? talloc_strdup_append_buffer(out, "-") : NULL;
+}
+
+/* One level of a mailbox name from an Outlook display name (RFC 3501 5.1.3); NULL when the name
+   is empty, malformed UTF-8, or holds the delimiter, a LIST wildcard or a control character. */
+_PUBLIC_ char *imap_mailbox_name(TALLOC_CTX *mem_ctx, const char *utf8, char delimiter)
+{
+	const unsigned char	*p = (const unsigned char *) utf8;
+	uint16_t		*units;
+	size_t			n = 0;
+	char			*out;
+	int32_t			cp;
+
+	if (!utf8 || !utf8[0] || strpbrk(utf8, "%*") || (delimiter && strchr(utf8, delimiter))) {
+		return NULL;
+	}
+	out = talloc_strdup(mem_ctx, "");
+	/* At most two UTF-16 units per input byte pair; one run per stretch of non-ASCII. */
+	units = out ? talloc_array(out, uint16_t, strlen(utf8) + 1) : NULL;
+	if (!units) {
+		talloc_free(out);
+		return NULL;
+	}
+	while (*p) {
+		cp = utf8_next(&p);
+		if (cp < 0x20 || cp == 0x7F) {
+			talloc_free(out);
+			return NULL;
+		}
+		if (cp < 0x7F) {
+			if (n) {
+				out = flush_b64(out, units, n);
+				n = 0;
+			}
+			out = out ? (cp == '&' ? talloc_strdup_append_buffer(out, "&-")
+					      : talloc_asprintf_append_buffer(out, "%c", (char) cp)) : NULL;
+		} else if (cp >= 0x10000) {
+			units[n++] = 0xD800 | ((cp - 0x10000) >> 10);
+			units[n++] = 0xDC00 | ((cp - 0x10000) & 0x3FF);
+		} else {
+			units[n++] = cp;
+		}
+		if (!out) {
+			return NULL;
+		}
+	}
+	if (n) {
+		out = flush_b64(out, units, n);
+	}
+	if (out) {
+		talloc_free(units);
+	}
+	return out;
+}

@@ -240,9 +240,12 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopOpenMessage(TALLOC_CTX *mem_ctx,
 			mapi_repl->error_code = MAPI_E_NO_ACCESS;
 		}
 		else if (ret == MAPISTORE_ERR_NOT_FOUND) {
+			OC_DEBUG(3, "OpenMessage: mid 0x%"PRIx64" not found in folder 0x%"PRIx64"\n", messageID, folderID);
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
 		}
 		else {
+			OC_DEBUG(3, "OpenMessage of mid 0x%"PRIx64" in folder 0x%"PRIx64" failed: %s\n",
+				 messageID, folderID, mapistore_errstr(ret));
 			mapi_repl->error_code = MAPI_E_CALL_FAILED;
 		}
 		goto end;
@@ -395,7 +398,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopCreateMessage(TALLOC_CTX *mem_ctx,
 	message_object->object.message->read_write = true;
 
 	contextID = emsmdbp_get_contextID(folder_object);
-	mapistore = emsmdbp_is_mapistore(folder_object);
+	message_object->object.message->native_fai = mapi_req->u.mapi_CreateMessage.AssociatedFlag && emsmdbp_fai_is_native(folder_object);
+	mapistore = emsmdbp_is_mapistore(message_object);
 	switch ((int)mapistore) {
 	case true:
 		ret = mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, contextID, 
@@ -582,6 +586,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSaveChangesMessage(TALLOC_CTX *mem_ctx,
 	mapistore = emsmdbp_is_mapistore(object);
 	switch ((int)mapistore) {
 	case false:
+		/* Outlook releases the stream it wrote (its rules blob) after this save: commit it first. */
+		emsmdbp_message_commit_streams(emsmdbp_ctx, rec->handle);
 		retval = openchangedb_message_save(emsmdbp_ctx->oc_ctx, object->backend_object, flags);
 		OC_DEBUG(0, "openchangedb_save_message: retval = 0x%x\n", retval);
 		if (retval != MAPI_E_SUCCESS) {
@@ -594,8 +600,9 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSaveChangesMessage(TALLOC_CTX *mem_ctx,
                 contextID = emsmdbp_get_contextID(object);
 		messageID = object->object.message->messageID;
 		ret = mapistore_message_save(emsmdbp_ctx->mstore_ctx, contextID, object->backend_object, mem_ctx);
-		if (ret == MAPISTORE_ERR_DENIED) {
-			mapi_repl->error_code = MAPI_E_NO_ACCESS;
+		/* Not saved (refused, store unreachable, unsendable content): a success reply would lose it. */
+		if (ret != MAPISTORE_SUCCESS) {
+			mapi_repl->error_code = ret == MAPISTORE_ERR_DENIED ? MAPI_E_NO_ACCESS : mapistore_error_to_mapi(ret);
 			goto end;
 		}
 		owner = emsmdbp_get_owner(object);

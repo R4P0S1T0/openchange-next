@@ -763,41 +763,6 @@ static void oxcfxics_push_messageChange_attachments(struct emsmdbp_context *emsm
 	talloc_free(table_object);
 }
 
-static void oxcfxics_table_set_cn_restriction(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object *table_object, const char *owner, struct idset *cnset_seen)
-{
-	struct mapi_SRestriction cn_restriction;
-	struct idset *local_cnset;
-	uint16_t repl_id;
-	uint8_t state;
-
-	if (!emsmdbp_is_mapistore(table_object)) {
-		OC_DEBUG(5, "table restrictions not supported by non-mapistore tables\n");
-		return;
-	}
-
-	local_cnset = cnset_seen;
-	while (local_cnset && (emsmdbp_guid_to_replid(emsmdbp_ctx, owner, &local_cnset->repl.guid, &repl_id) != MAPI_E_SUCCESS || repl_id != 1)) {
-		local_cnset = local_cnset->next;
-	}
-
-	if (!local_cnset) {
-		OC_DEBUG(5, "no change set available -> no table restrictions\n");
-		return;
-	}
-	if (local_cnset->range_count != 1) {
-		OC_DEBUG(5, "no valid change set available (range_count = %d) -> no table restrictions\n", local_cnset->range_count);
-		return;
-	}
-
-	cn_restriction.rt = RES_PROPERTY;
-	cn_restriction.res.resProperty.relop = RELOP_GT;
-	cn_restriction.res.resProperty.ulPropTag = PidTagChangeNumber;
-	cn_restriction.res.resProperty.lpProp.ulPropTag = PidTagChangeNumber;
-	cn_restriction.res.resProperty.lpProp.value.d = (cnset_seen->ranges[0].high << 16) | repl_id;
-
-	mapistore_table_set_restrictions(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(table_object), table_object->backend_object, &cn_restriction, &state);
-}
-
 static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object_synccontext *synccontext, const char *owner, struct oxcfxics_sync_data *sync_data, struct emsmdbp_object *folder_object)
 {
 	TALLOC_CTX			*mem_ctx, *msg_ctx;
@@ -862,7 +827,9 @@ static bool oxcfxics_push_messageChange(struct emsmdbp_context *emsmdbp_ctx, str
 		table_object->object.table->prop_count = table_props_count;
 		table_object->object.table->properties = (enum MAPITAGS *)table_prop_tags;
 
-		oxcfxics_table_set_cn_restriction(emsmdbp_ctx, table_object, owner, original_cnset_seen);
+		/* No "ChangeNumber > highest seen" table restriction: change numbers hold their GLOBCNT
+		   byte-swapped, so numeric order is not change order and new changes were filtered out.
+		   Every row is checked against cnset_seen below (IDSET_includes_guid_glob). */
 		message_sync_data->max = 0;
 		if (emsmdbp_is_mapistore(table_object)) {
 			contextID = emsmdbp_get_contextID(folder_object);
@@ -1422,7 +1389,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 
 	table_object->object.table->prop_count = synccontext->properties.cValues;
 	table_object->object.table->properties = synccontext->properties.aulPropTag;
-	oxcfxics_table_set_cn_restriction(emsmdbp_ctx, table_object, owner, synccontext->cnset_seen);
+	/* No change-number table restriction here either (see oxcfxics_push_messageChange): rows are
+	   checked against cnset_seen one by one. */
 	if (emsmdbp_is_mapistore(table_object)) {
 		mapistore_table_set_columns(emsmdbp_ctx->mstore_ctx, contextID,
 					    table_object->backend_object, synccontext->properties.cValues, synccontext->properties.aulPropTag);
@@ -2306,6 +2274,10 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	owner = emsmdbp_get_owner(synccontext_object);
 	openchangedb_get_MailboxReplica(emsmdbp_ctx->oc_ctx, owner, &repl_id, &replica_guid);
 	if (oxcfxics_fmid_from_source_key(emsmdbp_ctx, owner, &request->PropertyValues.lpProps[0].value.bin, &messageID)) {
+		const struct SBinary_short *key = &request->PropertyValues.lpProps[0].value.bin;
+
+		OC_DEBUG(3, "ImportMessageChange: source key (%u bytes) of replica %s is not this mailbox's\n", key->cb,
+			 key->cb >= 16 ? GUID_string(mem_ctx, (const struct GUID *) key->lpb) : "?");
 		mapi_repl->error_code = MAPI_E_NOT_FOUND;
 		goto end;
 	}
@@ -2317,14 +2289,19 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	ret = emsmdbp_object_message_open(message_object_handle, emsmdbp_ctx, synccontext_object->parent_object, folderID, messageID, true, &message_object, &msg);
 	if (ret == MAPISTORE_ERR_NOT_FOUND) {
 		message_object = emsmdbp_object_message_init(message_object_handle, emsmdbp_ctx, messageID, synccontext_object->parent_object);
+		message_object->object.message->native_fai = (request->ImportFlag & ImportFlag_Associated) &&
+			emsmdbp_fai_is_native(synccontext_object->parent_object);
 		/* openchangedb folders (Sync Issues, Local Failures) take Outlook's sync logs as RopCreateMessage does:
 		   refused, each upload failure logs another message and the upload loop starves every download. */
-		if (!emsmdbp_is_mapistore(synccontext_object->parent_object)
-		    ? openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
-						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPI_E_SUCCESS
-		    : mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPISTORE_SUCCESS) {
+		int created = !emsmdbp_is_mapistore(message_object)
+		    ? (int) openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
+						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object)
+		    : (int) mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object);
+		if (created != 0) {
 			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
-			OC_DEBUG(5, "could not open nor create mapistore message\n");
+			OC_DEBUG(3, "ImportMessageChange: mid 0x%"PRIx64" in %s folder 0x%"PRIx64" could not be created (0x%x)\n",
+				 messageID, emsmdbp_is_mapistore(message_object) ? "mapistore" : "openchangedb",
+				 folderID, created);
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
 			goto end;
 		}
@@ -2339,6 +2316,17 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 			mapi_repl->error_code = MAPI_E_INVALID_OBJECT;
 		}
 		goto end;
+	}
+	/* The upload carries the whole message (MS-OXCFXICS 2.2.3.2.4.2): without this, attachments
+	   removed in Outlook stayed on the server. Backends without purge keep the old content. */
+	else if (emsmdbp_is_mapistore(message_object)) {
+		ret = mapistore_message_purge(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object),
+					      message_object->backend_object);
+		if (ret != MAPISTORE_SUCCESS && ret != MAPISTORE_ERR_NOT_IMPLEMENTED) {
+			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
+			goto end;
+		}
 	}
 
 	mapi_handles_set_private_data(message_object_handle, message_object);
@@ -2636,7 +2624,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportDeletes(TALLOC_CTX *mem_ctx,
 		for (i = 0; i < object_array->cValues; i++) {
 			ret = oxcfxics_fmid_from_source_key(emsmdbp_ctx, owner, object_array->bin + i, &objectID);
 			if (ret == MAPISTORE_SUCCESS) {
-				ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, contextID, synccontext_object->parent_object->backend_object, objectID, delete_type);
+				ret = emsmdbp_folder_delete_message(emsmdbp_ctx, synccontext_object->parent_object, objectID, delete_type);
 				if (ret != MAPISTORE_SUCCESS) {
 					/* The message stays in the backend, so its index record must stay too, or it can no longer be opened. */
 					OC_DEBUG(5, "message deletion failed for fmid: 0x%.16"PRIx64"\n", objectID);
@@ -2835,11 +2823,12 @@ end:
    \returns MAPI_E_SUCCESS if check succeeded
  */
 static enum MAPISTATUS oxcfxics_check_cnset(struct openchangedb_context *oc_ctx,
+					    struct mapistore_context *mstore_ctx,
 					    const char *username,
 					    struct idset *parsed_idset,
 					    const char *label)
 {
-	uint64_t	next_cn, high_cn;
+	uint64_t	next_cn, high_cn, next_id;
 	enum MAPISTATUS	retval;
 
 	OPENCHANGE_RETVAL_IF(!username, MAPI_E_INVALID_PARAMETER, NULL);
@@ -2851,6 +2840,12 @@ static enum MAPISTATUS oxcfxics_check_cnset(struct openchangedb_context *oc_ctx,
 	retval = openchangedb_get_next_changeNumber(oc_ctx, username, &next_cn);
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, NULL);
 	next_cn = exchange_globcnt(next_cn >> 16);
+	/* The IMAP backend numbers its changes from the indexing ID counter (the one Outlook's local
+	   replica ranges come from): a change number below either counter has been issued. */
+	if (mstore_ctx && mapistore_indexing_get_new_folderID_as_user(mstore_ctx, username, &next_id) == MAPISTORE_SUCCESS &&
+	    exchange_globcnt(next_id >> 16) > next_cn) {
+		next_cn = exchange_globcnt(next_id >> 16);
+	}
 	high_cn = exchange_globcnt(parsed_idset->ranges->high);
 	if (high_cn >= next_cn) {
 		OC_DEBUG(0, "inconsistency: idset range for '%s' is referencing a change number "
@@ -2949,7 +2944,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -2961,7 +2956,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_fai");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_fai");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -2973,7 +2968,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncUploadStateStreamEnd(TALLOC_CTX *mem_ctx
 		if (parsed_idset) {
 			parsed_idset->single = true;
 		}
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_read");
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, parsed_idset, "cnset_seen_read");
 		if (retval != MAPI_E_SUCCESS) {
 			mapi_repl->error_code = retval;
 			goto reset;
@@ -3060,6 +3055,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageMove(TALLOC_CTX *mem_ctx,
 	struct emsmdbp_object			*source_folder_object;
 	char					*owner;
 	enum MAPISTATUS				retval;
+	enum mapistore_error			ret;
 	bool					mapistore;
 
 	OC_DEBUG(4, "exchange_emsmdb: [OXCFXICS] SyncImportMessageMove (0x78)\n");
@@ -3138,11 +3134,17 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageMove(TALLOC_CTX *mem_ctx,
 	predecessor_change_list->lpb = request->PredecessorChangeList;
 
 	if (mapistore) {
-		/* We invoke the backend method */
-		mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID,
-						    synccontext_object->parent_object->backend_object,
-						    source_folder_object->backend_object, mem_ctx, 1, &sourceMID, &destMID,
-						    &change_key, &predecessor_change_list, false);
+		/* We invoke the backend method; a refused move (IMAP said NO) leaves the message where it was. */
+		ret = mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID,
+							  synccontext_object->parent_object->backend_object,
+							  source_folder_object->backend_object, mem_ctx, 1, &sourceMID, &destMID,
+							  &change_key, &predecessor_change_list, false);
+		if (ret != MAPISTORE_SUCCESS) {
+			OC_DEBUG(3, "ImportMessageMove of mid 0x%"PRIx64" refused: %s\n", sourceMID, mapistore_errstr(ret));
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
+			talloc_free(source_folder_object);
+			goto end;
+		}
 	}
 	else {
 		OC_DEBUG(0, "mapistore support not implemented yet - shouldn't occur\n");
@@ -3391,7 +3393,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 	struct mapi_handles			*synccontext_rec;
 	struct emsmdbp_object			*synccontext_object, *folder_object, *message_object;
 	enum MAPISTATUS				retval;
-	enum mapistore_error			ret;
+	enum mapistore_error			ret, last_error = MAPISTORE_SUCCESS;
+	uint32_t				tried = 0, failed = 0;
 	struct MessageReadState			*read_states;
 	uint32_t				read_states_size;
 	struct Binary_r				*bin_data;
@@ -3493,9 +3496,15 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 				flag = CLEAR_READ_FLAG | CLEAR_NRN_PENDING;
 			}
 
+			tried++;
 			ret = emsmdbp_object_message_open(NULL, emsmdbp_ctx, folder_object, folder_object->object.folder->folderID, mid, true, &message_object, &msg);
 			if (ret == MAPISTORE_SUCCESS) {
-				mapistore_message_set_read_flag(emsmdbp_ctx->mstore_ctx, contextID, message_object->backend_object, flag);
+				ret = mapistore_message_set_read_flag(emsmdbp_ctx->mstore_ctx, contextID, message_object->backend_object, flag);
+				if (ret != MAPISTORE_SUCCESS) {
+					OC_DEBUG(3, "[oxcfxics]: read state of message 0x%"PRIx64" not written: %s\n", mid, mapistore_errstr(ret));
+					failed++;
+					last_error = ret;
+				}
 
 				/* Store the mid in the involved fmids
 				 * of the upload operations */
@@ -3506,7 +3515,13 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportReadStateChanges(TALLOC_CTX *mem_c
 				talloc_free(message_object);
 			} else {
 				OC_DEBUG(5, "[oxcfxics]: Failed to open message 0x%"PRIx64": %s\n", mid, mapistore_errstr(ret));
+				failed++;
+				last_error = ret;
 			}
+		}
+		/* One message gone or refused must not fail the batch; all of them failing is an error. */
+		if (tried && failed == tried) {
+			mapi_repl->error_code = mapistore_error_to_mapi(last_error);
 		}
 	}
 	else {
@@ -3737,7 +3752,7 @@ static enum MAPISTATUS oxcfxics_ndr_push_transfer_state(struct ndr_push *ndr, co
 	talloc_free(old_idset);
 	talloc_free(new_idset);
 
-	retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, synccontext->cnset_seen, "cnset_seen");
+	retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username, synccontext->cnset_seen, "cnset_seen");
 	OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 
 	ndr_push_uint32(ndr, NDR_SCALARS, MetaTagCnsetSeen);
@@ -3757,7 +3772,7 @@ static enum MAPISTATUS oxcfxics_ndr_push_transfer_state(struct ndr_push *ndr, co
 		talloc_free(old_idset);
 		talloc_free(new_idset);
 
-		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username,
+		retval = oxcfxics_check_cnset(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->username,
 					      synccontext->cnset_seen_fai, "cnset_seen_fai");
 		OPENCHANGE_RETVAL_IF(retval != MAPI_E_SUCCESS, retval, mem_ctx);
 

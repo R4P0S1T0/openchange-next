@@ -801,6 +801,19 @@ static enum MAPISTATUS message_open(TALLOC_CTX *mem_ctx,
 	return retval;
 }
 
+static enum MAPISTATUS message_delete(struct openchangedb_context *self, const char *username,
+				      uint64_t folderID, uint64_t messageID)
+{
+	enum MAPISTATUS retval;
+	struct ocdb_logger_data *priv_data = _ocdb_logger_data_get(self);
+
+	OC_DEBUG(priv_data->log_level, "%s[in]: username=[%s]", priv_data->log_prefix, username);
+	retval = priv_data->backend->message_delete(priv_data->backend, username, folderID, messageID);
+	OC_DEBUG(priv_data->log_level, "%s[out]: retval=[%s]", priv_data->log_prefix, mapi_get_errstr(retval));
+
+	return retval;
+}
+
 static enum MAPISTATUS message_get_property(TALLOC_CTX *mem_ctx,
 					    struct openchangedb_context *self,
 					    void *message_object,
@@ -899,6 +912,7 @@ _PUBLIC_ enum MAPISTATUS openchangedb_logger_initialize(TALLOC_CTX *mem_ctx,
 	oc_ctx->message_create = message_create;
 	oc_ctx->message_save = message_save;
 	oc_ctx->message_open = message_open;
+	oc_ctx->message_delete = message_delete;
 	oc_ctx->message_get_property = message_get_property;
 	oc_ctx->message_set_properties = message_set_properties;
 

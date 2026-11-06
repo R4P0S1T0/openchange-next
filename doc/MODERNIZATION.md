@@ -365,6 +365,106 @@ a client restart (M5 adds notifications); IMAP folder change numbers are
 per process, so a service restart resends the hierarchy; unread counts of
 provisioned folders read 0; the IMAP side is read-only (M4).
 
+
+## M4 writes and sending (2026-11-05)
+
+Branch `m4` (plan `docs/plans/2026-11-04-m4-imap-writes.md`): what Outlook
+does reaches Dovecot and Postfix. Move/copy (UID MOVE/COPY), permanent
+delete (UID EXPUNGE of exactly the UIDs deleted, never a bare EXPUNGE),
+read state, follow-up flag, replied/forwarded, folder create/rename/move/
+delete, drafts, and sending. Received mail is never rewritten: only its
+IMAP flags change.
+
+smb.conf parameters (besides M3's `mapistore:imap_*`):
+
+- `mapistore:smtp_host` (default `127.0.0.1`, loopback only, as
+  `imap_host`) and `mapistore:smtp_port` (default `587`): the submission
+  service. The backend always uses STARTTLS, logs in with SASL PLAIN as
+  `<user>*<imap_master_user>` with the master password, and uses the user's
+  own address as the envelope sender, so Postfix's
+  `reject_sender_login_mismatch` and DKIM signing apply as for any client.
+  The PLAIN mechanism needs `libsasl2-modules` on the server.
+- `mapistore:smtp_tunnel` (tests only): a command speaking SMTP on stdio.
+
+The Outbox is the IMAP mailbox `Outbox`, created unsubscribed at logon.
+Drafts and Outbox messages are stored with their Bcc header (as other
+clients do); the bytes sent and filed in Sent have none.
+
+- `mapistore:imap_expunged_mailbox` (unset by default): the mailbox where
+  Dovecot's `lazy_expunge` keeps expunged messages (`EXPUNGED` in the lab).
+  The backend only reads it, to find the original of a message Outlook
+  moved itself (see below).
+
+### Outlook acceptance (2026-11-05 to 2026-11-06)
+
+Classic Outlook for Microsoft 365 in cached mode, lab mailbox `teste`, on
+the branch up to `226f4765`. Accepted: move; delete and Shift+Delete;
+read/unread; follow-up flag; reply (the original gets `\Answered`); a
+folder under Inbox and one at the root; a draft with an attachment, and
+removing that attachment from the saved draft; sending to another mailbox
+with accents and an attachment, DKIM-signed, one copy in Sent; sending as
+another address is refused (`MAPI_E_NO_ACCESS`, nothing reaches Postfix)
+and Outlook shows a non-delivery report and keeps its Sent copy, as with
+Exchange; Outlook's rules and views are saved, reopened and deleted
+without errors; a client-only rule run on demand moves a message with its
+attachment intact (byte-identical to the original).
+
+Found with Outlook and fixed:
+
+- IMAP change numbers come from the indexing ID counter, above the IDs
+  Outlook uploads with; ICS no longer filters changes by a byte-swapped
+  number; upload states that saw those change numbers are accepted.
+- One-off recipient EntryIDs, the `RES:` reply prefix and refused sends
+  are handled; Outlook's own Sent copy is the only one (RopTransportSend
+  files none); a sent item is not stored as `\Draft`.
+- Outlook's change key is kept for its uploads, so editing a draft no
+  longer opens a conflict that doubled its attachments; a cached-mode draft
+  upload starts from an empty message, so removed attachments are removed.
+- The first write after a night idle failed (Dovecot's autologout closed
+  the connection); the connection is now probed before use.
+- Outlook keeps rules and views as FAI messages. The IMAP backend cannot
+  store them, so those of a mapistore root folder live in openchangedb.
+  This exposed old openchangedb faults: compound RopFindRow/RopRestrict
+  restrictions, FAI tables returning no rows, the MySQL query with the
+  wrong alias (the frequent error 1054), PR_FID truncated to 32 bits, a
+  stream written to an openchangedb message being dropped, a reopened FAI
+  message saved as a normal one, and native RopOpenMessage failing on
+  messages without a public free/busy subject.
+- A message Outlook moves itself (a client rule, an offline move) arrives
+  as a new upload in the target plus a delete in the source, in either
+  order. Rebuilt from its MAPI properties it lost its sender, date and
+  attachments. The backend now copies the original (UID COPY), found by
+  Message-ID and subject in the other mailboxes or, when the delete came
+  first, as the newest match of the lazy_expunge mailbox. Without a match
+  it is rebuilt as before.
+
+Recovery: with Dovecot's `lazy_expunge` (lab: `lazy_expunge_mailbox =
+EXPUNGED`, kept 30 days), every message the backend expunges stays in
+`EXPUNGED`. Restore one with `doveadm move -u <user> <mailbox> mailbox
+EXPUNGED uid <uid>`. Three messages rebuilt before the fix above were
+restored this way.
+
+Known limits, for later milestones:
+
+- Server-side rules: RopModifyRules and RopGetRulesTable are stubs, so a
+  rule that runs on the server (move on arrival) is saved, then reported
+  by Outlook as not loaded into Exchange and disabled. The plan is to
+  translate Outlook's rules into a Sieve script of their own, run by
+  Dovecot next to SOGo's, so they also apply with Outlook closed.
+- Outlook sees new mail only on a restart (M5 adds notifications), so a
+  client-only rule fires on arrival only then.
+- No offline address book: Autodiscover advertises no OAB URL, so Outlook
+  resolves names online through NSPI (answers in about 1 ms in the lab).
+  The compose stalls reported in acceptance did not come from the server:
+  of 8,667 requests on 2026-11-05/06, 19 took more than a second, the
+  slowest before the idle-connection fix or during a service restart.
+- Embedded-message attachments (forward as attachment,
+  RopOpenEmbeddedMessage) are not supported by the IMAP backend.
+- FAI messages in IMAP subfolders are refused; ICS does not download the
+  FAI messages kept in openchangedb.
+- The libcheck openchangedb suites (LDB and MySQL) fail in their fixtures,
+  so the MySQL-only fixes above were verified in the lab, not by a test.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern

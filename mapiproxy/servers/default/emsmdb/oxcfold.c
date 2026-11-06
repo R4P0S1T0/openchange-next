@@ -657,7 +657,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopDeleteMessages(TALLOC_CTX *mem_ctx,
 		int ret;
 		uint64_t mid = mapi_req->u.mapi_DeleteMessages.message_ids[i];
 		OC_DEBUG(0, "MID %i to delete: 0x%.16"PRIx64"\n", i, mid);
-		ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, contextID, parent_object->backend_object, mid, MAPISTORE_SOFT_DELETE);
+		ret = emsmdbp_folder_delete_message(emsmdbp_ctx, parent_object, mid, MAPISTORE_SOFT_DELETE);
 		if (ret != MAPISTORE_SUCCESS && ret != MAPISTORE_ERR_NOT_FOUND) {
 			if (ret == MAPISTORE_ERR_DENIED) {
 				mapi_repl->error_code = MAPI_E_NO_ACCESS;
@@ -948,6 +948,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopMoveCopyMessages(TALLOC_CTX *mem_ctx,
 	uint64_t                *targetMIDs;
         uint32_t                i;
 	bool			mapistore = false;
+	enum mapistore_error	ret;
 
 	OC_DEBUG(4, "exchange_emsmdb: [OXCFOLD] RopMoveCopyMessages (0x33)\n");
 
@@ -1010,8 +1011,12 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopMoveCopyMessages(TALLOC_CTX *mem_ctx,
 		}
 
 		/* We invoke the backend method */
-		mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID, destination_object->backend_object, source_object->backend_object, mem_ctx, mapi_req->u.mapi_MoveCopyMessages.count, mapi_req->u.mapi_MoveCopyMessages.message_id, targetMIDs, NULL, NULL, mapi_req->u.mapi_MoveCopyMessages.WantCopy);
+		ret = mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx, contextID, destination_object->backend_object, source_object->backend_object, mem_ctx, mapi_req->u.mapi_MoveCopyMessages.count, mapi_req->u.mapi_MoveCopyMessages.message_id, targetMIDs, NULL, NULL, mapi_req->u.mapi_MoveCopyMessages.WantCopy);
 		talloc_free(targetMIDs);
+		/* A move the store refused (quota, folder gone) must not look done. */
+		if (ret != MAPISTORE_SUCCESS) {
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
+		}
 
 		/* /\* The backend might do this for us. In any case, we try to add it ourselves *\/ */
 		/* mapistore_indexing_record_add_mid(emsmdbp_ctx->mstore_ctx, contextID, targetMID); */

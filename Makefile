@@ -990,7 +990,10 @@ MAPISTORE_IMAP_OBJS = mapiproxy/libmapistore/backends/imap/mapistore_imap.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_conn.po		\
 		      mapiproxy/libmapistore/backends/imap/imap_names.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_folder.po	\
-		      mapiproxy/libmapistore/backends/imap/imap_message.po
+		      mapiproxy/libmapistore/backends/imap/imap_message.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_write.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_compose.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_submit.po
 MAPISTORE_IMAP_SO = mapiproxy/libmapistore/backends/mapistore_imap.$(SHLIBEXT)
 
 $(MAPISTORE_IMAP_OBJS): CFLAGS += $(LIBETPAN_CFLAGS)
@@ -1022,7 +1025,7 @@ bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_
 .PHONY: check-imap-backend
 check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
 	rm -rf bin/imap-backend-fixture
-	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture $(CURDIR)/testsuite/modernization/smtp_fake.py
 
 mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION):  mapiproxy/libmapistore/mapistore_interface.po			\
 							mapiproxy/libmapistore/mapistore_processing.po			\

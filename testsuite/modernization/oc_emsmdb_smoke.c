@@ -453,6 +453,355 @@ static int test_provision_backend_takes_over_drafts(void)
     return 0;
 }
 
+/* A backend offering the Outbox role (the IMAP mailbox Outbox, M4) takes over the native Outbox, keeping its ID. */
+static enum mapistore_error outbox_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                            struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "fakeob://outbox/");
+    entry->name = talloc_strdup(entry, "Outbox");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_OUTBOX_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_outbox_taken_over(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t before, after;
+    char *uri = NULL;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, "alice@example.invalid", EMSMDBP_OUTBOX, &before) == MAPI_E_SUCCESS);
+    oc_emsmdb_disconnect(session);
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "fakeob"; fake.backend.description = "test"; fake.backend.namespace = "fakeob://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = outbox_contexts;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, "alice@example.invalid", EMSMDBP_OUTBOX, &after) == MAPI_E_SUCCESS);
+    CHECK(after == before);
+    CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", after, &uri, true)
+        == MAPI_E_SUCCESS && uri && strcmp(uri, "fakeob://outbox/") == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* Outlook keeps rules and views as FAI messages (MS-OXCMSG 2.2.1.2) in mail folders; a backend that cannot
+   store them (IMAP) must not see them: they live in openchangedb, on the backend root folder's record. */
+static unsigned fai_backend_creates;
+static int fai_root_marker;
+static enum mapistore_error sent_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                          struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "faifake://sent/");
+    entry->name = talloc_strdup(entry, "Sent Items");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_SENTITEMS_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error fai_create_context(TALLOC_CTX *mem, struct mapistore_connection_info *ci,
+                                               struct indexing_context *ictx, const char *uri, void **ctx)
+{ *ctx = &fai_root_marker; return MAPISTORE_SUCCESS; }
+static enum mapistore_error fai_root_folder(void *ctx, TALLOC_CTX *mem, uint64_t fid, void **folder)
+{ *folder = &fai_root_marker; return MAPISTORE_SUCCESS; }
+static enum mapistore_error fai_open_message(void *folder, TALLOC_CTX *mem, uint64_t mid, bool rw, void **msg)
+{ return MAPISTORE_ERR_NOT_FOUND; }
+static enum mapistore_error fai_delete_message(void *folder, uint64_t mid, uint8_t flags)
+{ return MAPISTORE_ERR_NOT_FOUND; }
+static enum mapistore_error fai_create_message(void *folder, TALLOC_CTX *mem, uint64_t mid, uint8_t fai, void **msg)
+{ fai_backend_creates++; return MAPISTORE_ERR_DENIED; }
+
+/* RopFindRow on the folder's FAI table with Outlook's lookup for its junk e-mail rule (MS-OXORULE 2.2.4):
+   AND(class == IPM.ExtendedRule.Message, EXIST(rule name), rule name == name). Returns the ROP error code. */
+static uint32_t find_rule(oc_emsmdb_session *session, uint32_t folder_handle, const char *name)
+{
+    struct EcDoRpc_MAPI_REQ req;
+    struct EcDoRpc_MAPI_REPL repl;
+    struct mapi_SRestriction_and terms[3];
+    uint32_t handles[2] = { folder_handle, 0xFFFFFFFF };
+    uint16_t size = 0;
+
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_GetContentsTable; req.handle_idx = 0;
+    req.u.mapi_GetContentsTable.handle_idx = 1; req.u.mapi_GetContentsTable.TableFlags = TableFlags_Associated;
+    if (EcDoRpc_RopGetContentsTable(session, session->ctx, &req, &repl, handles, &size) != MAPI_E_SUCCESS ||
+        repl.error_code != MAPI_E_SUCCESS) return 0xFFFFFFFF;
+    { /* The columns Outlook sets (RopSetColumns) before it looks the rule up. */
+        static enum MAPITAGS columns[] = { PidTagMid, PidTagRuleMessageName };
+        struct mapi_handles *th;
+        void *to;
+        if (mapi_handles_search(session->ctx->handles_ctx, handles[1], &th) != MAPI_E_SUCCESS ||
+            mapi_handles_get_private_data(th, &to) != MAPI_E_SUCCESS || !to) return 0xFFFFFFFF;
+        ((struct emsmdbp_object *) to)->object.table->prop_count = 2;
+        ((struct emsmdbp_object *) to)->object.table->properties = columns;
+    }
+
+    memset(terms, 0, sizeof terms);
+    terms[0].rt = RES_PROPERTY; terms[0].res.resProperty.relop = RELOP_EQ;
+    terms[0].res.resProperty.ulPropTag = PR_MESSAGE_CLASS_UNICODE;
+    terms[0].res.resProperty.lpProp.ulPropTag = PR_MESSAGE_CLASS_UNICODE;
+    terms[0].res.resProperty.lpProp.value.lpszW = "IPM.ExtendedRule.Message";
+    terms[1].rt = RES_EXIST; terms[1].res.resExist.ulPropTag = PidTagRuleMessageName;
+    terms[2].rt = RES_PROPERTY; terms[2].res.resProperty.relop = RELOP_EQ;
+    terms[2].res.resProperty.ulPropTag = PidTagRuleMessageName;
+    terms[2].res.resProperty.lpProp.ulPropTag = PidTagRuleMessageName;
+    terms[2].res.resProperty.lpProp.value.lpszW = name;
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    handles[0] = handles[1];
+    req.opnum = op_MAPI_FindRow; req.handle_idx = 0;
+    req.u.mapi_FindRow.ulFlags = DIR_FORWARD; req.u.mapi_FindRow.origin = BOOKMARK_BEGINNING;
+    req.u.mapi_FindRow.res.rt = RES_AND;
+    req.u.mapi_FindRow.res.res.resAnd.cRes = 3;
+    req.u.mapi_FindRow.res.res.resAnd.res = terms;
+    if (EcDoRpc_RopFindRow(session, session->ctx, &req, &repl, handles, &size) != MAPI_E_SUCCESS) return 0xFFFFFFFF;
+    if (repl.error_code == MAPI_E_SUCCESS && !repl.u.mapi_FindRow.HasRowData) return 0xFFFFFFFE;
+    return repl.error_code;
+}
+
+static int test_fai_in_backend_root_kept_in_openchangedb(void)
+{
+    static uint8_t rules_blob[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct emsmdbp_object *mailbox, *sent, *msg;
+    struct mapi_handles *fh, *mh;
+    struct EcDoRpc_MAPI_REQ req;
+    struct EcDoRpc_MAPI_REPL repl;
+    struct SPropValue prop[2] = { { .ulPropTag = PR_MESSAGE_CLASS_UNICODE, .value.lpszW = "IPM.ExtendedRule.Message" },
+                                  { .ulPropTag = PidTagRuleMessageName, .value.lpszW = "Junk E-mail Rule" } };
+    struct SRow row = { .cValues = 2, .lpProps = prop };
+    uint32_t handles[3];
+    uint16_t size = 0;
+    uint64_t fid, mid;
+    void *data;
+
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "faifake"; fake.backend.description = "test"; fake.backend.namespace = "faifake://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = sent_contexts;
+    fake.backend.create_context = fai_create_context; fake.context.get_root_folder = fai_root_folder;
+    fake.folder.create_message = fai_create_message; fake.folder.open_message = fai_open_message;
+    fake.folder.delete_message = fai_delete_message;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, "alice@example.invalid", EMSMDBP_SENT_ITEMS, &fid) == MAPI_E_SUCCESS);
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    CHECK(mailbox && mapi_handles_add(session->ctx->handles_ctx, 0, &fh) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_object_open_folder(fh, session->ctx, mailbox, fid, &sent) == MAPISTORE_SUCCESS);
+    CHECK(emsmdbp_is_mapistore(sent) && mapi_handles_set_private_data(fh, sent) == MAPI_E_SUCCESS);
+
+    /* RopCreateMessage (associated), as Outlook sends it for a rule. */
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    handles[0] = fh->handle; handles[1] = handles[2] = 0xFFFFFFFF;
+    req.opnum = op_MAPI_CreateMessage; req.handle_idx = 0;
+    req.u.mapi_CreateMessage.handle_idx = 1; req.u.mapi_CreateMessage.CodePageId = 0x4e4;
+    req.u.mapi_CreateMessage.FolderId = fid; req.u.mapi_CreateMessage.AssociatedFlag = 1;
+    CHECK(EcDoRpc_RopCreateMessage(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS && fai_backend_creates == 0);
+    mid = repl.u.mapi_CreateMessage.MessageId.MessageId;
+    CHECK(mapi_handles_search(session->ctx->handles_ctx, handles[1], &mh) == MAPI_E_SUCCESS);
+    CHECK(mapi_handles_get_private_data(mh, &data) == MAPI_E_SUCCESS && (msg = data) && !emsmdbp_is_mapistore(msg));
+    CHECK(emsmdbp_object_set_properties(session->ctx, msg, &row) == MAPI_E_SUCCESS);
+
+    /* Outlook writes the rules blob through a stream and saves the message before it releases the stream. */
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_OpenStream; req.handle_idx = 1;
+    req.u.mapi_OpenStream.handle_idx = 2; req.u.mapi_OpenStream.PropertyTag = PidTagRwRulesStream;
+    req.u.mapi_OpenStream.OpenModeFlags = OpenStream_Create;
+    CHECK(EcDoRpc_RopOpenStream(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_WriteStream; req.handle_idx = 2;
+    req.u.mapi_WriteStream.data = data_blob_const(rules_blob, sizeof rules_blob);
+    CHECK(EcDoRpc_RopWriteStream(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_SaveChangesMessage; req.handle_idx = 0;
+    req.u.mapi_SaveChangesMessage.handle_idx = 1; req.u.mapi_SaveChangesMessage.SaveFlags = KeepOpenReadWrite;
+    handles[0] = handles[1];
+    CHECK(EcDoRpc_RopSaveChangesMessage(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+    {
+        void *saved = NULL, *reopened = NULL;
+        CHECK(openchangedb_message_open(session, session->ctx->oc_ctx, "alice@example.invalid", mid, fid, &reopened, NULL) == MAPI_E_SUCCESS);
+        CHECK(openchangedb_message_get_property(session, session->ctx->oc_ctx, reopened, PidTagRwRulesStream, &saved) == MAPI_E_SUCCESS);
+        CHECK(((struct Binary_r *) saved)->cb == sizeof rules_blob && memcmp(((struct Binary_r *) saved)->lpb, rules_blob, sizeof rules_blob) == 0);
+    }
+
+    /* Outlook's other order: it releases the stream (RopRelease) before it saves the message. */
+    {
+        uint32_t h2[3] = { fh->handle, 0xFFFFFFFF, 0xFFFFFFFF };
+        void *saved = NULL, *reopened = NULL;
+        uint64_t mid3;
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        req.opnum = op_MAPI_CreateMessage; req.handle_idx = 0;
+        req.u.mapi_CreateMessage.handle_idx = 1; req.u.mapi_CreateMessage.CodePageId = 0x4e4;
+        req.u.mapi_CreateMessage.FolderId = fid; req.u.mapi_CreateMessage.AssociatedFlag = 1;
+        CHECK(EcDoRpc_RopCreateMessage(session, session->ctx, &req, &repl, h2, &size) == MAPI_E_SUCCESS && repl.error_code == MAPI_E_SUCCESS);
+        mid3 = repl.u.mapi_CreateMessage.MessageId.MessageId;
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        req.opnum = op_MAPI_OpenStream; req.handle_idx = 1;
+        req.u.mapi_OpenStream.handle_idx = 2; req.u.mapi_OpenStream.PropertyTag = PidTagRwRulesStream;
+        req.u.mapi_OpenStream.OpenModeFlags = OpenStream_Create;
+        CHECK(EcDoRpc_RopOpenStream(session, session->ctx, &req, &repl, h2, &size) == MAPI_E_SUCCESS && repl.error_code == MAPI_E_SUCCESS);
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        req.opnum = op_MAPI_WriteStream; req.handle_idx = 2;
+        req.u.mapi_WriteStream.data = data_blob_const(rules_blob, sizeof rules_blob);
+        CHECK(EcDoRpc_RopWriteStream(session, session->ctx, &req, &repl, h2, &size) == MAPI_E_SUCCESS && repl.error_code == MAPI_E_SUCCESS);
+        CHECK(mapi_handles_delete(session->ctx->handles_ctx, h2[2]) == MAPI_E_SUCCESS);  /* RopRelease */
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        req.opnum = op_MAPI_SaveChangesMessage; req.handle_idx = 0;
+        req.u.mapi_SaveChangesMessage.handle_idx = 1; req.u.mapi_SaveChangesMessage.SaveFlags = KeepOpenReadWrite;
+        CHECK(EcDoRpc_RopSaveChangesMessage(session, session->ctx, &req, &repl, h2, &size) == MAPI_E_SUCCESS && repl.error_code == MAPI_E_SUCCESS);
+        CHECK(openchangedb_message_open(session, session->ctx->oc_ctx, "alice@example.invalid", mid3, fid, &reopened, NULL) == MAPI_E_SUCCESS);
+        CHECK(openchangedb_message_get_property(session, session->ctx->oc_ctx, reopened, PidTagRwRulesStream, &saved) == MAPI_E_SUCCESS);
+        CHECK(((struct Binary_r *) saved)->cb == sizeof rules_blob);
+        CHECK(openchangedb_message_delete(session->ctx->oc_ctx, "alice@example.invalid", fid, mid3) == MAPI_E_SUCCESS);
+    }
+
+    /* The FAI contents table of the backend folder lists it. */
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    handles[0] = fh->handle; handles[1] = 0xFFFFFFFF;
+    req.opnum = op_MAPI_GetContentsTable; req.handle_idx = 0;
+    req.u.mapi_GetContentsTable.handle_idx = 1; req.u.mapi_GetContentsTable.TableFlags = TableFlags_Associated;
+    CHECK(EcDoRpc_RopGetContentsTable(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS && repl.u.mapi_GetContentsTable.RowCount == 1);
+
+    /* And it opens by ID, with the class it was saved with. */
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    handles[0] = fh->handle; handles[1] = 0xFFFFFFFF;
+    req.opnum = op_MAPI_OpenMessage; req.handle_idx = 0;
+    req.u.mapi_OpenMessage.handle_idx = 1; req.u.mapi_OpenMessage.CodePageId = 0x4e4;
+    req.u.mapi_OpenMessage.FolderId = fid; req.u.mapi_OpenMessage.MessageId = mid;
+    req.u.mapi_OpenMessage.OpenModeFlags = ReadOnly;
+    CHECK(EcDoRpc_RopOpenMessage(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+    CHECK(mapi_handles_search(session->ctx->handles_ctx, handles[1], &mh) == MAPI_E_SUCCESS);
+    CHECK(mapi_handles_get_private_data(mh, &data) == MAPI_E_SUCCESS && (msg = data) && !emsmdbp_is_mapistore(msg));
+    /* Read from openchangedb directly: the provider's property path needs SamDB, absent here. */
+    CHECK(openchangedb_message_get_property(session, session->ctx->oc_ctx, msg->backend_object, PR_MESSAGE_CLASS_UNICODE, &data)
+        == MAPI_E_SUCCESS && strcmp(data, "IPM.ExtendedRule.Message") == 0);
+    CHECK(find_rule(session, fh->handle, "Junk E-mail Rule") == MAPI_E_SUCCESS);
+    CHECK(find_rule(session, fh->handle, "Other Rule") == MAPI_E_NOT_FOUND);
+
+    /* Cached mode uploads FAI messages instead (RopSynchronizationImportMessageChange). */
+    {
+        struct emsmdbp_object *sync = emsmdbp_object_synccontext_init(fh, session->ctx, sent);
+        struct mapi_handles *sh;
+        struct Binary_r *key = NULL;
+        struct mapi_SPropValue vals[2];
+        uint64_t mid2;
+        CHECK(sync && mapi_handles_add(session->ctx->handles_ctx, 0, &sh) == MAPI_E_SUCCESS);
+        CHECK(mapi_handles_set_private_data(sh, sync) == MAPI_E_SUCCESS);
+        CHECK(mapistore_indexing_get_new_folderID(session->ctx->mstore_ctx, &mid2) == MAPISTORE_SUCCESS);
+        CHECK(emsmdbp_source_key_from_fmid(session, session->ctx, "alice@example.invalid", mid2, &key) == MAPISTORE_SUCCESS && key);
+        vals[0].ulPropTag = PidTagSourceKey; vals[0].value.bin.cb = key->cb; vals[0].value.bin.lpb = key->lpb;
+        vals[1].ulPropTag = PidTagMessageClass; vals[1].value.lpszW = "IPM.Microsoft.FolderDesign.NamedView";
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        handles[0] = sh->handle; handles[1] = 0xFFFFFFFF;
+        req.opnum = op_MAPI_SyncImportMessageChange; req.handle_idx = 0;
+        req.u.mapi_SyncImportMessageChange.handle_idx = 1;
+        req.u.mapi_SyncImportMessageChange.ImportFlag = ImportFlag_Associated;
+        req.u.mapi_SyncImportMessageChange.PropertyValues.cValues = 2;
+        req.u.mapi_SyncImportMessageChange.PropertyValues.lpProps = vals;
+        CHECK(EcDoRpc_RopSyncImportMessageChange(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+        CHECK(repl.error_code == MAPI_E_SUCCESS && fai_backend_creates == 0);
+
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        req.opnum = op_MAPI_SaveChangesMessage; req.handle_idx = 0;
+        req.u.mapi_SaveChangesMessage.handle_idx = 1; req.u.mapi_SaveChangesMessage.SaveFlags = KeepOpenReadWrite;
+        handles[0] = handles[1];
+        CHECK(EcDoRpc_RopSaveChangesMessage(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+        CHECK(repl.error_code == MAPI_E_SUCCESS);
+
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        handles[0] = fh->handle; handles[1] = 0xFFFFFFFF;
+        req.opnum = op_MAPI_GetContentsTable; req.handle_idx = 0;
+        req.u.mapi_GetContentsTable.handle_idx = 1; req.u.mapi_GetContentsTable.TableFlags = TableFlags_Associated;
+        CHECK(EcDoRpc_RopGetContentsTable(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+        CHECK(repl.error_code == MAPI_E_SUCCESS && repl.u.mapi_GetContentsTable.RowCount == 2);
+
+        /* Outlook's rules wizard restricts the FAI table to rule messages (RopRestrict), then reads the rows. */
+        {
+            static enum MAPITAGS columns[] = { PidTagMid };
+            struct mapi_handles *th;
+            struct emsmdbp_object *to;
+            enum MAPISTATUS *rv = NULL;
+            void **dp, *td;
+            CHECK(mapi_handles_search(session->ctx->handles_ctx, handles[1], &th) == MAPI_E_SUCCESS);
+            CHECK(mapi_handles_get_private_data(th, &td) == MAPI_E_SUCCESS && (to = td));
+            to->object.table->prop_count = 1; to->object.table->properties = columns;
+            memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+            handles[0] = handles[1];
+            req.opnum = op_MAPI_Restrict; req.handle_idx = 0;
+            req.u.mapi_Restrict.restrictions.rt = RES_PROPERTY;
+            req.u.mapi_Restrict.restrictions.res.resProperty.relop = RELOP_EQ;
+            req.u.mapi_Restrict.restrictions.res.resProperty.ulPropTag = PR_MESSAGE_CLASS_UNICODE;
+            req.u.mapi_Restrict.restrictions.res.resProperty.lpProp.ulPropTag = PR_MESSAGE_CLASS_UNICODE;
+            req.u.mapi_Restrict.restrictions.res.resProperty.lpProp.value.lpszW = "IPM.ExtendedRule.Message";
+            CHECK(EcDoRpc_RopRestrict(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+            CHECK(repl.error_code == MAPI_E_SUCCESS && to->object.table->denominator == 1);
+            dp = emsmdbp_object_table_get_row_props(session, session->ctx, to, 0, MAPISTORE_PREFILTERED_QUERY, &rv);
+            CHECK(dp && rv[0] == MAPI_E_SUCCESS && *(uint64_t *) dp[0] == mid);
+            /* An empty restriction (AND of nothing) shows every row again. */
+            memset(&req.u.mapi_Restrict.restrictions, 0, sizeof req.u.mapi_Restrict.restrictions);
+            req.u.mapi_Restrict.restrictions.rt = RES_AND;
+            CHECK(EcDoRpc_RopRestrict(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+            CHECK(repl.error_code == MAPI_E_SUCCESS && to->object.table->denominator == 2);
+        }
+
+        /* Deleting a rule deletes its FAI message. */
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        handles[0] = fh->handle;
+        req.opnum = op_MAPI_DeleteMessages; req.handle_idx = 0;
+        req.u.mapi_DeleteMessages.cn_ids = 2;
+        req.u.mapi_DeleteMessages.message_ids = (uint64_t []) { mid, mid2 };
+        CHECK(EcDoRpc_RopDeleteMessages(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+        CHECK(repl.error_code == MAPI_E_SUCCESS);
+        memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+        handles[0] = fh->handle; handles[1] = 0xFFFFFFFF;
+        req.opnum = op_MAPI_GetContentsTable; req.handle_idx = 0;
+        req.u.mapi_GetContentsTable.handle_idx = 1; req.u.mapi_GetContentsTable.TableFlags = TableFlags_Associated;
+        CHECK(EcDoRpc_RopGetContentsTable(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+        CHECK(repl.error_code == MAPI_E_SUCCESS && repl.u.mapi_GetContentsTable.RowCount == 0);
+    }
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* Outlook's local free/busy and contact-link messages in native folders carry no public free/busy
+   subject ("USER-/CN=RECIPIENTS/CN=name"): they must open all the same. */
+static int test_native_message_without_freebusy_subject_opens(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct emsmdbp_object *mailbox, *msg = NULL;
+    void *created = NULL;
+    uint64_t mid;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    CHECK(mailbox && mapistore_indexing_get_new_folderID(session->ctx->mstore_ctx, &mid) == MAPISTORE_SUCCESS);
+    CHECK(openchangedb_message_create(session, session->ctx->oc_ctx, "alice@example.invalid", mid, first_fids[1], true, &created) == MAPI_E_SUCCESS);
+    CHECK(openchangedb_message_save(session->ctx->oc_ctx, created, 0) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_object_message_open(session, session->ctx, mailbox, first_fids[1], mid, false, &msg, NULL) == MAPISTORE_SUCCESS && msg);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 /* A backend that cannot reach its store (Dovecot down) must not fail logon or drop folders. */
 static bool store_down;
 static enum mapistore_error flaky_list_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
@@ -604,7 +953,8 @@ int main(int argc, char **argv)
         test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
-        test_provision_backend_takes_over_drafts() ||
+        test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
+        test_fai_in_backend_root_kept_in_openchangedb() || test_native_message_without_freebusy_subject_opens() ||
         test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

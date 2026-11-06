@@ -71,6 +71,7 @@ struct openchangedb_context {
 	enum MAPISTATUS (*message_create)(TALLOC_CTX *, struct openchangedb_context *, const char *, uint64_t, uint64_t, bool, void **);
 	enum MAPISTATUS (*message_save)(struct openchangedb_context *, void *, uint8_t);
 	enum MAPISTATUS (*message_open)(TALLOC_CTX *, struct openchangedb_context *, const char *, uint64_t, uint64_t, void **, void **);
+	enum MAPISTATUS (*message_delete)(struct openchangedb_context *, const char *, uint64_t, uint64_t);
 	enum MAPISTATUS (*message_get_property)(TALLOC_CTX *, struct openchangedb_context *, void *, uint32_t, void **);
 	enum MAPISTATUS (*message_set_properties)(TALLOC_CTX *, struct openchangedb_context *, void *, struct SRow *);
 

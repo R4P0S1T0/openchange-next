@@ -48,7 +48,7 @@ static struct shared_conn *find_shared(const char *username)
 	return NULL;
 }
 
-/* The user's connection, reopened once when the server dropped it. */
+/* The user's connection, reopened when the server dropped it. */
 _PUBLIC_ struct imap_conn *imap_context_conn(struct imap_context *ctx)
 {
 	const struct imap_settings	*settings = imap_backend_settings();
@@ -57,6 +57,7 @@ _PUBLIC_ struct imap_conn *imap_context_conn(struct imap_context *ctx)
 	if (!settings || !s) {
 		return NULL;
 	}
+	imap_conn_probe(s->conn);
 	if (!imap_conn_alive(s->conn)) {
 		talloc_free(s->conn);
 		s->conn = imap_conn_open(s, settings, s->username);
@@ -207,6 +208,16 @@ _PUBLIC_ enum mapistore_error imap_list_contexts(const char *username, struct in
 	}
 	delimiter = imap_conn_delimiter(conn);
 	ret = imap_list(conn, conn, &mbs, &n);
+	/* Outlook's Outbox lives in IMAP (one MIME path with Drafts), unsubscribed so that IMAP
+	   clients honouring subscriptions hide it. */
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < n && strcmp(mbs[i].name, "Outbox") != 0; i++);
+	if (ret == MAPISTORE_SUCCESS && i == n) {
+		if (imap_create_mailbox(conn, "Outbox", false) == 0) {
+			ret = imap_list(conn, conn, &mbs, &n);
+		} else {
+			OC_DEBUG(1, "IMAP backend: cannot create the Outbox mailbox; Outlook keeps its native Outbox\n");
+		}
+	}
 	for (i = 0; ret == MAPISTORE_SUCCESS && i < n; i++) {
 		const struct imap_mailbox *mb = &mbs[i];
 		enum mapistore_context_role role = MAPISTORE_MAIL_ROLE;
@@ -219,6 +230,9 @@ _PUBLIC_ enum mapistore_error imap_list_contexts(const char *username, struct in
 		if (strcasecmp(mb->name, "INBOX") == 0) {
 			main_folder = !taken[MAPISTORE_MAIL_ROLE];
 			name = "Inbox";
+		} else if (strcmp(mb->name, "Outbox") == 0 && !taken[MAPISTORE_OUTBOX_ROLE]) {
+			role = MAPISTORE_OUTBOX_ROLE;
+			main_folder = true;
 		}
 		for (k = 0; k < sizeof special / sizeof special[0]; k++) {
 			if ((mb->flags & special[k].flag) && !taken[special[k].role]) {
@@ -289,11 +303,56 @@ _PUBLIC_ enum mapistore_error imap_create_context(TALLOC_CTX *mem_ctx, struct ma
 	return MAPISTORE_SUCCESS;
 }
 
-/* Folders created by Outlook stay native in openchangedb (read-only backend, M3). */
+/* A mail folder Outlook creates next to the Inbox becomes a top-level IMAP mailbox, subscribed.
+   The folders Outlook creates there for itself stay native in openchangedb (NOT_FOUND): their
+   sync logs must not land in webmail. Other folder kinds (calendars...) are not IMAP's. */
 _PUBLIC_ enum mapistore_error imap_create_root_folder(const char *username, enum mapistore_context_role role,
 						      uint64_t fid, const char *name, TALLOC_CTX *mem_ctx, char **uri)
 {
-	return MAPISTORE_ERR_NOT_FOUND;
+	/* shortcut: Outlook's own folders are known by their English and Brazilian Portuguese names;
+	   add a locale here when its users show them in webmail. */
+	static const char *outlook_own[] = {
+		"Sync Issues", "Conflicts", "Local Failures", "Server Failures", "Conversation History",
+		"Problemas de Sincroniza\xc3\xa7\xc3\xa3o", "Conflitos", "Falhas Locais", "Falhas do Servidor",
+		"Hist\xc3\xb3rico de Conversa", "Hist\xc3\xb3rico de Conversas",
+	};
+	const struct imap_settings	*settings = imap_backend_settings();
+	struct imap_conn		*conn;
+	char				*leaf;
+	char				delimiter;
+	size_t				i;
+
+	if (!uri) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	*uri = NULL;
+	if (role != MAPISTORE_MAIL_ROLE || !name || !username || !settings) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	for (i = 0; i < sizeof outlook_own / sizeof outlook_own[0]; i++) {
+		if (strcasecmp(name, outlook_own[i]) == 0) {
+			return MAPISTORE_ERR_NOT_FOUND;
+		}
+	}
+	conn = imap_conn_open(mem_ctx, settings, username);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	delimiter = imap_conn_delimiter(conn);
+	leaf = imap_mailbox_name(conn, name, delimiter);
+	if (!leaf) {
+		talloc_free(conn);
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (imap_create_mailbox(conn, leaf, true)) {
+		enum mapistore_error ret = imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+
+		talloc_free(conn);
+		return ret;
+	}
+	*uri = imap_uri(mem_ctx, username, leaf, delimiter);
+	talloc_free(conn);
+	return *uri ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
 }
 
 static enum mapistore_error get_path(void *object, TALLOC_CTX *mem_ctx, uint64_t fmid, char **path)
@@ -803,6 +862,16 @@ static char *describe(TALLOC_CTX *mem_ctx, const struct mapi_SRestriction *r, in
 		}
 		return out ? talloc_strdup_append_buffer(out, ")") : NULL;
 	case RES_PROPERTY:
+		/* A change number is an ID, never personal data: shown, to debug ICS. */
+		if ((r->res.resProperty.ulPropTag & 0xFFFF) == PT_I8) {
+			return talloc_asprintf(mem_ctx, "PROP(%u,%.8x,0x%"PRIx64")", r->res.resProperty.relop,
+					       r->res.resProperty.ulPropTag, r->res.resProperty.lpProp.value.d);
+		}
+		/* A message class is not personal data either: shown, to tell which FAI message Outlook looks for. */
+		if (r->res.resProperty.ulPropTag == PidTagMessageClass && r->res.resProperty.lpProp.value.lpszW) {
+			return talloc_asprintf(mem_ctx, "PROP(%u,%.8x,%s)", r->res.resProperty.relop,
+					       r->res.resProperty.ulPropTag, r->res.resProperty.lpProp.value.lpszW);
+		}
 		return talloc_asprintf(mem_ctx, "PROP(%u,%.8x)", r->res.resProperty.relop, r->res.resProperty.ulPropTag);
 	case RES_BITMASK:
 		return talloc_asprintf(mem_ctx, "BITMASK(%u,%.8x,%.8x)", r->res.resBitmask.relMBR, r->res.resBitmask.ulPropTag, r->res.resBitmask.ulMask);
@@ -902,25 +971,31 @@ _PUBLIC_ uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v)
 struct change {
 	struct change	*prev, *next;
 	char		*key;		/* user, then URI */
-	char		*state;
+	char		*state;		/* NULL: Outlook's own change, state not seen yet */
 	uint64_t	cn;
 	time_t		when;
+	struct Binary_r	*ck, *pcl;	/* Outlook's change key and PCL for its own change */
 };
 static struct change *changes;
 
-static enum mapistore_error openchangedb_cn(struct imap_context *ctx, uint64_t *cn)
+/* Change numbers share the indexing ID counter with the ranges RopGetLocalReplicaIds reserves for
+   Outlook's own uploads; openchangedb's change counter runs far below that, and once Outlook had
+   uploaded a change every later server change looked already seen. */
+static enum mapistore_error id_counter_cn(struct imap_context *ctx, uint64_t *cn)
 {
-	if (!ctx->oc_ctx) {
-		return MAPISTORE_ERR_NOT_INITIALIZED;
+	uint64_t		raw;
+	enum mapistore_error	ret = ctx->ictx->allocate_fmid(ctx->ictx, ctx->username, &raw);
+
+	if (ret == MAPISTORE_SUCCESS) {
+		*cn = (exchange_globcnt(raw) << 16) | 0x0001;
 	}
-	return openchangedb_get_new_changeNumber(ctx->oc_ctx, ctx->username, cn) == MAPI_E_SUCCESS
-		? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	return ret;
 }
-static imap_cn_source cn_source = openchangedb_cn;
+static imap_cn_source cn_source = id_counter_cn;
 
 _PUBLIC_ void imap_backend_set_cn_source(imap_cn_source source)
 {
-	cn_source = source ? source : openchangedb_cn;
+	cn_source = source ? source : id_counter_cn;
 }
 
 _PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state,
@@ -935,7 +1010,11 @@ _PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
 	for (c = changes; c && strcmp(c->key, key) != 0; c = c->next);
-	if (c && strcmp(c->state, state) == 0) {
+	/* Outlook's own change: the first state seen after it is that change, not a new one. */
+	if (c && !c->state) {
+		c->state = talloc_strdup(c, state);
+	}
+	if (c && c->state && strcmp(c->state, state) == 0) {
 		talloc_free(key);
 		*cn = c->cn;
 		*when = c->when;
@@ -961,8 +1040,72 @@ _PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const
 	c->state = talloc_strdup(c, state);
 	c->cn = *cn;
 	c->when = time(NULL);
+	TALLOC_FREE(c->ck);	/* changed on the server: the server's own key from now on */
+	TALLOC_FREE(c->pcl);
 	*when = c->when;
 	return c->state ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+}
+
+static struct Binary_r *binary_dup(TALLOC_CTX *mem_ctx, const struct Binary_r *b)
+{
+	struct Binary_r *d = b ? talloc_zero(mem_ctx, struct Binary_r) : NULL;
+
+	if (d && b->cb && !(d->lpb = talloc_memdup(d, b->lpb, b->cb))) {
+		talloc_free(d);
+		return NULL;
+	}
+	if (d) {
+		d->cb = b->cb;
+	}
+	return d;
+}
+
+/* Outlook uploaded this object's current state with its own change key: report that key, so its
+   next sync does not see a server change and open a conflict. */
+_PUBLIC_ enum mapistore_error imap_change_set_client(struct imap_context *ctx, const char *uri,
+						     const struct Binary_r *ck, const struct Binary_r *pcl)
+{
+	struct change		*c;
+	char			*key;
+	uint64_t		cn;
+	enum mapistore_error	ret;
+
+	if (!uri || !ck || !pcl) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	ret = cn_source(ctx, &cn);
+	key = ret == MAPISTORE_SUCCESS ? talloc_asprintf(NULL, "%s\n%s", ctx->username, uri) : NULL;
+	if (!key) {
+		return ret != MAPISTORE_SUCCESS ? ret : MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (c = changes; c && strcmp(c->key, key) != 0; c = c->next);
+	if (!c) {
+		c = talloc_zero(NULL, struct change);
+		if (!c) {
+			talloc_free(key);
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		c->key = talloc_steal(c, key);
+		DLIST_ADD(changes, c);
+	} else {
+		talloc_free(key);
+	}
+	TALLOC_FREE(c->state);
+	TALLOC_FREE(c->ck);
+	TALLOC_FREE(c->pcl);
+	c->cn = cn;
+	c->when = time(NULL);
+	c->ck = binary_dup(c, ck);
+	c->pcl = binary_dup(c, pcl);
+	return c->ck && c->pcl ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+}
+
+static const struct change *client_change(uint64_t cn)
+{
+	const struct change *c;
+
+	for (c = changes; c && !(c->cn == cn && c->ck); c = c->next);
+	return c;
 }
 
 /* XID of a change: the replica GUID (NDR) and the 6 low bytes of cn >> 16, as oxcfxics_make_gid. */
@@ -1007,10 +1150,12 @@ static struct FILETIME *change_time(TALLOC_CTX *mem_ctx, time_t t)
 _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when,
 				 enum MAPITAGS tag)
 {
+	const struct change *own = (tag == PidTagChangeKey || tag == PidTagPredecessorChangeList) ? client_change(cn) : NULL;
+
 	switch (tag) {
 	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
-	case PidTagChangeKey:			return change_key(mem_ctx, &ctx->replica_guid, cn, false);
-	case PidTagPredecessorChangeList:	return change_key(mem_ctx, &ctx->replica_guid, cn, true);
+	case PidTagChangeKey:			return own ? binary_dup(mem_ctx, own->ck) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
+	case PidTagPredecessorChangeList:	return own ? binary_dup(mem_ctx, own->pcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
 	case PidTagLastModificationTime:	return change_time(mem_ctx, when);
 	default:				return NULL;
 	}
@@ -1114,6 +1259,9 @@ _PUBLIC_ enum mapistore_error imap_properties_get(void *object, TALLOC_CTX *mem_
 		return imap_message_properties(object, mem_ctx, count, tags, data);
 	case IMAP_OBJ_ATTACHMENT:
 		return imap_attachment_properties(object, mem_ctx, count, tags, data);
+	case IMAP_OBJ_DRAFT_ATTACHMENT:
+		object = imap_draft_attachment_get(object);
+		return object ? imap_attachment_properties(object, mem_ctx, count, tags, data) : MAPISTORE_ERR_NOT_FOUND;
 	default:
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
@@ -1134,7 +1282,7 @@ static const enum MAPITAGS message_candidates[] = {
 	PidTagHasAttachments, PidTagMessageClass, PidTagInternetMessageId, PidTagImportance, PidTagSensitivity,
 	PidTagPriority, PidTagIconIndex, PidTagFlagStatus, PidTagMid, PidTagFolderId, PidTagParentFolderId,
 	PidTagChangeNumber, PidTagChangeKey, PidTagPredecessorChangeList, PidTagBody, PidTagHtml, PidTagNativeBody,
-	PidTagInternetCodepage, PidTagTransportMessageHeaders,
+	PidTagInternetCodepage, PidTagTransportMessageHeaders, PidTagSenderEntryId, PidTagSentRepresentingEntryId,
 };
 
 static const enum MAPITAGS attachment_candidates[] = {
@@ -1159,7 +1307,8 @@ _PUBLIC_ enum mapistore_error imap_properties_available(void *object, TALLOC_CTX
 	switch (*type) {
 	case IMAP_OBJ_FOLDER:	  candidates = folder_candidates; n = sizeof folder_candidates / sizeof folder_candidates[0]; break;
 	case IMAP_OBJ_MESSAGE:	  candidates = message_candidates; n = sizeof message_candidates / sizeof message_candidates[0]; break;
-	case IMAP_OBJ_ATTACHMENT: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
+	case IMAP_OBJ_ATTACHMENT:
+	case IMAP_OBJ_DRAFT_ATTACHMENT: candidates = attachment_candidates; n = sizeof attachment_candidates / sizeof attachment_candidates[0]; break;
 	default:		  return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	tmp = talloc_new(NULL);
@@ -1205,6 +1354,396 @@ _PUBLIC_ enum mapistore_error imap_table_available(void *object, TALLOC_CTX *mem
 }
 
 /* Write operations keep mapistore's defaults (MAPISTORE_ERR_NOT_IMPLEMENTED): M3 is read-only. */
+/* An IMAP write the server refused, or a connection that went away. */
+static enum mapistore_error write_error(struct imap_conn *conn)
+{
+	return imap_conn_alive(conn) ? MAPISTORE_ERR_DENIED : MAPISTORE_ERR_CONN_REFUSED;
+}
+
+/* The UIDs of `mids` in `f`, all of the mailbox's current UIDVALIDITY. */
+static enum mapistore_error mids_to_uids(struct imap_folder *f, struct imap_conn *conn, TALLOC_CTX *mem_ctx,
+					 uint32_t count, const uint64_t *mids, uint32_t **uidsp)
+{
+	struct imap_status	st;
+	uint32_t		*uids, v, i;
+
+	if (imap_status(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
+		return imap_conn_alive(conn) ? MAPISTORE_ERR_NOT_FOUND : MAPISTORE_ERR_CONN_REFUSED;
+	}
+	uids = talloc_array(mem_ctx, uint32_t, count);
+	if (!uids) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	for (i = 0; i < count; i++) {
+		if (imap_mid_uid(f, uids, mids[i], &v, &uids[i]) != MAPISTORE_SUCCESS || v != st.uidvalidity) {
+			talloc_free(uids);
+			return MAPISTORE_ERR_NOT_FOUND;
+		}
+	}
+	*uidsp = uids;
+	return MAPISTORE_SUCCESS;
+}
+
+/* UID MOVE/COPY between two IMAP folders of the user; the index follows only once the server said OK. */
+static enum mapistore_error move_copy_messages(void *target_folder, void *source_folder, TALLOC_CTX *mem_ctx,
+					       uint32_t count, uint64_t *src_mids, uint64_t *t_mids,
+					       struct Binary_r **change_keys, struct Binary_r **predecessors,
+					       uint8_t want_copy)
+{
+	struct imap_folder	*dst = target_folder, *src = source_folder;
+	struct indexing_context	*ictx;
+	struct imap_conn	*conn;
+	uint32_t		*uids, *dest, validity = 0, i;
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+
+	/* Another backend's folder (openchangedb) cannot hold an IMAP message: emsmdb answers NO_SUPPORT. */
+	if (!dst || !src || dst->type != IMAP_OBJ_FOLDER || src->type != IMAP_OBJ_FOLDER ||
+	    strcmp(dst->ctx->username, src->ctx->username) != 0) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	if (count == 0) {
+		return MAPISTORE_SUCCESS;
+	}
+	if (!src_mids) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	conn = imap_context_conn(src->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	tmp = talloc_new(NULL);
+	dest = tmp ? talloc_zero_array(tmp, uint32_t, count) : NULL;
+	if (!dest) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	/* Already in the target (the server filed a sent message in Sent before Outlook moved its own
+	   Outbox item there): the move is done; Outlook's target mid takes the message over. */
+	if (count == 1 && !want_copy && imap_mid_uid(dst, tmp, src_mids[0], &validity, dest) == MAPISTORE_SUCCESS) {
+		char *uri = imap_message_uri(tmp, dst, validity, dest[0]);
+
+		ictx = dst->ctx->ictx;
+		if (uri && t_mids && t_mids[0] && t_mids[0] != src_mids[0] &&
+		    ictx->del_fmid(ictx, dst->ctx->username, src_mids[0], MAPISTORE_PERMANENT_DELETE) == MAPISTORE_SUCCESS) {
+			ictx->add_fmid(ictx, dst->ctx->username, t_mids[0], uri);
+		}
+		talloc_free(tmp);
+		return MAPISTORE_SUCCESS;
+	}
+	ret = mids_to_uids(src, conn, tmp, count, src_mids, &uids);
+	if (ret != MAPISTORE_SUCCESS) {
+		talloc_free(tmp);
+		return ret;
+	}
+	if (imap_uid_move(conn, src->mailbox, uids, count, dst->mailbox, want_copy, &validity, dest)) {
+		talloc_free(tmp);
+		return write_error(conn);
+	}
+	ictx = dst->ctx->ictx;
+	for (i = 0; i < count; i++) {
+		char *uri = imap_message_uri(tmp, dst, validity, dest[i]);
+		enum mapistore_error r = MAPISTORE_SUCCESS;
+
+		if (!uri) {
+			r = MAPISTORE_ERR_NO_MEMORY;
+		} else if (t_mids && t_mids[i]) {
+			/* emsmdb allocated the target mid: the message answers to it from now on. */
+			r = ictx->add_fmid(ictx, dst->ctx->username, t_mids[i], uri);
+			if (r == MAPISTORE_SUCCESS && !want_copy) {
+				r = ictx->del_fmid(ictx, src->ctx->username, src_mids[i], MAPISTORE_PERMANENT_DELETE);
+			}
+		} else if (!want_copy) {
+			r = ictx->update_fmid(ictx, dst->ctx->username, src_mids[i], uri);
+		}
+		if (r != MAPISTORE_SUCCESS) {
+			/* IMAP already moved it; the next listing gives it a fresh mid. */
+			OC_DEBUG(1, "IMAP backend: index update after %s of mid 0x%"PRIx64" failed: %s\n",
+				 want_copy ? "copy" : "move", src_mids[i], mapistore_errstr(r));
+		}
+	}
+	talloc_free(tmp);
+	return MAPISTORE_SUCCESS;
+}
+
+/* Shift+Delete, emptying Deleted Items, ICS deletes: gone from IMAP, exactly this UID. */
+static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
+{
+	struct imap_folder	*f = folder;
+	struct imap_conn	*conn;
+	uint32_t		*uid;
+	enum mapistore_error	ret;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	ret = mids_to_uids(f, conn, f, 1, &mid, &uid);
+	if (ret != MAPISTORE_SUCCESS) {
+		return ret;
+	}
+	if (imap_uid_expunge(conn, f->mailbox, uid, 1)) {
+		talloc_free(uid);
+		return write_error(conn);
+	}
+	talloc_free(uid);
+	ret = f->ctx->ictx->del_fmid(f->ctx->ictx, f->ctx->username, mid, MAPISTORE_PERMANENT_DELETE);
+	if (ret != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: index delete of mid 0x%"PRIx64" failed: %s\n", mid, mapistore_errstr(ret));
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+/* Inbox, Outbox and the SPECIAL-USE mailboxes are the user's default folders: Outlook cannot
+   rename, move or delete them (webmail and other clients rely on them). */
+static bool is_default_folder(struct imap_folder *f, struct imap_conn *conn)
+{
+	struct imap_mailbox	*mbs;
+	size_t			n, i;
+	bool			special = false;
+
+	if (strcasecmp(f->mailbox, "INBOX") == 0 || strcmp(f->mailbox, "Outbox") == 0) {
+		return true;
+	}
+	if (imap_list(conn, f, &mbs, &n) != MAPISTORE_SUCCESS) {
+		return true; /* unknown: do not touch it */
+	}
+	for (i = 0; i < n; i++) {
+		if (strcmp(mbs[i].name, f->mailbox) == 0) {
+			special = mbs[i].flags & (IMAP_MB_SENT | IMAP_MB_DRAFTS | IMAP_MB_TRASH | IMAP_MB_JUNK |
+						  IMAP_MB_ARCHIVE | IMAP_MB_ALL);
+		}
+	}
+	talloc_free(mbs);
+	return special;
+}
+
+static const char *row_string(struct SRow *row, enum MAPITAGS unicode_tag, enum MAPITAGS string8_tag)
+{
+	uint32_t i;
+
+	for (i = 0; row && i < row->cValues; i++) {
+		if ((enum MAPITAGS) row->lpProps[i].ulPropTag == unicode_tag) {
+			return row->lpProps[i].value.lpszW;
+		}
+		if ((enum MAPITAGS) row->lpProps[i].ulPropTag == string8_tag) {
+			return row->lpProps[i].value.lpszA;
+		}
+	}
+	return NULL;
+}
+
+/* `parent`'s mailbox + delimiter + `leaf` (already on-the-wire). */
+static char *child_mailbox(TALLOC_CTX *mem_ctx, const char *parent, char delimiter, const char *leaf)
+{
+	return parent && parent[0] ? talloc_asprintf(mem_ctx, "%s%c%s", parent, delimiter, leaf) : talloc_strdup(mem_ctx, leaf);
+}
+
+/* RENAME `f` to `to`, then everything indexed below it follows: same fids and mids. */
+static enum mapistore_error rename_folder(struct imap_folder *f, struct imap_conn *conn, const char *to)
+{
+	struct imap_context	*ctx = f->ctx;
+	char			delimiter = imap_context_delimiter(ctx);
+	char			*old_uri, *new_uri;
+	enum mapistore_error	ret;
+
+	if (is_default_folder(f, conn)) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	old_uri = imap_uri(f, ctx->username, f->mailbox, delimiter);
+	new_uri = imap_uri(f, ctx->username, to, delimiter);
+	if (!old_uri || !new_uri) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	if (imap_rename_mailbox(conn, f->mailbox, to)) {
+		return write_error(conn);
+	}
+	ret = ctx->ictx->update_uri_prefix
+		? ctx->ictx->update_uri_prefix(ctx->ictx, ctx->username, old_uri, new_uri) : MAPISTORE_ERR_NOT_IMPLEMENTED;
+	if (ret != MAPISTORE_SUCCESS) {
+		/* The folder kept its name in IMAP's eyes only: the next sync shows it as new. */
+		OC_DEBUG(1, "IMAP backend: index rewrite after RENAME failed: %s\n", mapistore_errstr(ret));
+	}
+	/* A context root is also known to openchangedb by its URI (provisioning). */
+	if (f == ctx->root && ctx->oc_ctx &&
+	    openchangedb_set_mapistoreURI(ctx->oc_ctx, ctx->username, f->fid, new_uri) != MAPI_E_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: openchangedb URI update after RENAME failed\n");
+	}
+	talloc_free(f->mailbox);
+	f->mailbox = talloc_strdup(f, to);
+	talloc_free(old_uri);
+	talloc_free(new_uri);
+	return f->mailbox ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+}
+
+/* A mail folder created below an IMAP folder becomes an IMAP mailbox, subscribed. */
+static enum mapistore_error create_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, struct SRow *aRow,
+					  void **childp)
+{
+	struct imap_folder	*p = parent, *f;
+	struct imap_conn	*conn;
+	const char		*name, *klass;
+	char			*leaf, *mailbox, *uri;
+	char			delimiter;
+	enum mapistore_error	ret;
+
+	if (!p || p->type != IMAP_OBJ_FOLDER || !childp || !fid) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	klass = row_string(aRow, PidTagContainerClass, PR_CONTAINER_CLASS);
+	if (klass && strncmp(klass, "IPF.Note", 8) != 0) {
+		return MAPISTORE_ERR_DENIED; /* calendars, contacts...: IMAP cannot hold them */
+	}
+	conn = imap_context_conn(p->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	delimiter = imap_context_delimiter(p->ctx);
+	name = row_string(aRow, PidTagDisplayName, PR_DISPLAY_NAME);
+	leaf = imap_mailbox_name(mem_ctx, name, delimiter);
+	if (!leaf || !delimiter) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	mailbox = child_mailbox(mem_ctx, p->mailbox, delimiter, leaf);
+	uri = mailbox ? imap_uri(mem_ctx, p->ctx->username, mailbox, delimiter) : NULL;
+	if (!uri) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	if (imap_create_mailbox(conn, mailbox, true)) {
+		return write_error(conn);
+	}
+	ret = p->ctx->ictx->add_fmid(p->ctx->ictx, p->ctx->username, fid, uri);
+	if (ret != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: index add of new folder 0x%"PRIx64" failed: %s\n", fid, mapistore_errstr(ret));
+	}
+	f = folder_new(mem_ctx, p->ctx, mailbox);
+	if (!f) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	f->parent_fid = p->fid;
+	*childp = f;
+	return MAPISTORE_SUCCESS;
+}
+
+/* Folder properties: a new PidTagDisplayName renames the mailbox; others are not kept. */
+_PUBLIC_ enum mapistore_error imap_folder_set_properties(struct imap_folder *f, struct SRow *row)
+{
+	struct imap_conn	*conn;
+	const char		*name = row_string(row, PidTagDisplayName, PR_DISPLAY_NAME);
+	const char		*sep;
+	char			*leaf, *to, *parent;
+	char			delimiter = imap_context_delimiter(f->ctx);
+
+	if (!name) {
+		return MAPISTORE_SUCCESS;
+	}
+	leaf = imap_mailbox_name(f, name, delimiter);
+	if (!leaf || !delimiter) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	sep = strrchr(f->mailbox, delimiter);
+	parent = sep ? talloc_strndup(leaf, f->mailbox, sep - f->mailbox) : NULL;
+	to = child_mailbox(leaf, parent, delimiter, leaf);
+	if (!to) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	if (strcmp(to, f->mailbox) == 0) {
+		talloc_free(leaf);
+		return MAPISTORE_SUCCESS;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	{
+		enum mapistore_error ret = rename_folder(f, conn, to);
+
+		talloc_free(leaf);
+		return ret;
+	}
+}
+
+static enum mapistore_error move_folder(void *folder, void *target_parent, TALLOC_CTX *mem_ctx, const char *new_name)
+{
+	struct imap_folder	*f = folder, *t = target_parent;
+	struct imap_conn	*conn;
+	const char		*sep;
+	char			*leaf, *to;
+	char			delimiter;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (!t || t->type != IMAP_OBJ_FOLDER || strcmp(t->ctx->username, f->ctx->username) != 0) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	delimiter = imap_context_delimiter(f->ctx);
+	if (!delimiter) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	sep = strrchr(f->mailbox, delimiter);
+	leaf = new_name ? imap_mailbox_name(mem_ctx, new_name, delimiter) : talloc_strdup(mem_ctx, sep ? sep + 1 : f->mailbox);
+	if (!leaf) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	to = child_mailbox(mem_ctx, t->mailbox, delimiter, leaf);
+	if (!to) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	/* Into itself or its own subtree: IMAP refuses, and so do we, before asking. */
+	if (strncmp(t->mailbox, f->mailbox, strlen(f->mailbox)) == 0 &&
+	    (t->mailbox[strlen(f->mailbox)] == '\0' || t->mailbox[strlen(f->mailbox)] == delimiter)) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	return rename_folder(f, conn, to);
+}
+
+/* Deletes an empty mailbox; Outlook removes the contents first. */
+static enum mapistore_error delete_folder(void *folder)
+{
+	struct imap_folder	*f = folder;
+	struct imap_conn	*conn;
+	struct imap_status	st;
+	uint32_t		children = 0;
+	enum mapistore_error	ret;
+
+	if (!f || f->type != IMAP_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	conn = imap_context_conn(f->ctx);
+	if (!conn) {
+		return MAPISTORE_ERR_CONN_REFUSED;
+	}
+	if (is_default_folder(f, conn)) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	if (imap_status(conn, f->mailbox, &st) != MAPISTORE_SUCCESS) {
+		return write_error(conn);
+	}
+	ret = imap_folder_get_child_count(f, MAPISTORE_FOLDER_TABLE, &children);
+	if (ret != MAPISTORE_SUCCESS) {
+		return ret;
+	}
+	if (st.messages || children) {
+		return MAPISTORE_ERR_EXIST;
+	}
+	if (imap_delete_mailbox(conn, f->mailbox)) {
+		return write_error(conn);
+	}
+	ret = f->ctx->ictx->del_fmid(f->ctx->ictx, f->ctx->username, f->fid, MAPISTORE_PERMANENT_DELETE);
+	if (ret != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "IMAP backend: index delete of folder 0x%"PRIx64" failed: %s\n", f->fid, mapistore_errstr(ret));
+	}
+	return MAPISTORE_SUCCESS;
+}
+
 _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 {
 	backend->backend.list_contexts = imap_list_contexts;
@@ -1216,6 +1755,11 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->folder.open_table = imap_folder_open_table;
 	backend->folder.get_child_count = imap_folder_get_child_count;
 	backend->folder.open_message = imap_folder_open_message;
+	backend->folder.move_copy_messages = move_copy_messages;
+	backend->folder.delete_message = delete_message;
+	backend->folder.create_folder = create_folder;
+	backend->folder.move_folder = move_folder;
+	backend->folder.delete = delete_folder;
 	backend->table.set_columns = imap_table_set_columns;
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;

@@ -1018,6 +1018,24 @@ START_TEST (test_create_and_edit_message) {
 	ck_assert_str_eq("subject foo'foo", (char *)data);
 } END_TEST
 
+/* FAI messages (Outlook rules, views) of a backend root folder live here and are deleted here too. */
+START_TEST (test_delete_message) {
+	void *msg;
+	uint64_t mid = 11, fid = 17438782182108692481ul;
+
+	retval = openchangedb_message_create(g_mem_ctx, g_oc_ctx, USER1, mid, fid, true, &msg);
+	CHECK_SUCCESS;
+	retval = openchangedb_message_save(g_oc_ctx, msg, 0);
+	CHECK_SUCCESS;
+
+	retval = openchangedb_message_delete(g_oc_ctx, USER1, fid, mid);
+	CHECK_SUCCESS;
+	retval = openchangedb_message_open(g_mem_ctx, g_oc_ctx, USER1, mid, fid, &msg, 0);
+	ck_assert_int_eq(retval, MAPI_E_NOT_FOUND);
+	retval = openchangedb_message_delete(g_oc_ctx, USER1, fid, mid);
+	ck_assert_int_eq(retval, MAPI_E_NOT_FOUND);
+} END_TEST
+
 START_TEST (test_create_and_edit_message_on_public_folder) {
 	void *msg;
 	uint64_t mid, fid;
@@ -1420,6 +1438,7 @@ static Suite *openchangedb_create_suite(const char *backend_name,
 
 	tcase_add_test(tc, test_create_and_edit_message);
 	tcase_add_test(tc, test_create_and_edit_message_on_public_folder);
+	tcase_add_test(tc, test_delete_message);
 	tcase_add_test(tc, test_set_property_message_with_change_key);
 
 	tcase_add_test(tc, test_build_table_folders);
