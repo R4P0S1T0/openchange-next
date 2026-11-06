@@ -130,6 +130,8 @@ static int setup_fixture(const char *imap_binary)
         "mail_driver = maildir\n"
         "mail_home = %s/home/%%{user}\n"
         "mail_path = ~/Maildir\n"
+        /* Dovecot re-reads its settings and keeps only these variables; without one, a container (CI) has no USER. */
+        "import_environment {\n  USER = %%{env:USER}\n}\n"
         "namespace inbox {\n"
         "  inbox = yes\n"
         "  separator = /\n"
