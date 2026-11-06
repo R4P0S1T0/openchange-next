@@ -48,7 +48,7 @@ static struct shared_conn *find_shared(const char *username)
 	return NULL;
 }
 
-/* The user's connection, reopened once when the server dropped it. */
+/* The user's connection, reopened when the server dropped it. */
 _PUBLIC_ struct imap_conn *imap_context_conn(struct imap_context *ctx)
 {
 	const struct imap_settings	*settings = imap_backend_settings();
@@ -57,6 +57,7 @@ _PUBLIC_ struct imap_conn *imap_context_conn(struct imap_context *ctx)
 	if (!settings || !s) {
 		return NULL;
 	}
+	imap_conn_probe(s->conn);
 	if (!imap_conn_alive(s->conn)) {
 		talloc_free(s->conn);
 		s->conn = imap_conn_open(s, settings, s->username);

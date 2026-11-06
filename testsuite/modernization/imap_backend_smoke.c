@@ -841,7 +841,7 @@ static int test_reconnect_after_drop(void)
     CHECK(inbox != NULL && (conn = imap_context_conn(inbox->ctx)) != NULL);
     CHECK(imap_conn_pid(conn) > 0 && kill(imap_conn_pid(conn), SIGKILL) == 0);
     waitpid(imap_conn_pid(conn), NULL, 0);
-    imap_folder_get_child_count(inbox, MAPISTORE_MESSAGE_TABLE, &count); /* fails: the server is gone */
+    /* The first call already works: Outlook's first write after a night idle failed (lab, item 11). */
     CHECK(imap_folder_get_child_count(inbox, MAPISTORE_MESSAGE_TABLE, &count) == MAPISTORE_SUCCESS && count == 2);
     return 0;
 }

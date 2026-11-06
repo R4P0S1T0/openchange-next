@@ -78,6 +78,8 @@ int imap_status(struct imap_conn *conn, const char *name, struct imap_status *st
 char imap_conn_delimiter(struct imap_conn *conn);
 /* False once the server or the stream has gone away. */
 bool imap_conn_alive(struct imap_conn *conn);
+/* Marks the connection dead when the server hung up while it was idle. */
+void imap_conn_probe(struct imap_conn *conn);
 /* Passes a libetpan result through, marking the connection dead on a stream error. */
 int imap_conn_check(struct imap_conn *conn, int r);
 /* The tunnel child, or -1 (tests). */

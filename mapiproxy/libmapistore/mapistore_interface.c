@@ -1869,6 +1869,9 @@ _PUBLIC_ enum MAPISTATUS mapistore_error_to_mapi(enum mapistore_error mapistore_
 	case MAPISTORE_ERR_DENIED:
 		mapi_err = MAPI_E_NO_ACCESS;
 		break;
+	case MAPISTORE_ERR_CONN_REFUSED:
+		mapi_err = MAPI_E_CALL_FAILED;
+		break;
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		mapi_err = MAPI_E_NOT_IMPLEMENTED;
 		break;

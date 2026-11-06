@@ -18,6 +18,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -337,6 +338,21 @@ _PUBLIC_ char imap_conn_delimiter(struct imap_conn *conn)
 _PUBLIC_ bool imap_conn_alive(struct imap_conn *conn)
 {
 	return conn && !conn->dead && conn->imap && conn->imap->imap_stream;
+}
+
+/* Between commands the server says nothing; anything readable is its BYE or EOF (Dovecot's
+   autologout after a night idle), so the next command would fail on a dead stream. */
+_PUBLIC_ void imap_conn_probe(struct imap_conn *conn)
+{
+	struct pollfd	p = { .events = POLLIN };
+
+	if (!imap_conn_alive(conn)) {
+		return;
+	}
+	p.fd = mailstream_low_get_fd(mailstream_get_low(conn->imap->imap_stream));
+	if (p.fd >= 0 && poll(&p, 1, 0) > 0) {
+		conn->dead = true;
+	}
 }
 
 _PUBLIC_ int imap_conn_check(struct imap_conn *conn, int r)
