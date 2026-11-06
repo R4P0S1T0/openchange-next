@@ -36,6 +36,7 @@ struct imap_settings {
 	const char	*smtp_host;	 /* smtp_host, default 127.0.0.1 (loopback only) */
 	uint16_t	smtp_port;	 /* smtp_port, default 587 */
 	const char	*smtp_tunnel;	 /* tests: SMTP without TLS on stdio, $USER = sender */
+	const char	*expunged_mailbox; /* imap_expunged_mailbox: Dovecot's lazy_expunge mailbox, or NULL */
 };
 
 /* LIST attributes (RFC 3501, RFC 6154) the backend uses. */
@@ -109,6 +110,10 @@ struct mailimap *imap_conn_session(struct imap_conn *conn);
 /* UID MOVE (or COPY); dest_uids[i] is the new UID of uids[i] (COPYUID). Needs UIDPLUS. */
 int imap_uid_move(struct imap_conn *conn, const char *from, const uint32_t *uids, uint32_t count,
 		  const char *to, bool copy, uint32_t *dest_uidvalidity, uint32_t *dest_uids);
+/* UID of a message of `mailbox` with this Message-ID header and a subject containing `subject` (the
+   newest one when `newest`), or 0 (none, or the search failed). Message-IDs alone repeat (broken clients, spam). */
+uint32_t imap_uid_by_message_id(struct imap_conn *conn, const char *mailbox, const char *message_id, const char *subject,
+				bool newest);
 int imap_uid_set_flags(struct imap_conn *conn, const char *mailbox, uint32_t uid, uint32_t add, uint32_t remove);
 /* \Deleted + UID EXPUNGE of exactly these UIDs; refused without UIDPLUS. */
 int imap_uid_expunge(struct imap_conn *conn, const char *mailbox, const uint32_t *uids, uint32_t count);

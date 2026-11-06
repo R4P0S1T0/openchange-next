@@ -71,6 +71,49 @@ static int select_rw(struct imap_conn *conn, const char *mailbox)
 	return 0;
 }
 
+_PUBLIC_ uint32_t imap_uid_by_message_id(struct imap_conn *conn, const char *mailbox, const char *message_id, const char *subject,
+				       bool newest)
+{
+	struct mailimap_search_key	*key, *by_id, *by_subject;
+	clist				*found = NULL;
+	uint32_t			uid = 0;
+	char				*id, *name, *subj;
+	int				r;
+
+	if (!conn || !mailbox || !message_id || !*message_id || !subject ||
+	    imap_conn_check(conn, mailimap_examine(imap_conn_session(conn), mailbox)) != MAILIMAP_NO_ERROR) {
+		return 0;
+	}
+	id = strdup(message_id);
+	name = strdup("Message-ID");
+	subj = strdup(subject);
+	key = mailimap_search_key_new_multiple_empty();
+	by_id = id && name ? mailimap_search_key_new_header(name, id) : NULL;
+	by_subject = by_id && subj ? mailimap_search_key_new_subject(subj) : NULL;
+	if (!key || !by_id || !by_subject ||
+	    mailimap_search_key_multiple_add(key, by_id) != MAILIMAP_NO_ERROR) {
+		if (key) mailimap_search_key_free(key);
+		if (by_id) mailimap_search_key_free(by_id); else { free(id); free(name); }
+		if (by_subject) mailimap_search_key_free(by_subject); else free(subj);
+		return 0;
+	}
+	if (mailimap_search_key_multiple_add(key, by_subject) != MAILIMAP_NO_ERROR) {
+		mailimap_search_key_free(key);
+		mailimap_search_key_free(by_subject);
+		return 0;
+	}
+	r = imap_conn_check(conn, mailimap_uid_search(imap_conn_session(conn), NULL, key, &found));
+	mailimap_search_key_free(key);
+	if (r == MAILIMAP_NO_ERROR && found) {
+		clistiter *it = newest ? clist_end(found) : clist_begin(found);
+		uid = it && clist_content(it) ? *(uint32_t *) clist_content(it) : 0;
+	}
+	if (found) {
+		mailimap_search_result_free(found);
+	}
+	return uid;
+}
+
 static struct mailimap_flag_list *flag_list(uint32_t flags)
 {
 	struct mailimap_flag_list	*l = mailimap_flag_list_new_empty();

@@ -136,6 +136,7 @@ _PUBLIC_ struct imap_settings *imap_settings_load(TALLOC_CTX *mem_ctx, struct lo
 	s->smtp_host = talloc_strdup(s, lpcfg_parm_string(lp_ctx, NULL, "mapistore", "smtp_host") ?: "127.0.0.1");
 	port = lpcfg_parm_int(lp_ctx, NULL, "mapistore", "smtp_port", 587);
 	s->smtp_tunnel = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "smtp_tunnel");
+	s->expunged_mailbox = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "imap_expunged_mailbox");
 	if (s->smtp_tunnel) {
 		s->smtp_tunnel = talloc_strdup(s, s->smtp_tunnel);
 	}

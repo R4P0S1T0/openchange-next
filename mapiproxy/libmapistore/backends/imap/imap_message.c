@@ -1680,6 +1680,54 @@ static void record_client_change(struct imap_message *m)
 }
 
 /* A new version of the draft in IMAP, then the old one expunged; the mid follows the new UID. */
+/* Outlook moves a message itself (a client rule, an offline move) as a new upload in the target plus a
+   delete in the source; rebuilt from its MAPI properties it loses sender, date and attachments. The
+   original, found by Message-ID in another mailbox, is copied instead (its flags come with it). */
+#define MAX_ORIGINAL_SEARCH 500 /* shortcut: one SEARCH per mailbox, bounded; index Message-IDs if accounts with more folders need it */
+static bool copy_original(struct imap_message *m, struct imap_conn *conn, uint32_t *validity, uint32_t *uid)
+{
+	struct imap_folder	*f = m->folder;
+	struct imap_mailbox	*mbs = NULL;
+	size_t			n = 0, i;
+	uint32_t		src;
+	bool			copied = false;
+	/* The subject too: a repeated Message-ID must not copy another message. */
+	const char		*subject = m->draft->normalized_subject ? m->draft->normalized_subject : m->draft->subject;
+	TALLOC_CTX		*tmp;
+	const struct imap_settings	*settings = imap_backend_settings();
+	const char		*expunged = settings && settings->expunged_mailbox && *settings->expunged_mailbox
+				    ? settings->expunged_mailbox : NULL;
+
+	if (!subject || !*subject) {
+		return false;
+	}
+	tmp = talloc_new(NULL);
+	if (!tmp || imap_list(conn, tmp, &mbs, &n) != 0) {
+		talloc_free(tmp);
+		return false;
+	}
+	for (i = 0; i < n && i < MAX_ORIGINAL_SEARCH && !copied; i++) {
+		if ((mbs[i].flags & (IMAP_MB_NOSELECT | IMAP_MB_NONEXISTENT)) || strcmp(mbs[i].name, f->mailbox) == 0 ||
+		    (expunged && strcmp(mbs[i].name, expunged) == 0)) {
+			continue;
+		}
+		src = imap_uid_by_message_id(conn, mbs[i].name, m->draft->message_id, subject, false);
+		if (src && imap_uid_move(conn, mbs[i].name, &src, 1, f->mailbox, true, validity, uid) == 0 && *uid) {
+			OC_DEBUG(3, "IMAP backend: mid 0x%"PRIx64" is a copy of UID %u of another mailbox\n", m->row.mid, src);
+			copied = true;
+		}
+	}
+	/* Outlook may send the source's delete first: the original is then the newest match of the
+	   lazy_expunge mailbox (older matches there may be copies rebuilt before). */
+	if (!copied && expunged && (src = imap_uid_by_message_id(conn, expunged, m->draft->message_id, subject, true)) &&
+	    imap_uid_move(conn, expunged, &src, 1, f->mailbox, true, validity, uid) == 0 && *uid) {
+		OC_DEBUG(3, "IMAP backend: mid 0x%"PRIx64" is a copy of UID %u of the expunged mailbox\n", m->row.mid, src);
+		copied = true;
+	}
+	talloc_free(tmp);
+	return copied;
+}
+
 static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn *conn)
 {
 	struct imap_folder	*f = m->folder;
@@ -1693,6 +1741,9 @@ static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn 
 
 	if (!d->dirty && old_uid) {
 		return MAPISTORE_SUCCESS;
+	}
+	if (!old_uid && d->sent && d->message_id && copy_original(m, conn, &validity, &uid)) {
+		goto saved;
 	}
 	raw = imap_compose(m, d, f->ctx->username, d->from_name, time(NULL), true, &len);
 	if (!raw) {
@@ -1712,6 +1763,7 @@ static enum mapistore_error save_draft(struct imap_message *m, struct imap_conn 
 	if (old_uid && imap_uid_expunge(conn, f->mailbox, &old_uid, 1)) {
 		OC_DEBUG(1, "IMAP backend: the previous version of draft mid 0x%"PRIx64" stays in IMAP\n", m->row.mid);
 	}
+saved:
 	uri = imap_message_uri(m, f, validity, uid);
 	if (!uri) {
 		return MAPISTORE_ERR_NO_MEMORY;

@@ -2150,6 +2150,76 @@ static int test_created_sent_item_not_draft(void)
     return 0;
 }
 
+/* A message Outlook moves itself (a client rule, an offline move) arrives as a new upload in the target plus a
+   delete in the source: rebuilt from its MAPI properties, it lost its sender, date and attachments. The server
+   copies the original, found by Message-ID, instead. */
+static int test_uploaded_received_message_copies_original(void)
+{
+    static const char original[] = "From: Carla <carla@example.invalid>\r\nTo: alice@example.invalid\r\n"
+        "Subject: Mover pelo Outlook\r\nMessage-ID: <moved-by-outlook@example.invalid>\r\n\r\nCorpo original\r\n";
+    /* Message-IDs repeat (broken clients, spam, the lab's seed): another message with the same one comes first. */
+    static const char other[] = "From: Bruno <bruno@example.invalid>\r\nTo: alice@example.invalid\r\n"
+        "Subject: Outra mensagem\r\nMessage-ID: <moved-by-outlook@example.invalid>\r\n\r\nOutro corpo\r\n";
+    struct imap_conn *c = wconn();
+    void *folder, *msg;
+    struct imap_message *m;
+    uint32_t validity = 0, uid = 0;
+    char *flags, *msgid;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W10") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap_conn_session(c), "W11") == MAILIMAP_NO_ERROR);
+    CHECK(imap_append(c, "W10", other, strlen(other), IMAP_FLAG_SEEN, &validity, &uid) == 0);
+    CHECK(imap_append(c, "W10", original, strlen(original), IMAP_FLAG_SEEN | IMAP_FLAG_ANSWERED, &validity, &uid) == 0);
+    folder = context_for("W11");
+    CHECK(folder && ops()->folder.create_message(folder, root, 0x9601, 0, &msg) == MAPISTORE_SUCCESS);
+    if (set_string(msg, PidTagSubject, "Mover pelo Outlook") ||
+        set_string(msg, PidTagInternetMessageId, "<moved-by-outlook@example.invalid>") ||
+        set_long(msg, PidTagMessageFlags, MSGFLAG_READ)) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    m = msg;
+    CHECK(m->row.uid && uid_info(c, "W11", m->row.uid, &flags, &msgid));
+    CHECK(has_flag(flags, "\\Answered") && !has_flag(flags, "\\Draft"));
+    CHECK(msgid && strcmp(msgid, "<moved-by-outlook@example.invalid>") == 0);
+    /* The source stays until Outlook's delete arrives. */
+    CHECK(uid_info(c, "W10", uid, &flags, NULL));
+    talloc_free(c);
+    return 0;
+}
+
+/* Outlook may send the source's delete before the upload (a client rule at 16:07): the original is then only in
+   Dovecot's lazy_expunge mailbox (mapistore:imap_expunged_mailbox). Its newest match is the one just deleted;
+   older ones there may be copies rebuilt before this fix. */
+static int test_uploaded_message_copies_original_from_expunged(void)
+{
+    static const char rebuilt[] = "From: \"Ana\" <alice@example.invalid>\r\nTo: alice@example.invalid\r\n"
+        "Subject: Apagada antes\r\nMessage-ID: <deleted-first@example.invalid>\r\n\r\nReconstruida\r\n";
+    static const char original[] = "From: Ana <ana@example.invalid>\r\nTo: alice@example.invalid\r\n"
+        "Subject: Apagada antes\r\nMessage-ID: <deleted-first@example.invalid>\r\n\r\nOriginal\r\n";
+    struct imap_conn *c = wconn();
+    void *folder, *msg;
+    struct imap_message *m;
+    uint32_t validity = 0, uid = 0;
+    char *flags;
+    CHECK(c != NULL && ops());
+    CHECK(mailimap_create(imap_conn_session(c), "W13") == MAILIMAP_NO_ERROR);
+    CHECK(mailimap_create(imap_conn_session(c), "W14") == MAILIMAP_NO_ERROR);
+    CHECK(imap_append(c, "W13", rebuilt, strlen(rebuilt), IMAP_FLAG_SEEN, &validity, &uid) == 0);
+    CHECK(imap_append(c, "W13", original, strlen(original), IMAP_FLAG_SEEN | IMAP_FLAG_ANSWERED, &validity, &uid) == 0);
+    tunnel.expunged_mailbox = "W13";
+    folder = context_for("W14");
+    CHECK(folder && ops()->folder.create_message(folder, root, 0x9602, 0, &msg) == MAPISTORE_SUCCESS);
+    if (set_string(msg, PidTagSubject, "Apagada antes") ||
+        set_string(msg, PidTagInternetMessageId, "<deleted-first@example.invalid>") ||
+        set_long(msg, PidTagMessageFlags, MSGFLAG_READ)) return 1;
+    CHECK(ops()->message.save(msg, root) == MAPISTORE_SUCCESS);
+    tunnel.expunged_mailbox = NULL;
+    m = msg;
+    CHECK(m->row.uid && uid_info(c, "W14", m->row.uid, &flags, NULL));
+    CHECK(has_flag(flags, "\\Answered") && !has_flag(flags, "\\Draft"));
+    talloc_free(c);
+    return 0;
+}
+
 /* Outlook's own upload keeps Outlook's change key, or its next edit opens a conflict and re-sends
    the whole message (attachments doubled). A later server-side change gets the server's key. */
 static int test_client_change_key_kept(void)
@@ -2328,7 +2398,8 @@ int main(int argc, char **argv)
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
-        test_client_change_key_kept() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
+        test_client_change_key_kept() || test_uploaded_received_message_copies_original() ||
+        test_uploaded_message_copies_original_from_expunged() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
         test_purge_before_import()) {
         return 1;
     }
