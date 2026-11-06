@@ -397,7 +397,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopCreateMessage(TALLOC_CTX *mem_ctx,
 	message_object->object.message->read_write = true;
 
 	contextID = emsmdbp_get_contextID(folder_object);
-	mapistore = emsmdbp_is_mapistore(folder_object);
+	message_object->object.message->native_fai = mapi_req->u.mapi_CreateMessage.AssociatedFlag && emsmdbp_fai_is_native(folder_object);
+	mapistore = emsmdbp_is_mapistore(message_object);
 	switch ((int)mapistore) {
 	case true:
 		ret = mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, contextID, 

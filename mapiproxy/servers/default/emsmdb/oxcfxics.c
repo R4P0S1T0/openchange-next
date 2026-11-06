@@ -2289,16 +2289,18 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	ret = emsmdbp_object_message_open(message_object_handle, emsmdbp_ctx, synccontext_object->parent_object, folderID, messageID, true, &message_object, &msg);
 	if (ret == MAPISTORE_ERR_NOT_FOUND) {
 		message_object = emsmdbp_object_message_init(message_object_handle, emsmdbp_ctx, messageID, synccontext_object->parent_object);
+		message_object->object.message->native_fai = (request->ImportFlag & ImportFlag_Associated) &&
+			emsmdbp_fai_is_native(synccontext_object->parent_object);
 		/* openchangedb folders (Sync Issues, Local Failures) take Outlook's sync logs as RopCreateMessage does:
 		   refused, each upload failure logs another message and the upload loop starves every download. */
-		int created = !emsmdbp_is_mapistore(synccontext_object->parent_object)
+		int created = !emsmdbp_is_mapistore(message_object)
 		    ? (int) openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
 						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object)
 		    : (int) mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object);
 		if (created != 0) {
 			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
 			OC_DEBUG(3, "ImportMessageChange: mid 0x%"PRIx64" in %s folder 0x%"PRIx64" could not be created (0x%x)\n",
-				 messageID, emsmdbp_is_mapistore(synccontext_object->parent_object) ? "mapistore" : "openchangedb",
+				 messageID, emsmdbp_is_mapistore(message_object) ? "mapistore" : "openchangedb",
 				 folderID, created);
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
 			goto end;
@@ -2317,7 +2319,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 	}
 	/* The upload carries the whole message (MS-OXCFXICS 2.2.3.2.4.2): without this, attachments
 	   removed in Outlook stayed on the server. Backends without purge keep the old content. */
-	else if (emsmdbp_is_mapistore(synccontext_object->parent_object)) {
+	else if (emsmdbp_is_mapistore(message_object)) {
 		ret = mapistore_message_purge(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object),
 					      message_object->backend_object);
 		if (ret != MAPISTORE_SUCCESS && ret != MAPISTORE_ERR_NOT_IMPLEMENTED) {
@@ -2622,7 +2624,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportDeletes(TALLOC_CTX *mem_ctx,
 		for (i = 0; i < object_array->cValues; i++) {
 			ret = oxcfxics_fmid_from_source_key(emsmdbp_ctx, owner, object_array->bin + i, &objectID);
 			if (ret == MAPISTORE_SUCCESS) {
-				ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, contextID, synccontext_object->parent_object->backend_object, objectID, delete_type);
+				ret = emsmdbp_folder_delete_message(emsmdbp_ctx, synccontext_object->parent_object, objectID, delete_type);
 				if (ret != MAPISTORE_SUCCESS) {
 					/* The message stays in the backend, so its index record must stay too, or it can no longer be opened. */
 					OC_DEBUG(5, "message deletion failed for fmid: 0x%.16"PRIx64"\n", objectID);

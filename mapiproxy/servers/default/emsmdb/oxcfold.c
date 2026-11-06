@@ -657,7 +657,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopDeleteMessages(TALLOC_CTX *mem_ctx,
 		int ret;
 		uint64_t mid = mapi_req->u.mapi_DeleteMessages.message_ids[i];
 		OC_DEBUG(0, "MID %i to delete: 0x%.16"PRIx64"\n", i, mid);
-		ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, contextID, parent_object->backend_object, mid, MAPISTORE_SOFT_DELETE);
+		ret = emsmdbp_folder_delete_message(emsmdbp_ctx, parent_object, mid, MAPISTORE_SOFT_DELETE);
 		if (ret != MAPISTORE_SUCCESS && ret != MAPISTORE_ERR_NOT_FOUND) {
 			if (ret == MAPISTORE_ERR_DENIED) {
 				mapi_repl->error_code = MAPI_E_NO_ACCESS;

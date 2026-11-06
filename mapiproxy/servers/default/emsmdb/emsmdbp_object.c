@@ -89,13 +89,52 @@ bool emsmdbp_is_mapistore(struct emsmdbp_object *object)
 		if (object->object.folder->mapistore_root) {
 			return true;
 		}
-	default:
-		if (object->parent_object) {
-			return emsmdbp_is_mapistore(object->parent_object);
+		break;
+	case EMSMDBP_OBJECT_MESSAGE:
+		if (object->object.message->native_fai) {
+			return false;
 		}
+		break;
+	case EMSMDBP_OBJECT_TABLE:
+		if (object->object.table->ulType == MAPISTORE_FAI_TABLE && emsmdbp_fai_is_native(object->parent_object)) {
+			return false;
+		}
+		break;
+	default:
+		break;
+	}
+	if (object->parent_object) {
+		return emsmdbp_is_mapistore(object->parent_object);
 	}
 
 	return false;
+}
+
+/**
+   \details Whether the FAI messages (rules, views) of a folder live in openchangedb although the
+   folder is a backend's: the root folder of a mapistore context has an openchangedb record, and
+   backends such as IMAP cannot store FAI messages. Subfolders of a backend keep them in the backend.
+ */
+bool emsmdbp_fai_is_native(struct emsmdbp_object *folder)
+{
+	return folder && folder->type == EMSMDBP_OBJECT_FOLDER && folder->object.folder->mapistore_root;
+}
+
+/**
+   \details Delete a message of a backend folder; one the backend does not know may be a FAI
+   message of its root folder (emsmdbp_fai_is_native), deleted from openchangedb.
+ */
+enum mapistore_error emsmdbp_folder_delete_message(struct emsmdbp_context *emsmdbp_ctx, struct emsmdbp_object *folder,
+						   uint64_t mid, uint8_t flags)
+{
+	enum mapistore_error ret;
+
+	ret = mapistore_folder_delete_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(folder), folder->backend_object, mid, flags);
+	if (ret == MAPISTORE_ERR_NOT_FOUND && emsmdbp_fai_is_native(folder)) {
+		ret = mapi_error_to_mapistore(openchangedb_message_delete(emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username,
+									  folder->object.folder->folderID, mid));
+	}
+	return ret;
 }
 
 static struct emsmdbp_object *emsmdbp_get_mailbox(struct emsmdbp_object *object)
@@ -1842,7 +1881,8 @@ _PUBLIC_ struct emsmdbp_object *emsmdbp_folder_open_table(TALLOC_CTX *mem_ctx,
 	if (table_object) {
 		table_object->object.table->handle = handle_id;
 		table_object->object.table->ulType = table_type;
-		if (emsmdbp_is_mapistore(parent_object)) {
+		/* The table, not its folder: a backend root folder's FAI table is openchangedb's. */
+		if (emsmdbp_is_mapistore(table_object)) {
 			switch (table_type) {
 			case MAPISTORE_MESSAGE_TABLE:
 				mstore_type = MAPISTORE_MESSAGE_TABLE;
@@ -1910,7 +1950,7 @@ _PUBLIC_ struct emsmdbp_object *emsmdbp_folder_open_table(TALLOC_CTX *mem_ctx,
 					return table_object;
 				}
 			}
-			if (!emsmdbp_is_mapistore(parent_object)) {
+			if (!emsmdbp_is_mapistore(table_object)) {
 				/* Retrieve folder ID */
 				switch (parent_object->type) {
 				case EMSMDBP_OBJECT_FOLDER:
@@ -2688,6 +2728,17 @@ _PUBLIC_ enum mapistore_error emsmdbp_object_message_open(TALLOC_CTX *mem_ctx, s
 		if (ret != MAPISTORE_SUCCESS) {
 			talloc_free(message_object);
 		}
+		if (ret != MAPISTORE_ERR_NOT_FOUND || !emsmdbp_fai_is_native(folder_object)) {
+			break;
+		}
+		/* Unknown to the backend: maybe a FAI message of its root folder, kept in openchangedb. */
+		message_object = emsmdbp_object_message_init(mem_ctx, emsmdbp_ctx, messageID, folder_object);
+		ret = mapi_error_to_mapistore(openchangedb_message_open(mem_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID, &message_object->backend_object, (void **)msgp));
+		if (ret != MAPISTORE_SUCCESS) {
+			talloc_free(message_object);
+			break;
+		}
+		message_object->object.message->native_fai = true;
 	}
 
 end:
