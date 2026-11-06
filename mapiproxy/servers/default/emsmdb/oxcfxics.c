@@ -2291,12 +2291,15 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 		message_object = emsmdbp_object_message_init(message_object_handle, emsmdbp_ctx, messageID, synccontext_object->parent_object);
 		/* openchangedb folders (Sync Issues, Local Failures) take Outlook's sync logs as RopCreateMessage does:
 		   refused, each upload failure logs another message and the upload loop starves every download. */
-		if (!emsmdbp_is_mapistore(synccontext_object->parent_object)
-		    ? openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
-						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPI_E_SUCCESS
-		    : mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object) != MAPISTORE_SUCCESS) {
+		int created = !emsmdbp_is_mapistore(synccontext_object->parent_object)
+		    ? (int) openchangedb_message_create(emsmdbp_ctx->mstore_ctx, emsmdbp_ctx->oc_ctx, emsmdbp_ctx->username, messageID, folderID,
+						  (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object)
+		    : (int) mapistore_folder_create_message(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(synccontext_object->parent_object), synccontext_object->parent_object->backend_object, message_object, messageID, (request->ImportFlag & ImportFlag_Associated), &message_object->backend_object);
+		if (created != 0) {
 			mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
-			OC_DEBUG(5, "could not open nor create mapistore message\n");
+			OC_DEBUG(3, "ImportMessageChange: mid 0x%"PRIx64" in %s folder 0x%"PRIx64" could not be created (0x%x)\n",
+				 messageID, emsmdbp_is_mapistore(synccontext_object->parent_object) ? "mapistore" : "openchangedb",
+				 folderID, created);
 			mapi_repl->error_code = MAPI_E_NOT_FOUND;
 			goto end;
 		}
