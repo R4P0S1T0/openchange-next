@@ -867,6 +867,11 @@ static char *describe(TALLOC_CTX *mem_ctx, const struct mapi_SRestriction *r, in
 			return talloc_asprintf(mem_ctx, "PROP(%u,%.8x,0x%"PRIx64")", r->res.resProperty.relop,
 					       r->res.resProperty.ulPropTag, r->res.resProperty.lpProp.value.d);
 		}
+		/* A message class is not personal data either: shown, to tell which FAI message Outlook looks for. */
+		if (r->res.resProperty.ulPropTag == PidTagMessageClass && r->res.resProperty.lpProp.value.lpszW) {
+			return talloc_asprintf(mem_ctx, "PROP(%u,%.8x,%s)", r->res.resProperty.relop,
+					       r->res.resProperty.ulPropTag, r->res.resProperty.lpProp.value.lpszW);
+		}
 		return talloc_asprintf(mem_ctx, "PROP(%u,%.8x)", r->res.resProperty.relop, r->res.resProperty.ulPropTag);
 	case RES_BITMASK:
 		return talloc_asprintf(mem_ctx, "BITMASK(%u,%.8x,%.8x)", r->res.resBitmask.relMBR, r->res.resBitmask.ulPropTag, r->res.resBitmask.ulMask);
