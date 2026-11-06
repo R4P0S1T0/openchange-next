@@ -2204,6 +2204,60 @@ static int test_transport_send_no_sent_copy(void)
     return 0;
 }
 
+#define U16(c) c, 0
+static const uint8_t one_off_bruno[] = {
+    0, 0, 0, 0, 0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19, 0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
+    0x00, 0x00, 0x00, 0x90,
+    U16('b'), U16('r'), U16('u'), U16('n'), U16('o'), 0, 0,
+    U16('S'), U16('M'), U16('T'), U16('P'), 0, 0,
+    U16('b'), U16('r'), U16('u'), U16('n'), U16('o'), U16('@'), U16('e'), U16('x'), U16('a'), U16('m'), U16('p'),
+    U16('l'), U16('e'), U16('.'), U16('i'), U16('n'), U16('v'), U16('a'), U16('l'), U16('i'), U16('d'), 0, 0,
+};
+/* An address book EntryID (MS-OXCDATA 2.2.5.2): Outlook's own-account sender, not a one-off. */
+static const uint8_t ab_alice[] = {
+    0, 0, 0, 0, 0xDC, 0xA7, 0x40, 0xC8, 0xC0, 0x42, 0x10, 0x1A, 0xB4, 0xB9, 0x08, 0x00, 0x2B, 0x2F, 0xE1, 0x82,
+    1, 0, 0, 0, 0, 0, 0, 0, '/', 'o', '=', 'F', '/', 'c', 'n', '=', 'a', 'l', 'i', 'c', 'e', 0,
+};
+
+static int set_binary(void *object, uint32_t tag, const uint8_t *data, uint32_t len)
+{
+    struct SPropValue v;
+    struct SRow row = { .cValues = 1, .lpProps = &v };
+    memset(&v, 0, sizeof v);
+    v.ulPropTag = tag;
+    v.value.bin.cb = len;
+    v.value.bin.lpb = (uint8_t *) data;
+    CHECK(ops()->properties.set_properties(object, &row) == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+/* Outlook's "From: other address" must not send as the session user under another name (lab item 11). */
+static int test_foreign_from_refused(void)
+{
+    struct imap_conn *c = wconn();
+    void *msg;
+    uint32_t outbox_before;
+    CHECK(c != NULL && ops());
+    msg = outbox_draft(0x9701, "From bruno");
+    /* What Outlook 365 sent in the lab: a name and a Unicode one-off EntryID, no address property. */
+    CHECK(msg && set_string(msg, PidTagSentRepresentingName, "bruno@example.invalid") == 0 &&
+          set_binary(msg, PidTagSentRepresentingEntryId, one_off_bruno, sizeof one_off_bruno) == 0);
+    outbox_before = count_of(c, "Outbox");
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_ERR_DENIED);
+    CHECK(read_file(smtp_log, NULL) == NULL && count_of(c, "Outbox") == outbox_before);
+    /* The user's own address, as a directory entry with its SMTP address, still sends. */
+    msg = outbox_draft(0x9702, "From alice");
+    CHECK(msg && set_binary(msg, PidTagSentRepresentingEntryId, ab_alice, sizeof ab_alice) == 0 &&
+          set_string(msg, PidTagSentRepresentingEmailAddress, "/o=First Organization/cn=alice") == 0 &&
+          set_string(msg, PidTagSentRepresentingSmtpAddress, "ALICE@example.invalid") == 0);
+    use_smtp("ok");
+    CHECK(ops()->message.submit(msg, 0) == MAPISTORE_SUCCESS);
+    imap_backend_set_state(&tunnel, false);
+    talloc_free(c);
+    return 0;
+}
+
 static int test_backend_registers(void)
 {
     CHECK(mapistore_init_backend() == MAPISTORE_SUCCESS);
@@ -2248,7 +2302,7 @@ int main(int argc, char **argv)
         test_reopened_draft_attachments() || test_long_attachment_name() || test_submit_unresolved_recipient() ||
         test_change_numbers_from_id_counter() || test_one_off_entry_ids() ||
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
-        test_client_change_key_kept() || test_transport_send_no_sent_copy()) {
+        test_client_change_key_kept() || test_transport_send_no_sent_copy() || test_foreign_from_refused()) {
         return 1;
     }
     talloc_free(root);

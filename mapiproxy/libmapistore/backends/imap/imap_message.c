@@ -509,6 +509,10 @@ static char *dup_or_empty(TALLOC_CTX *mem_ctx, const char *s)
 	return talloc_strdup(mem_ctx, s ? s : "");
 }
 
+static const uint8_t one_off_uid[16] = {
+	0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19, 0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
+};
+
 /* One property of a message row (plan Decision 5); NULL when the message has no such value. */
 /* A one-off EntryID (MS-OXCDATA 2.2.5.1): display name and SMTP address in UTF-16LE, so Outlook
    replies to the address instead of looking the name up in the address book. */
@@ -516,7 +520,7 @@ static struct Binary_r *one_off_entry_id(TALLOC_CTX *mem_ctx, const char *name, 
 {
 	static const uint8_t head[] = {
 		0x00, 0x00, 0x00, 0x00,						/* Flags */
-		0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19,			/* one-off provider UID */
+		0x81, 0x2B, 0x1F, 0xA4, 0xBE, 0xA3, 0x10, 0x19,			/* one_off_uid */
 		0x9D, 0x6E, 0x00, 0xDD, 0x01, 0x0F, 0x54, 0x02,
 		0x00, 0x00,							/* Version */
 		0x01, 0x90,							/* Unicode, no rich info */
@@ -1351,6 +1355,25 @@ static enum mapistore_error draft_set_properties(struct imap_message *m, struct 
 		case PidTagInternetReferences:		field = &d->references; break;
 		case PidTagSentRepresentingName:	field = &d->from_name; break;
 		case PidTagSenderName:			field = d->from_name ? NULL : &d->from_name; break;
+		case PidTagSentRepresentingSmtpAddress:	field = &d->from_address; break;
+		case PidTagSentRepresentingEntryId:	/* Outlook's "From: other address" comes only as a one-off */
+			if (p->value.bin.cb > 24 && memcmp(p->value.bin.lpb + 4, one_off_uid, sizeof one_off_uid) == 0) {
+				struct OneOffEntryId *e = get_OneOffEntryId(d, (struct Binary_r *) &p->value.bin);
+				bool w = e && (e->OneOffEntryIdFlags & 0x8000);
+				const char *type = e ? (w ? e->AddressType.lpszW : e->AddressType.lpszA) : NULL;
+
+				if (!e) {
+					str = "(unreadable one-off)"; /* submit refuses: a send-as must not slip through */
+					field = &d->from_address;
+				} else if (type && strcasecmp(type, "SMTP") == 0) {
+					str = w ? e->EmailAddress.lpszW : e->EmailAddress.lpszA;
+					field = &d->from_address;
+				}
+			}
+			break;
+		case PidTagSentRepresentingEmailAddress:	/* an EX DN names a directory entry, not an address */
+			field = (str && strchr(str, '@') && str[0] != '/') ? &d->from_address : NULL;
+			break;
 		case PidTagHtml:
 			d->html = talloc_array(d, uint8_t, p->value.bin.cb + 1);
 			if (!d->html) {
@@ -1829,6 +1852,11 @@ static enum mapistore_error submit(void *message, enum SubmitFlags flags)
 	d = ensure_draft(m);
 	if (!d) {
 		return MAPISTORE_ERR_INVALID_DATA; /* received mail is not sent again */
+	}
+	/* No send-as: the message would leave as this user under another user's name. */
+	if (d->from_address && strcasecmp(d->from_address, f->ctx->username) != 0) {
+		OC_DEBUG(1, "IMAP backend: send as %s refused for %s\n", d->from_address, f->ctx->username);
+		return MAPISTORE_ERR_DENIED;
 	}
 	conn = imap_context_conn(f->ctx);
 	if (!settings || !conn) {
