@@ -2660,7 +2660,7 @@ static enum MAPISTATUS _table_fetch_messages(MYSQL *conn,
 			"  AND f.folder_id = %"PRIu64
 			"  AND f.ou_id = %"PRIu64
 			"  AND f.folder_class = '"PUBLIC_FOLDER"' "
-			"WHERE m2.message_type = '%s' ",
+			"WHERE m.message_type = '%s' ",
 			table->folder_id, table->username, msg_type,
 			table->folder_id, table->username, msg_type,
 			table->folder_id, table->ou_id, msg_type);
@@ -3234,6 +3234,7 @@ static enum MAPISTATUS table_get_property(TALLOC_CTX *mem_ctx,
 	MYSQL					*conn;
 	struct openchangedb_table_results	*res;
 	uint32_t				*id;
+	uint64_t				*fid;
 
 	conn = self->data;
 	OPENCHANGE_RETVAL_IF(!conn, MAPI_E_BAD_VALUE, NULL);
@@ -3266,10 +3267,11 @@ static enum MAPISTATUS table_get_property(TALLOC_CTX *mem_ctx,
 	}
 
 	if ((table->table_type != 0x1) && proptag == PR_FID) {
-		id = talloc_zero(mem_ctx, uint32_t);
-		OPENCHANGE_RETVAL_IF(!id, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
-		*id = table->folder_id;
-		*data = id;
+		/* PT_I8: in a uint32_t the folder ID lost its high half and Outlook opened rows in folder 0x1. */
+		fid = talloc_zero(mem_ctx, uint64_t);
+		OPENCHANGE_RETVAL_IF(!fid, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+		*fid = table->folder_id;
+		*data = fid;
 		goto end;
 	}
 
@@ -3685,7 +3687,8 @@ static enum MAPISTATUS message_open(TALLOC_CTX *parent_ctx,
 		mysql_free_result(res);
 		OPENCHANGE_RETVAL_ERR(MAPI_E_CALL_FAILED, mem_ctx);
 	}
-	if (row[2] && strncmp(row[2], "fai", 3) == 0 && strlen(row[2]) == 3) {
+	/* As _message_type writes it: a FAI message reopened and saved stayed FAI only if read back as such. */
+	if (row[2] && strcmp(row[2], "faiMessage") == 0) {
 		msg->message_type = OPENCHANGEDB_MESSAGE_FAI;
 	} else {
 		msg->message_type = OPENCHANGEDB_MESSAGE_SYSTEM;

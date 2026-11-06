@@ -585,6 +585,8 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSaveChangesMessage(TALLOC_CTX *mem_ctx,
 	mapistore = emsmdbp_is_mapistore(object);
 	switch ((int)mapistore) {
 	case false:
+		/* Outlook releases the stream it wrote (its rules blob) after this save: commit it first. */
+		emsmdbp_message_commit_streams(emsmdbp_ctx, rec->handle);
 		retval = openchangedb_message_save(emsmdbp_ctx->oc_ctx, object->backend_object, flags);
 		OC_DEBUG(0, "openchangedb_save_message: retval = 0x%x\n", retval);
 		if (retval != MAPI_E_SUCCESS) {

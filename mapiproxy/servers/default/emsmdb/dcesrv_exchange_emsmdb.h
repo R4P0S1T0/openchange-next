@@ -143,6 +143,8 @@ struct emsmdbp_object_table {
 	uint32_t				denominator;
 	uint8_t					flags;
 	bool					subscription;
+	uint32_t				*view;		/* openchangedb rows a Restrict kept, by position */
+	uint32_t				row_count;	/* openchangedb rows without restriction */
 };
 
 struct emsmdbp_object_stream {
@@ -336,6 +338,8 @@ struct emsmdbp_object *emsmdbp_object_init(TALLOC_CTX *, struct emsmdbp_context 
 int emsmdbp_object_copy_properties(struct emsmdbp_context *, struct emsmdbp_object *, struct emsmdbp_object *, struct SPropTagArray *, bool);
 enum MAPISTATUS emsmdbp_object_copy_properties_submit(struct emsmdbp_context *, struct emsmdbp_object *, struct emsmdbp_object *, struct SPropTagArray *, bool);
 bool emsmdbp_fai_is_native(struct emsmdbp_object *);
+uint32_t emsmdbp_table_row_position(struct emsmdbp_object_table *, uint32_t);
+void emsmdbp_message_commit_streams(struct emsmdbp_context *, uint32_t);
 enum mapistore_error emsmdbp_folder_delete_message(struct emsmdbp_context *, struct emsmdbp_object *, uint64_t, uint8_t);
 struct emsmdbp_object *emsmdbp_object_mailbox_init(TALLOC_CTX *, struct emsmdbp_context *, const char *, bool);
 struct emsmdbp_object *emsmdbp_object_folder_init(TALLOC_CTX *, struct emsmdbp_context *, uint64_t, struct emsmdbp_object *);

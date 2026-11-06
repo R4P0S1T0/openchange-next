@@ -2024,6 +2024,10 @@ static enum MAPISTATUS table_get_property(TALLOC_CTX *mem_ctx,
 	}
 	PidTagAttr = openchangedb_property_get_attribute(proptag);
 	OPENCHANGE_RETVAL_IF(!PidTagAttr, MAPI_E_NOT_FOUND, NULL);
+	/* Messages keep their ID as PidTagMessageId (message_create), as the MySQL backend's mid column. */
+	if (table->table_type != 0x1 && proptag == PR_MID) {
+		PidTagAttr = "PidTagMessageId";
+	}
 
 	/* Ensure the element exists */
 	OPENCHANGE_RETVAL_IF(!ldb_msg_find_element(res->msgs[pos], PidTagAttr), MAPI_E_NOT_FOUND, NULL);
