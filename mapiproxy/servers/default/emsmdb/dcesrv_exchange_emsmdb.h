@@ -329,6 +329,7 @@ uint32_t	      emsmdbp_get_contextID(struct emsmdbp_object *);
 enum emsmdbp_folder_change { EMSMDBP_FOLDER_MODIFIED, EMSMDBP_FOLDER_ADDED, EMSMDBP_FOLDER_DELETED };
 void		      emsmdbp_notify_track_table(struct emsmdbp_context *, struct emsmdbp_object *, uint32_t, uint8_t);
 int		      emsmdbp_notify_folder_changed(struct emsmdbp_context *, uint64_t, enum emsmdbp_folder_change);
+int		      emsmdbp_notify_mailbox_changed(struct emsmdbp_context *, const char *, char, enum emsmdbp_folder_change);
 enum MAPISTATUS       emsmdbp_fid_for_mailbox(struct emsmdbp_context *, const char *, char, uint64_t *);
 bool		      emsmdbp_notify_pending(struct emsmdbp_context *);
 enum MAPISTATUS       emsmdbp_notify_append(struct emsmdbp_context *, struct mapi_response *, uint32_t *, uint16_t *, uint32_t);

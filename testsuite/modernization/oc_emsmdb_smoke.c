@@ -1216,6 +1216,70 @@ static int test_ffi_watch_params(const char *conf)
     return 0;
 }
 
+/* M5: a top-level IMAP mailbox created while Outlook is open has no folder yet; the change provisions it
+   (as logon would) and Outlook's hierarchy table gets the row as added. */
+static bool nova_created;
+enum mapistore_error mapistore_backend_registered(const char *);  /* libmapistore, no public header */
+static enum mapistore_error nova_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                          struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry;
+    *list = NULL;
+    if (!nova_created) return MAPISTORE_SUCCESS;
+    entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "imap://alice%40example.invalid/Nova/");
+    entry->name = talloc_strdup(entry, "Nova");
+    entry->main_folder = false;
+    entry->role = MAPISTORE_MAIL_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_notify_new_top_level_mailbox(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct EcDoRpc_MAPI_REPL note;
+    uint64_t fid = 0;
+    /* The fake needs the imap:// namespace to itself; an installed IMAP backend (a deployed lab) would
+       open Nova instead. */
+    if (mapistore_backend_registered("imap") == MAPISTORE_SUCCESS) {
+        fprintf(stderr, "test_notify_new_top_level_mailbox skipped: an installed IMAP backend owns imap://\n");
+        return 0;
+    }
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "imapnova"; fake.backend.description = "test"; fake.backend.namespace = "imap://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = nova_contexts;
+    fake.backend.create_context = fai_create_context; fake.context.get_root_folder = fai_root_folder;
+    fake.properties.get_properties = unread_props;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
+    CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_ADDED) == 0);
+    nova_created = true;
+    CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_ADDED) == 1);
+    CHECK(openchangedb_get_fid(session->ctx->oc_ctx, "imap://alice%40example.invalid/Nova/", &fid) == MAPI_E_SUCCESS && fid);
+    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_ADDED);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.HierarchyTableChangeUnion.HierarchyRowAddedNotification.FID == fid);
+    /* Once provisioned it is a known folder: a change is a modified row. */
+    CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_MODIFIED) == 1);
+    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_MODIFIED);
+    /* Deleted on the server: the row goes, and so does the folder (else Outlook's next sync brings it back). */
+    nova_created = false;
+    CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_DELETED) == 1);
+    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_DELETED);
+    CHECK(openchangedb_get_fid(session->ctx->oc_ctx, "imap://alice%40example.invalid/Nova/", &fid) != MAPI_E_SUCCESS);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
@@ -1231,7 +1295,8 @@ int main(int argc, char **argv)
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
         test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
-        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_ffi_watch_params(argv[1])) return 1;
+        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_notify_new_top_level_mailbox() ||
+        test_ffi_watch_params(argv[1])) return 1;  /* last: it leaves mapistore:imap_* options set */
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;

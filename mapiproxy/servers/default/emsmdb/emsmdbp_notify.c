@@ -298,3 +298,62 @@ _PUBLIC_ enum MAPISTATUS emsmdbp_fid_for_mailbox(struct emsmdbp_context *ctx, co
 	talloc_free(uri);
 	return ret == MAPI_E_SUCCESS ? MAPI_E_SUCCESS : MAPI_E_NOT_FOUND;
 }
+
+/* Makes a mailbox created while the session is open known to the store, as logon or a listing of its
+   parent would: a top-level one is provisioned (a mapistore context, like at logon); a subfolder is
+   indexed by listing its parent's subtree. */
+static void emsmdbp_notify_learn(struct emsmdbp_context *ctx, const char *mailbox, char delimiter)
+{
+	TALLOC_CTX		*tmp;
+	const char		*last = delimiter ? strrchr(mailbox, delimiter) : NULL;
+	char			*parent;
+	uint64_t		parent_fid;
+	struct emsmdbp_object	*folder = NULL;
+	uint32_t		count = 0;
+
+	if (!last) {
+		emsmdbp_mailbox_provision(ctx, ctx->username);
+		return;
+	}
+	tmp = talloc_new(NULL);
+	parent = tmp ? talloc_strndup(tmp, mailbox, last - mailbox) : NULL;
+	if (parent && emsmdbp_fid_for_mailbox(ctx, parent, delimiter, &parent_fid) == MAPI_E_SUCCESS &&
+	    emsmdbp_object_open_folder_by_fid(tmp, ctx, ctx->notify_tables->table->parent_object, parent_fid,
+					      &folder) == MAPI_E_SUCCESS && folder) {
+		emsmdbp_folder_get_recursive_folder_count(ctx, folder, &count);
+	}
+	talloc_free(tmp);
+}
+
+/**
+   \details An IMAP mailbox changed: queue the rows for the folder Outlook knows, making a new
+   mailbox known first
+
+   \param ctx the session's EMSMDB provider context
+   \param mailbox the mailbox name as IMAP sends it (modified UTF-7)
+   \param delimiter the server's hierarchy delimiter ('\\0' when flat)
+   \param kind modified, added or deleted
+
+   \return the number of replies queued
+ */
+_PUBLIC_ int emsmdbp_notify_mailbox_changed(struct emsmdbp_context *ctx, const char *mailbox, char delimiter,
+					    enum emsmdbp_folder_change kind)
+{
+	uint64_t	fid;
+	int		queued;
+
+	if (!ctx || !ctx->notify_tables) return 0;	/* nobody to tell: nothing to learn either */
+	if (emsmdbp_fid_for_mailbox(ctx, mailbox, delimiter, &fid) != MAPI_E_SUCCESS) {
+		/* Only a creation is worth a provisioning or a subtree listing; the watcher reports one as added. */
+		if (kind != EMSMDBP_FOLDER_ADDED) return 0;
+		emsmdbp_notify_learn(ctx, mailbox, delimiter);
+		if (emsmdbp_fid_for_mailbox(ctx, mailbox, delimiter, &fid) != MAPI_E_SUCCESS) return 0;
+	}
+	queued = emsmdbp_notify_folder_changed(ctx, fid, kind);
+	/* A top-level mailbox is a provisioned folder: provisioning drops it now that the server lists it no
+	   more, or Outlook's next hierarchy synchronization would bring it back. */
+	if (kind == EMSMDBP_FOLDER_DELETED && !(delimiter && strchr(mailbox, delimiter))) {
+		emsmdbp_mailbox_provision(ctx, ctx->username);
+	}
+	return queued;
+}

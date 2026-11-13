@@ -140,15 +140,12 @@ void oc_emsmdb_disconnect(oc_emsmdb_session *session)
 uint32_t oc_emsmdb_folder_changed(oc_emsmdb_session *session, const char *mailbox, char delimiter,
 				  uint32_t kind, uint32_t *pending)
 {
-	uint64_t fid;
-
 	if (session == NULL || mailbox == NULL || pending == NULL || kind > EMSMDBP_FOLDER_DELETED) {
 		return MAPI_E_INVALID_PARAMETER;
 	}
-	if (emsmdbp_fid_for_mailbox(session->ctx, mailbox, delimiter, &fid) != MAPI_E_SUCCESS) {
-		return MAPI_E_SUCCESS;	/* not a folder Outlook knows (yet) */
+	if (emsmdbp_notify_mailbox_changed(session->ctx, mailbox, delimiter, (enum emsmdbp_folder_change) kind) == 0) {
+		return MAPI_E_SUCCESS;	/* not a folder Outlook knows (or will know) */
 	}
-	emsmdbp_notify_folder_changed(session->ctx, fid, (enum emsmdbp_folder_change) kind);
 	*pending = emsmdbp_notify_pending(session->ctx) ? 1 : 0;
 	return MAPI_E_SUCCESS;
 }

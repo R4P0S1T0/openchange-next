@@ -1888,6 +1888,7 @@ OC_EMSMDB_TEST = bin/oc-emsmdb-test
 check-oc-emsmdb: setup/mapistore/mapistore_namedprops.ldif libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 	! nm -D --undefined-only mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT) | grep dcesrv_
 	rm -f $(OC_EMSMDB_TEST)/directory.ldb $(OC_EMSMDB_TEST)/private/openchange.ldb
+	rm -rf $(OC_EMSMDB_TEST)/private/mapistore  # indexing: every run starts from the same mailbox
 	PYTHONPATH=python python3 testsuite/modernization/oc_emsmdb_openchangedb.py $(OC_EMSMDB_TEST)/private/openchange.ldb > /dev/null
 	LD_LIBRARY_PATH=.:mapiproxy:mapiproxy/servers:$(LD_LIBRARY_PATH) ./bin/oc-emsmdb $(OC_EMSMDB_TEST)/smb.conf
 
