@@ -30,7 +30,6 @@ pub struct Connected {
 }
 
 /// What happened to an IMAP mailbox (oc_emsmdb_folder_changed kind).
-#[allow(dead_code)] // constructed by the IMAP watcher (next commit)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderChange {
     Modified = 0,
@@ -39,7 +38,6 @@ pub enum FolderChange {
 }
 
 /// The loopback Dovecot and master login the IMAP backend uses (oc_emsmdb_imap_watch_params).
-#[allow(dead_code)] // read by the IMAP watcher (next commit)
 #[derive(Debug, Clone)]
 pub struct WatchParams {
     pub host: String,
@@ -135,7 +133,13 @@ impl Backend for FakeBackend {
     }
 
     /// Every change leaves notifications pending.
-    async fn folder_changed(&self, id: SessionId, mailbox: String, delimiter: u8, kind: FolderChange) -> bool {
+    async fn folder_changed(
+        &self,
+        id: SessionId,
+        mailbox: String,
+        delimiter: u8,
+        kind: FolderChange,
+    ) -> bool {
         self.record(Call::FolderChanged {
             id,
             mailbox,
@@ -384,7 +388,10 @@ mod tests {
             assert_eq!(fake.execute(7, 1, vec![9], 64).await, Ok(vec![1, 2]));
             assert_eq!(fake.execute(7, 1, vec![9], 64).await, Err(EC_RPC_FAILED));
             fake.disconnect(7).await;
-            assert!(fake.folder_changed(7, "INBOX".into(), b'/', FolderChange::Added).await);
+            assert!(
+                fake.folder_changed(7, "INBOX".into(), b'/', FolderChange::Added)
+                    .await
+            );
             assert!(fake.watch_params().await.is_none());
         });
         let exec = Call::Execute {

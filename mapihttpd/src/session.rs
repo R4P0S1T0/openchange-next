@@ -145,7 +145,13 @@ impl SessionTable {
     }
 
     /// Returns the Set-Cookie value of the new session.
-    pub fn create(&self, user: &str, cred_hash: [u8; 32], backend: SessionId, now: Instant) -> String {
+    pub fn create(
+        &self,
+        user: &str,
+        cred_hash: [u8; 32],
+        backend: SessionId,
+        now: Instant,
+    ) -> String {
         let cookie = format!("{:032x}", u128::from_ne_bytes(random()));
         let session = Session {
             cred_hash,
@@ -296,6 +302,11 @@ impl SessionGuard<'_> {
     /// The backend session this Session Context maps to.
     pub fn backend(&self) -> SessionId {
         self.backend
+    }
+
+    /// The account of the session; None once it is gone.
+    pub fn user(&self) -> Option<String> {
+        self.table.lock().get(&self.cookie).map(|s| s.user.clone())
     }
 
     /// The session's notification signal; None once it is gone.

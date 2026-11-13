@@ -160,6 +160,7 @@ pub async fn connect<A: Authenticator, B: Backend>(
     put(&mut body, &[0]); // AuxiliaryBufferSize
     let mut rep = with_body(req, body);
     rep.set_cookie = Some(srv.sessions.create(&user, cred_hash, c.id, Instant::now()));
+    srv.watch.session_started(&user);
     rep.expiration_ms = srv.sessions.idle_ms();
     rep
 }
@@ -212,8 +213,12 @@ pub async fn disconnect<A: Authenticator, B: Backend>(
     if let Err(code) = Reader(req.body).aux() {
         return reply(req, 200, code);
     }
+    let user = session.user();
     if let Some(id) = session.remove() {
         srv.backend.disconnect(id).await;
+    }
+    if let Some(user) = user {
+        srv.watch.session_ended(&user);
     }
     let mut body = Vec::new();
     put(&mut body, &[0, 0, 0]);
@@ -549,7 +554,10 @@ mod tests {
         assert_eq!(waited, Duration::ZERO);
         assert_eq!(rep.body, words(&[0, 0, 1, 0]));
         // Reported once: the next wait times out.
-        let rep = paused().block_on(handle(&srv, post("NotificationWait", &body, Some(cookie_of(&sc)))));
+        let rep = paused().block_on(handle(
+            &srv,
+            post("NotificationWait", &body, Some(cookie_of(&sc))),
+        ));
         assert_eq!(rep.body, words(&[0, 0, 0, 0]));
     }
 

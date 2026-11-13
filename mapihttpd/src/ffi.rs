@@ -99,10 +99,12 @@ mod linked {
 
     /// Where the IMAP backend reaches Dovecot; None when it is not configured.
     pub fn watch_params() -> Option<WatchParams> {
-        let (mut host, mut user, mut password) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+        let (mut host, mut user, mut password) =
+            (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
         let mut port = 0u16;
         // SAFETY: the four out pointers point at live locals of the declared types.
-        let status = unsafe { oc_emsmdb_imap_watch_params(&mut host, &mut port, &mut user, &mut password) };
+        let status =
+            unsafe { oc_emsmdb_imap_watch_params(&mut host, &mut port, &mut user, &mut password) };
         // SAFETY: C set each to NULL or a string it malloc()ed for us; each is taken once.
         let (host, user, password) = unsafe { (take(host), take(user), take(password)) };
         match (status, host, user, password) {

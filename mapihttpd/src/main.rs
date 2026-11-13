@@ -3,6 +3,7 @@
 mod auth;
 mod autodiscover;
 mod emsmdb;
+mod imapwatch;
 mod nspi;
 // Request handling uses the backend from Task 5; until then only the tests use it.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -333,6 +334,7 @@ fn main() -> ExitCode {
             org: args.org,
             ou: args.ou,
         };
+        let (watch, watched) = imapwatch::WatchManager::new();
         let srv = Arc::new(Server {
             auth: DovecotAuthenticator {
                 socket: args.dovecot_socket,
@@ -346,7 +348,15 @@ fn main() -> ExitCode {
             backend,
             notification_wait: Duration::from_secs(args.notification_wait_seconds),
             autodiscover: autodiscover_settings,
+            watch,
         });
+        let log: imapwatch::Log = Arc::new(|line| eprintln!("openchange-mapihttpd: {line}"));
+        tokio::spawn(imapwatch::supervise(
+            srv.clone(),
+            watched,
+            imapwatch::Timing::default(),
+            log,
+        ));
         let sweeper = srv.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(SWEEP_INTERVAL);
