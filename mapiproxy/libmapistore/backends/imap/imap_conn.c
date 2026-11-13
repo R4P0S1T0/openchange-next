@@ -148,6 +148,19 @@ _PUBLIC_ struct imap_settings *imap_settings_load(TALLOC_CTX *mem_ctx, struct lo
 		return NULL;
 	}
 	s->smtp_port = port;
+	s->sieve_host = talloc_strdup(s, lpcfg_parm_string(lp_ctx, NULL, "mapistore", "sieve_host") ?: "127.0.0.1");
+	port = lpcfg_parm_int(lp_ctx, NULL, "mapistore", "sieve_port", 4190);
+	s->sieve_tunnel = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "sieve_tunnel");
+	if (s->sieve_tunnel) {
+		s->sieve_tunnel = talloc_strdup(s, s->sieve_tunnel);
+	}
+	/* Same rule as IMAP and submission: the master password only goes to a loopback service. */
+	if (!s->sieve_host || port <= 0 || port > 65535 || (!s->sieve_tunnel && !is_loopback(s->sieve_host))) {
+		OC_DEBUG(0, "IMAP backend: mapistore:sieve_host must be a loopback address and sieve_port valid\n");
+		talloc_free(s);
+		return NULL;
+	}
+	s->sieve_port = port;
 	if (!s->tunnel) {
 		password_file = lpcfg_parm_string(lp_ctx, NULL, "mapistore", "imap_master_password_file");
 		if (!password_file) {

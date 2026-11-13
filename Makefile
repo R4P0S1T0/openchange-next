@@ -993,7 +993,9 @@ MAPISTORE_IMAP_OBJS = mapiproxy/libmapistore/backends/imap/mapistore_imap.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_message.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_write.po	\
 		      mapiproxy/libmapistore/backends/imap/imap_compose.po	\
-		      mapiproxy/libmapistore/backends/imap/imap_submit.po
+		      mapiproxy/libmapistore/backends/imap/imap_submit.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_sieve.po	\
+		      mapiproxy/libmapistore/backends/imap/imap_rules.po
 MAPISTORE_IMAP_SO = mapiproxy/libmapistore/backends/mapistore_imap.$(SHLIBEXT)
 
 $(MAPISTORE_IMAP_OBJS): CFLAGS += $(LIBETPAN_CFLAGS)
@@ -1018,6 +1020,7 @@ mapistore_imap-clean:
 
 # The backend against Dovecot's imap binary in PREAUTH mode (no root, no network).
 DOVECOT_IMAP ?= /usr/lib/dovecot/imap
+DOVECOT_MANAGESIEVE ?= /usr/lib/dovecot/managesieve
 bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
@@ -1025,7 +1028,7 @@ bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_
 .PHONY: check-imap-backend
 check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
 	rm -rf bin/imap-backend-fixture
-	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture $(CURDIR)/testsuite/modernization/smtp_fake.py
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture $(CURDIR)/testsuite/modernization/smtp_fake.py $(DOVECOT_MANAGESIEVE)
 
 mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION):  mapiproxy/libmapistore/mapistore_interface.po			\
 							mapiproxy/libmapistore/mapistore_processing.po			\
