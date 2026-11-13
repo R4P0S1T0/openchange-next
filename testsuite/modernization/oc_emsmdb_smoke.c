@@ -287,6 +287,8 @@ static int test_provision_idempotent(void)
     return 0;
 }
 
+static uint64_t sync_issues;  /* created below; later tests give it an IMAP URI */
+
 /* Outlook creates folders (RopCreateFolder) under native ones; with no backend for the role they stay native. */
 static int test_create_native_subfolder(void)
 {
@@ -309,6 +311,7 @@ static int test_create_native_subfolder(void)
     CHECK(emsmdbp_object_create_folder(session->ctx, ipm, session, fid, &row, true, &created) == MAPI_E_SUCCESS && created);
     CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Sync Issues", &found)
         == MAPI_E_SUCCESS && found == fid);
+    sync_issues = fid;
     CHECK(openchangedb_get_mapistoreURI(session, session->ctx->oc_ctx, "alice@example.invalid", fid, &uri, true)
         != MAPI_E_SUCCESS || uri == NULL || uri[0] == '\0');
     oc_emsmdb_disconnect(session);
@@ -1149,10 +1152,9 @@ static int test_fid_for_mailbox_utf7(void)
 {
     oc_emsmdb_session *session;
     const char *name, *prefix;
-    uint64_t sync_issues, fid = 0;
+    uint64_t fid = 0;
     CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
-    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Sync Issues", &sync_issues)
-        == MAPI_E_SUCCESS);
+    CHECK(sync_issues != 0);
     CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, sync_issues,
         "imap://alice%40example.invalid/Lixo%20Eletr&APQ-nico/") == MAPI_E_SUCCESS);
     CHECK(emsmdbp_fid_for_mailbox(session->ctx, "Lixo Eletr&APQ-nico", '/', &fid) == MAPI_E_SUCCESS && fid == sync_issues);
@@ -1161,6 +1163,56 @@ static int test_fid_for_mailbox_utf7(void)
     CHECK(emsmdbp_fid_for_mailbox(session->ctx, "INBOX.Lixo Eletr&APQ-nico", '.', &fid) == MAPI_E_SUCCESS && fid == sync_issues);
     CHECK(emsmdbp_fid_for_mailbox(session->ctx, "Nowhere", '/', &fid) == MAPI_E_NOT_FOUND);
     oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* M5 FFI: mapihttpd's IMAP watcher reports a mailbox by name; the session learns whether rows are queued. */
+static int test_ffi_folder_changed(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint32_t pending = 7;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(strcmp(oc_emsmdb_username(session), "alice@example.invalid") == 0 && oc_emsmdb_username(NULL) == NULL);
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
+    CHECK(sync_issues != 0);
+    CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, sync_issues,
+        "imap://alice%40example.invalid/INBOX/Lixo%20Eletr&APQ-nico/") == MAPI_E_SUCCESS);
+    CHECK(oc_emsmdb_folder_changed(session, "Nowhere", '.', 0, &pending) == MAPI_E_SUCCESS && pending == 7);
+    CHECK(oc_emsmdb_folder_changed(session, "INBOX.Lixo Eletr&APQ-nico", '.', 3, &pending) == MAPI_E_INVALID_PARAMETER);
+    CHECK(oc_emsmdb_folder_changed(NULL, "INBOX", '.', 0, &pending) == MAPI_E_INVALID_PARAMETER);
+    CHECK(oc_emsmdb_folder_changed(session, "INBOX.Lixo Eletr&APQ-nico", '.', 2, &pending) == MAPI_E_SUCCESS && pending == 1);
+    CHECK(execute_notifies(session, 4096, NULL) == 1);
+    pending = 7;
+    CHECK(oc_emsmdb_folder_changed(session, "Nowhere", '.', 0, &pending) == MAPI_E_SUCCESS && pending == 7);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_ffi_watch_params(const char *conf)
+{
+    char *pw = talloc_asprintf(oc_root, "%s.imap-master.pw", conf);
+    char *host = NULL, *user = NULL, *password = NULL;
+    uint16_t port = 0;
+    int fd;
+    CHECK(pw);
+    CHECK(oc_emsmdb_imap_watch_params(&host, &port, &user, &password) == MAPI_E_NOT_FOUND && !host && !password);
+    fd = open(pw, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd != -1 && fchmod(fd, 0600) == 0 && write(fd, "s3cret\nignored\n", 15) == 15 && close(fd) == 0);
+    CHECK(lpcfg_set_cmdline(oc_lp_ctx, "mapistore:imap_host", "127.0.0.1"));
+    CHECK(lpcfg_set_cmdline(oc_lp_ctx, "mapistore:imap_port", "143"));
+    CHECK(lpcfg_set_cmdline(oc_lp_ctx, "mapistore:imap_master_password_file", pw));
+    CHECK(oc_emsmdb_imap_watch_params(&host, &port, &user, &password) == MAPI_E_SUCCESS);
+    CHECK(strcmp(host, "127.0.0.1") == 0 && port == 143 && strcmp(user, "openchange") == 0 && strcmp(password, "s3cret") == 0);
+    oc_emsmdb_free(host); oc_emsmdb_free(user); oc_emsmdb_free(password);
+    /* The master password only goes to a loopback Dovecot, as for the IMAP backend. */
+    CHECK(lpcfg_set_cmdline(oc_lp_ctx, "mapistore:imap_host", "10.0.0.1"));
+    host = password = NULL;
+    CHECK(oc_emsmdb_imap_watch_params(&host, &port, &user, &password) == MAPI_E_NOT_FOUND && !host && !password);
+    CHECK(lpcfg_set_cmdline(oc_lp_ctx, "mapistore:imap_host", "127.0.0.1"));
+    CHECK(chmod(pw, 0644) == 0);
+    CHECK(oc_emsmdb_imap_watch_params(&host, &port, &user, &password) == MAPI_E_NOT_FOUND && !host && !password);
+    unlink(pw);
     return 0;
 }
 
@@ -1179,7 +1231,7 @@ int main(int argc, char **argv)
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
         test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
-        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7()) return 1;
+        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_ffi_watch_params(argv[1])) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;

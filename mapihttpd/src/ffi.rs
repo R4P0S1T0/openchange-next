@@ -46,6 +46,26 @@ mod linked {
             rop_out_len: *mut usize,
         ) -> u32;
         pub(super) fn oc_emsmdb_disconnect(session: *mut OcEmsmdbSession);
+        // M5: wrapped in Task 4 (Backend::folder_changed, watch parameters).
+        #[allow(dead_code)]
+        pub(super) fn oc_emsmdb_folder_changed(
+            session: *mut OcEmsmdbSession,
+            mailbox: *const c_char,
+            delimiter: c_char,
+            kind: u32,
+            pending: *mut u32,
+        ) -> u32;
+        #[allow(dead_code)]
+        pub(super) fn oc_emsmdb_imap_watch_params(
+            host: *mut *mut c_char,
+            port: *mut u16,
+            master_user: *mut *mut c_char,
+            master_password: *mut *mut c_char,
+        ) -> u32;
+        #[allow(dead_code)]
+        pub(super) fn oc_emsmdb_free(p: *mut std::ffi::c_void);
+        #[allow(dead_code)]
+        pub(super) fn oc_emsmdb_username(session: *mut OcEmsmdbSession) -> *const c_char;
     }
 
     pub fn init(smb_conf: &CStr) -> u32 {

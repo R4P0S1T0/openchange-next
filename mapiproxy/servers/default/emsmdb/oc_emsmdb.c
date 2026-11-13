@@ -24,6 +24,9 @@
    All functions are called from one thread (the daemon's C worker).
  */
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <arpa/inet.h>
 #include "mapiproxy/dcesrv_mapiproxy.h"
 #include "dcesrv_exchange_emsmdb.h"
 #include "emsmdbp_identity.h"
@@ -132,4 +135,100 @@ done:
 void oc_emsmdb_disconnect(oc_emsmdb_session *session)
 {
 	talloc_free(session);
+}
+
+uint32_t oc_emsmdb_folder_changed(oc_emsmdb_session *session, const char *mailbox, char delimiter,
+				  uint32_t kind, uint32_t *pending)
+{
+	uint64_t fid;
+
+	if (session == NULL || mailbox == NULL || pending == NULL || kind > EMSMDBP_FOLDER_DELETED) {
+		return MAPI_E_INVALID_PARAMETER;
+	}
+	if (emsmdbp_fid_for_mailbox(session->ctx, mailbox, delimiter, &fid) != MAPI_E_SUCCESS) {
+		return MAPI_E_SUCCESS;	/* not a folder Outlook knows (yet) */
+	}
+	emsmdbp_notify_folder_changed(session->ctx, fid, (enum emsmdbp_folder_change) kind);
+	*pending = emsmdbp_notify_pending(session->ctx) ? 1 : 0;
+	return MAPI_E_SUCCESS;
+}
+
+/* The IMAP backend's rules (imap_conn.c, in the dlopen()ed module): only a loopback Dovecot gets the
+   master password, read from a 0600 regular file holding one line. */
+static bool oc_emsmdb_loopback(const char *host)
+{
+	struct in_addr	a4;
+	struct in6_addr	a6;
+
+	if (strcasecmp(host, "localhost") == 0) return true;
+	if (inet_pton(AF_INET, host, &a4) == 1) return (ntohl(a4.s_addr) >> 24) == 127;
+	return inet_pton(AF_INET6, host, &a6) == 1 && IN6_IS_ADDR_LOOPBACK(&a6);
+}
+
+static char *oc_emsmdb_read_password(const char *path)
+{
+	struct stat	st;
+	char		buf[1025], *line;
+	ssize_t		n;
+	int		fd;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (fd == -1) return NULL;
+	if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode) || (st.st_mode & 077)) {
+		close(fd);
+		return NULL;
+	}
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0) return NULL;
+	buf[n] = '\0';
+	line = strndup(buf, strcspn(buf, "\r\n"));
+	memset(buf, 0, sizeof(buf));
+	if (line && !line[0]) {
+		free(line);
+		line = NULL;
+	}
+	return line;
+}
+
+uint32_t oc_emsmdb_imap_watch_params(char **host, uint16_t *port, char **master_user, char **master_password)
+{
+	const char	*h, *u, *file;
+	int		p;
+
+	if (host == NULL || port == NULL || master_user == NULL || master_password == NULL) {
+		return MAPI_E_INVALID_PARAMETER;
+	}
+	*host = *master_user = *master_password = NULL;
+	if (oc_lp_ctx == NULL) return MAPI_E_NOT_INITIALIZED;
+	h = lpcfg_parm_string(oc_lp_ctx, NULL, "mapistore", "imap_host") ?: "127.0.0.1";
+	u = lpcfg_parm_string(oc_lp_ctx, NULL, "mapistore", "imap_master_user") ?: "openchange";
+	p = lpcfg_parm_int(oc_lp_ctx, NULL, "mapistore", "imap_port", 143);
+	file = lpcfg_parm_string(oc_lp_ctx, NULL, "mapistore", "imap_master_password_file");
+	if (file == NULL || p <= 0 || p > 65535 || !oc_emsmdb_loopback(h)) return MAPI_E_NOT_FOUND;
+	*master_password = oc_emsmdb_read_password(file);
+	*host = strdup(h);
+	*master_user = strdup(u);
+	if (*master_password == NULL || *host == NULL || *master_user == NULL) {
+		oc_emsmdb_free(*master_password);
+		free(*host);
+		free(*master_user);
+		*host = *master_user = *master_password = NULL;
+		return MAPI_E_NOT_FOUND;
+	}
+	*port = (uint16_t) p;
+	return MAPI_E_SUCCESS;
+}
+
+void oc_emsmdb_free(void *p)
+{
+	if (p) {
+		memset(p, 0, strlen(p));	/* every string handed out is NUL-terminated; passwords among them */
+		free(p);
+	}
+}
+
+const char *oc_emsmdb_username(oc_emsmdb_session *session)
+{
+	return (session && session->ctx) ? session->ctx->username : NULL;
 }
