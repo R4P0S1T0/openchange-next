@@ -120,13 +120,13 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
 
 ### Task 5: Lab deploy, Outlook acceptance, docs
 
-- [ ] **Step 1:** Build without sanitizers via `labmake.sh … mapiproxy/servers/liboc_emsmdb.so` and `make all`; deploy with `/tmp/deploy-m2c.sh`; add `mapistore:sieve_port = 4190` to the lab smb.conf (sed, no unfiltered grep — the file has a password). Tell the user to close/reopen Outlook.
-- [ ] **Step 2:** On the Outlook PC (via TSplus on 192.168.0.167, user logs in), account `teste`:
+- [x] **Step 1:** Build without sanitizers via `labmake.sh … mapiproxy/servers/liboc_emsmdb.so` and `make all`; deploy with `/tmp/deploy-m2c.sh`; add `mapistore:sieve_port = 4190` to the lab smb.conf (sed, no unfiltered grep — the file has a password). Tell the user to close/reopen Outlook.
+- [x] **Step 2:** On the Outlook PC (via TSplus on 192.168.0.167, user logs in), account `teste`:
   1. Rule "from ana → folder RegrasAna" (server rule); Outlook shows it enabled after restart.
   2. Rule "subject contains urgente → mark as read + flag + stop".
   3. Close Outlook; `swaks` from ana in the lab with each case; `doveadm search` shows the mail in the right place with the right flags.
   4. Edit rule 1's folder, delete rule 2; script reflects it.
   5. Rule with "reply using a template" → Outlook shows it in error; others keep running.
   6. In SOGo webmail (browser), create a filter; SOGo still lists only its own; both run.
-- [ ] **Step 3:** Record result in `doc/MODERNIZATION.md` ("Stage B: server rules"), including the Dovecot `sieve_script outlook` block and the new smb.conf options as production prerequisites.
+- [x] **Step 3:** Record result in `doc/MODERNIZATION.md` ("Stage B: server rules"), including the Dovecot `sieve_script outlook` block and the new smb.conf options as production prerequisites.
 - [ ] **Step 4: Commit** `docs: record stage B acceptance`; then superpowers:finishing-a-development-branch.
