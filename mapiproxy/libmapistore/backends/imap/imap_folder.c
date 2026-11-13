@@ -519,6 +519,9 @@ _PUBLIC_ enum mapistore_error imap_folder_open_table(void *object, TALLOC_CTX *m
 	case MAPISTORE_MESSAGE_TABLE:
 		ret = imap_message_table_load(t);
 		break;
+	case MAPISTORE_RULE_TABLE:
+		ret = imap_rules_table_load(t);
+		break;
 	default:
 		break;
 	}
@@ -598,6 +601,8 @@ _PUBLIC_ enum mapistore_error imap_table_get_row(void *object, TALLOC_CTX *mem_c
 		return imap_message_row(t, mem_ctx, row, *data);
 	case MAPISTORE_ATTACHMENT_TABLE:
 		return imap_attachment_properties(&t->message->attachments[row], mem_ctx, t->column_count, t->columns, *data);
+	case MAPISTORE_RULE_TABLE:
+		return imap_rules_row(t, mem_ctx, row, *data);
 	default:
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
@@ -622,6 +627,8 @@ static void *table_value(TALLOC_CTX *mem_ctx, struct imap_table *t, uint32_t row
 	case MAPISTORE_ATTACHMENT_TABLE:
 		imap_attachment_properties(&t->message->attachments[row], mem_ctx, 1, &tag, &d);
 		return d.error == MAPISTORE_SUCCESS ? d.data : NULL;
+	case MAPISTORE_RULE_TABLE:
+		return imap_rules_value(t, mem_ctx, row, tag);
 	default:
 		return NULL;
 	}
@@ -1760,6 +1767,7 @@ _PUBLIC_ void imap_backend_fill(struct mapistore_backend *backend)
 	backend->folder.create_folder = create_folder;
 	backend->folder.move_folder = move_folder;
 	backend->folder.delete = delete_folder;
+	backend->folder.modify_rules = imap_folder_modify_rules;
 	backend->table.set_columns = imap_table_set_columns;
 	backend->table.get_row = imap_table_get_row;
 	backend->table.get_row_count = imap_table_get_row_count;

@@ -186,6 +186,15 @@ static enum mapistore_error mapistore_op_defaults_modify_permissions(void *folde
 	return MAPISTORE_ERR_NOT_IMPLEMENTED;
 }
 
+static enum mapistore_error mapistore_op_defaults_modify_rules(void *folder_object,
+							       uint8_t flags,
+							       uint16_t count,
+							       struct RuleData *rules)
+{
+	OC_DEBUG(3, "MAPISTORE defaults - MAPISTORE_ERR_NOT_IMPLEMENTED");
+	return MAPISTORE_ERR_NOT_IMPLEMENTED;
+}
+
 static enum mapistore_error mapistore_op_defaults_get_message_data(void *message_object,
 								   TALLOC_CTX *mem_ctx,
 								   struct mapistore_message **msg)
@@ -414,6 +423,7 @@ extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_bac
 	backend->folder.get_child_count = mapistore_op_defaults_get_child_count;
 	backend->folder.open_table = mapistore_op_defaults_open_table;
 	backend->folder.modify_permissions = mapistore_op_defaults_modify_permissions;
+	backend->folder.modify_rules = mapistore_op_defaults_modify_rules;
 
 	/* oxcmsg operations */
 	backend->message.get_message_data = mapistore_op_defaults_get_message_data;

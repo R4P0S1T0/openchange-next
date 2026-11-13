@@ -465,6 +465,75 @@ Known limits, for later milestones:
 - The libcheck openchangedb suites (LDB and MySQL) fail in their fixtures,
   so the MySQL-only fixes above were verified in the lab, not by a test.
 
+## Stage B: Outlook server rules as Sieve (2026-11-13)
+
+Branch `stage-b` (spec `docs/superpowers/specs/2026-11-13-stage-b-outlook-rules-sieve-design.md`,
+plan `docs/superpowers/plans/2026-11-13-stage-b-outlook-rules-sieve.md`): rules Outlook
+saves on the Inbox (`RopModifyRules`) run at delivery in Dovecot, with Outlook closed.
+
+- The rules live only in the user's Sieve script `outlook` (`~/sieve/outlook.sieve`),
+  written through ManageSieve as the master user and never made active. Each rule keeps
+  its MAPI properties as a `# rule <base64 NDR>` line, followed by the Sieve that runs it;
+  `RopGetRulesTable` reads them back from the same script. Hand edits are overwritten.
+- SOGo keeps its own active script; neither side touches the other's. The Outlook script
+  runs first (`type = before`), so a rule with "stop processing rules" also skips SOGo's.
+- Translated: subject/body/from/to/cc text, "from"/"sent to" people, importance; move,
+  copy, delete (to the Trash, never discarded), mark as read, flag, forward (as a
+  redirect), stop. Anything else (templates, forward as attachment, "only to me") is
+  kept with `ST_ERROR`, which Outlook shows as a rule in error. Client-only rules are
+  stored and run by Outlook as before.
+- Other folders keep the old behaviour (rules accepted and dropped).
+
+Production prerequisites:
+
+- Dovecot (Pigeonhole) with ManageSieve on loopback and, after the global before-scripts:
+
+  ```
+  sieve_script outlook {
+    type = before
+    driver = file
+    path = ~/sieve/outlook.sieve
+  }
+  ```
+
+  A user without the file delivers normally (checked in the lab).
+- smb.conf, only when the defaults do not fit: `mapistore:sieve_host` (default
+  `127.0.0.1`, loopback only), `mapistore:sieve_port` (default `4190`). The master user
+  and password file are the IMAP ones; STARTTLS is always used.
+
+Outlook acceptance (lab, Outlook 2019 classic over MAPI/HTTP, account `teste`, 2026-11-13):
+
+1. "Always move messages from ana" to StageB: shown enabled after an Outlook restart;
+   mail from ana is filed in StageB by Dovecot with Outlook closed.
+2. Subject "apagar", "delete it" and stop: mail lands in Trash; mail matching no rule
+   stays in INBOX.
+3. Editing rule 1's folder to Archive and deleting the "apagar" rule rewrite the script.
+4. "Forward as an attachment" is stored with `ST_ERROR` and no Sieve; the other rules keep
+   running. Outlook 2019 does not mark the rule in its dialog.
+5. A SOGo filter (subject "sogofiltro" to Junk) is saved by SOGo as its own active script;
+   both run, the Outlook one first, and saving rules in Outlook leaves SOGo's script alone.
+
+Fixed during acceptance:
+
+- Restrictions on the rules table did not see rule columns, so Outlook (which restricts by
+  `PidTagRuleProvider` before reading) showed no rules.
+- "Delete it" is a move to Deleted Items, whose FID only openchangedb knows: the move
+  target falls back to openchangedb's MAPIStore URI.
+- Rule ids were max+1 and came back after removals. Outlook's client rules stream (an FAI
+  message that outlives profiles) still named an old id, so it asked to remove a rule that
+  by then was another one, and kept re-adding a client-only rule. Ids now come from the
+  indexing ID counter, and removing an id that is not there is a no-op.
+
+Known limits:
+
+- Outlook itself makes rules with "flag", "mark as read" or "reply using a template"
+  client-only (it warns so), as with Exchange; they never reach the server, although the
+  translator handles flag and mark as read for other MAPI clients.
+- "Forward" and "redirect" become a Sieve `redirect`, also to outside addresses; limit it
+  where Exchange admins would (Dovecot `sieve_max_redirects`, Postfix policy).
+- Scripts written before the id fix keep their small ids; on the lab the script was reset
+  and Outlook's "keep the client rules" prompt re-sent them.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern

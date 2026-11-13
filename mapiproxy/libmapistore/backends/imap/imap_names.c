@@ -236,6 +236,11 @@ bad:
 	return NULL;
 }
 
+_PUBLIC_ char *imap_mailbox_utf8(TALLOC_CTX *mem_ctx, const char *mailbox)
+{
+	return mutf7_decode(mem_ctx, mailbox);
+}
+
 _PUBLIC_ char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter)
 {
 	const char	*leaf = delimiter ? strrchr(mailbox, delimiter) : NULL;

@@ -1126,7 +1126,7 @@ System Attendant Private Interface
 		[subcontext(0),subcontext_size(ActionLength),flag(NDR_REMAINING|NDR_NOALIGN)] ActionBlockData ActionBlockData;
 	} ActionBlock;
 
-	typedef [flag(NDR_NOALIGN)] struct {
+	typedef [public,flag(NDR_NOALIGN)] struct {
 		uint16		count;
 		ActionBlock	ActionBlock[count];
 	} RuleAction;

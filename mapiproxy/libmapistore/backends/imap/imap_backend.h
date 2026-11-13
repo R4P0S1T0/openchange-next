@@ -30,6 +30,33 @@
 #include <time.h>
 #include "gen_ndr/exchange.h"
 
+/* libsamba-util exports these (lib/util/base64.h) but installs no header for them. */
+char *base64_encode_data_blob(TALLOC_CTX *mem_ctx, DATA_BLOB data);
+DATA_BLOB base64_decode_data_blob_talloc(TALLOC_CTX *mem_ctx, const char *s);
+
+/* Outlook server rules (imap_rules.c, MS-OXORULE). PidTagRuleState bits: */
+#define ST_ENABLED	0x00000001
+#define ST_ERROR	0x00000002
+#define ST_EXIT_LEVEL	0x00000010
+
+/* The UTF-8 IMAP mailbox a move/copy action targets, or NULL (the rule goes to ST_ERROR).
+   folder_eid NULL asks for the Trash. */
+typedef const char *(*imap_rules_mailbox_fn)(void *private_data, TALLOC_CTX *mem_ctx,
+					      const struct SBinary_short *folder_eid, bool in_this_store);
+/* The whole "outlook" script for these rules (sorted by PidTagRuleSequence); sets or clears
+   ST_ERROR in each rule's PidTagRuleState (adding it when missing). NULL on OOM. */
+char *imap_rules_encode(TALLOC_CTX *mem_ctx, struct mapi_SPropValue_array *rules, uint32_t count,
+			imap_rules_mailbox_fn mailbox, void *private_data);
+/* The rules stored in a script (NULL script: none); unreadable rule lines are skipped. -1 on OOM. */
+struct imap_table;
+/* Rules on the Inbox, kept in the user's "outlook" Sieve script; other folders: NOT_IMPLEMENTED. */
+enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t flags, uint16_t count, struct RuleData *rules);
+enum mapistore_error imap_rules_table_load(struct imap_table *t);
+void *imap_rules_value(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row, uint32_t tag);
+enum mapistore_error imap_rules_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
+				    struct mapistore_property_data *data);
+int imap_rules_decode(TALLOC_CTX *mem_ctx, const char *script, struct mapi_SPropValue_array **rules, uint32_t *count);
+
 struct mapistore_backend;
 struct mapistore_contexts_list;
 struct mapistore_connection_info;
@@ -162,6 +189,7 @@ struct imap_table {
 	uint32_t			*view;		/* rows shown, in order (restriction and sort applied) */
 	uint32_t			view_count;
 	struct SSortOrder		*sort;		/* the last sort order, kept across restrictions */
+	struct mapi_SPropValue_array	*rules;		/* rule table (Inbox): from the outlook Sieve script */
 	uint16_t			sort_count;
 };
 
@@ -176,6 +204,8 @@ char *imap_uri(TALLOC_CTX *mem_ctx, const char *username, const char *mailbox, c
 int imap_uri_parse(TALLOC_CTX *mem_ctx, const char *uri, char delimiter, char **username, char **mailbox);
 /* The leaf of `mailbox`, modified UTF-7 decoded to UTF-8 (raw when malformed). */
 char *imap_display_name(TALLOC_CTX *mem_ctx, const char *mailbox, char delimiter);
+/* The whole mailbox name, modified UTF-7 decoded to UTF-8 (Sieve's "mailbox" names). */
+char *imap_mailbox_utf8(TALLOC_CTX *mem_ctx, const char *mailbox);
 
 /* One mailbox level from a UTF-8 display name, modified UTF-7; NULL when IMAP cannot hold it as one level. */
 char *imap_mailbox_name(TALLOC_CTX *mem_ctx, const char *utf8, char delimiter);

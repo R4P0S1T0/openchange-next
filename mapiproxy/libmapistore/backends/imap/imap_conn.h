@@ -37,6 +37,9 @@ struct imap_settings {
 	uint16_t	smtp_port;	 /* smtp_port, default 587 */
 	const char	*smtp_tunnel;	 /* tests: SMTP without TLS on stdio, $USER = sender */
 	const char	*expunged_mailbox; /* imap_expunged_mailbox: Dovecot's lazy_expunge mailbox, or NULL */
+	const char	*sieve_host;	 /* sieve_host, default 127.0.0.1 (loopback only) */
+	uint16_t	sieve_port;	 /* sieve_port, default 4190 */
+	const char	*sieve_tunnel;	 /* tests: PREAUTH ManageSieve on stdio, $USER = mailbox */
 };
 
 /* LIST attributes (RFC 3501, RFC 6154) the backend uses. */
@@ -94,6 +97,13 @@ int imap_tunnel_spawn(TALLOC_CTX *mem_ctx, const char *tunnel, const char *usern
    every recipient was accepted. */
 int imap_smtp_send(const struct imap_settings *s, const char *username, const char *from, const char **rcpts,
 		   uint32_t count, const char *data, size_t len, int *smtp_code);
+
+/* ManageSieve (imap_sieve.c), always on the script named "outlook", which is never made active.
+   get: 0 with *script = its text, or NULL when there is none; -1 connect/login failed.
+   put: script NULL deletes it (a missing one is fine); 0 ok, -1 connect/login failed,
+   -2 the server refused it (the reason is logged). */
+int imap_sieve_get(const struct imap_settings *s, const char *username, TALLOC_CTX *mem_ctx, char **script);
+int imap_sieve_put(const struct imap_settings *s, const char *username, const char *script);
 
 /* libetpan session of an open connection (for the fetch code). */
 struct mailimap *imap_conn_session(struct imap_conn *conn);

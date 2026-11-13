@@ -25,7 +25,7 @@ jobs:
           git ca-certificates curl build-essential autoconf automake pkg-config
           flex bison python3-dev python3-samba python3-mysqldb samba-dev libmariadb-dev-compat
           libmemcached-dev libnanomsg-dev libpopt-dev libparse-yapp-perl
-          check libsubunit-dev libetpan-dev dovecot-imapd
+          check libsubunit-dev libetpan-dev dovecot-imapd dovecot-managesieved dovecot-sieve
       - uses: actions/checkout@v4
       - name: Fetch matching-generation PIDL source
         run: |

@@ -2,7 +2,7 @@
    Read-only IMAP mapistore backend against Dovecot's imap binary in PREAUTH mode
    (mapistore:imap_tunnel): a throwaway Maildir, no root, no network.
 
-   Usage: imap-backend-test /usr/lib/dovecot/imap <fixture dir> <smtp_fake.py>
+   Usage: imap-backend-test /usr/lib/dovecot/imap <fixture dir> <smtp_fake.py> [/usr/lib/dovecot/managesieve]
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -27,7 +27,10 @@
 #include "mapiproxy/libmapistore/mapistore.h"
 #include "mapiproxy/libmapistore/mapistore_errors.h"
 #include "libmapi/libmapi_private.h"
+#include "gen_ndr/ndr_exchange.h"
 #include "imap_backend.h"
+#include "mapiproxy/libmapiserver/libmapiserver.h"
+#include "mapiproxy/libmapiproxy/backends/openchangedb_backends.h"
 
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "imap backend check failed at %d: %s\n", __LINE__, #c); \
@@ -41,6 +44,7 @@ struct imap_conn;
 static bool subscribed(struct imap_conn *c, const char *name);
 static const char *fixture;
 static struct imap_settings tunnel;
+static const char *managesieve; /* NULL: the Sieve tests are skipped */
 
 static const char plain_message[] =
     "From: Ana <ana@example.invalid>\r\n"
@@ -130,6 +134,7 @@ static int setup_fixture(const char *imap_binary)
         "mail_driver = maildir\n"
         "mail_home = %s/home/%%{user}\n"
         "mail_path = ~/Maildir\n"
+        "%s"
         /* Dovecot re-reads its settings and keeps only these variables; without one, a container (CI) has no USER. */
         "import_environment {\n  USER = %%{env:USER}\n}\n"
         "namespace inbox {\n"
@@ -139,7 +144,11 @@ static int setup_fixture(const char *imap_binary)
         "  mailbox Drafts {\n    special_use = \\Drafts\n    auto = create\n  }\n"
         "  mailbox Trash {\n    special_use = \\Trash\n    auto = create\n  }\n"
         "  mailbox Junk {\n    special_use = \\Junk\n    auto = create\n  }\n"
-        "}\n", fixture, fixture, fixture, fixture);
+        "}\n", fixture, fixture, fixture, fixture,
+        /* Without Pigeonhole these settings are unknown and Dovecot would refuse the whole file. */
+        managesieve ? "protocols = imap sieve\n"
+                      "sieve_script personal {\n  driver = file\n  path = ~/sieve\n  active_path = ~/.dovecot.sieve\n}\n"
+                      "sieve_script outlook {\n  type = before\n  driver = file\n  path = ~/sieve/outlook.sieve\n}\n" : "");
     CHECK(conf && text);
     CHECK(mkdir(fixture, 0700) == 0 || errno == EEXIST);
     if (write_file(conf, text, 0600)) return 1;
@@ -151,6 +160,11 @@ static int setup_fixture(const char *imap_binary)
     tunnel.tunnel = talloc_asprintf(root, "%s%s -c %s", as_root ? "/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups " : "",
                                     imap_binary, conf);
     CHECK(tunnel.tunnel != NULL);
+    if (managesieve) {
+        tunnel.sieve_tunnel = talloc_asprintf(root, "%s%s -c %s", as_root ? "/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups " : "",
+                                              managesieve, conf);
+        CHECK(tunnel.sieve_tunnel != NULL);
+    }
     return 0;
 }
 
@@ -2368,11 +2382,523 @@ static int test_backend_registers(void)
     return 0;
 }
 
+/* Stage B: the "outlook" Sieve script through ManageSieve (PREAUTH tunnel). */
+static int test_sieve_roundtrip(void)
+{
+    static const char text[] = "require \"fileinto\";\r\nkeep;\r\n";
+    char *got = (char *)"x";
+    if (!managesieve) return 0;
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &got) == 0 && got == NULL);
+    CHECK(imap_sieve_put(&tunnel, "alice@example.invalid", text) == 0);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &got) == 0 && got && strcmp(got, text) == 0);
+    CHECK(imap_sieve_put(&tunnel, "alice@example.invalid", NULL) == 0);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &got) == 0 && got == NULL);
+    CHECK(imap_sieve_put(&tunnel, "alice@example.invalid", NULL) == 0); /* already gone */
+    return 0;
+}
+
+static int test_sieve_refused(void)
+{
+    struct imap_settings down = tunnel;
+    char *got = NULL;
+    if (!managesieve) return 0;
+    CHECK(imap_sieve_put(&tunnel, "alice@example.invalid", "if {") == -2);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &got) == 0 && got == NULL);
+    CHECK(imap_sieve_put(&tunnel, "alice@example.invalid\r\nLOGOUT", "keep;") == -1);
+    down.sieve_tunnel = "/nonexistent/managesieve";
+    CHECK(imap_sieve_put(&down, "alice@example.invalid", "keep;") == -1);
+    CHECK(imap_sieve_get(&down, "alice@example.invalid", root, &got) == -1);
+    return 0;
+}
+
+static int test_sieve_settings(void)
+{
+    char *path = talloc_asprintf(root, "%s/master-sieve.pw", fixture);
+    struct loadparm_context *lp = loadparm_init(root);
+    struct imap_settings *s;
+    CHECK(path && lp);
+    if (write_file(path, "s3cret\n", 0600)) return 1;
+    CHECK(lpcfg_set_cmdline(lp, "mapistore:imap_master_password_file", path));
+    CHECK((s = imap_settings_load(root, lp)) != NULL);
+    CHECK(strcmp(s->sieve_host, "127.0.0.1") == 0 && s->sieve_port == 4190 && s->sieve_tunnel == NULL);
+    CHECK(lpcfg_set_cmdline(lp, "mapistore:sieve_host", "10.0.0.1"));
+    CHECK(imap_settings_load(root, lp) == NULL); /* the master password stays on loopback */
+    return 0;
+}
+
+/* Stage B: Outlook rules -> Sieve (imap_rules.c). */
+static const char *rules_mailbox(void *private_data, TALLOC_CTX *mem_ctx, const struct SBinary_short *eid, bool in_store)
+{
+    (void)private_data;
+    if (!eid) return "Trash";
+    return in_store ? talloc_strdup(mem_ctx, "INBOX/R1") : NULL;
+}
+
+static struct mapi_SRestriction *res_content(uint32_t fuzzy, uint32_t tag, const char *text)
+{
+    struct mapi_SRestriction *r = talloc_zero(root, struct mapi_SRestriction);
+    r->rt = RES_CONTENT;
+    r->res.resContent.fuzzy = fuzzy;
+    r->res.resContent.ulPropTag = tag;
+    r->res.resContent.lpProp.ulPropTag = tag;
+    r->res.resContent.lpProp.value.lpszW = text;
+    return r;
+}
+
+static struct mapi_SRestriction *res_search_key(uint32_t tag, const char *key)
+{
+    struct mapi_SRestriction *r = talloc_zero(root, struct mapi_SRestriction);
+    r->rt = RES_PROPERTY;
+    r->res.resProperty.relop = RELOP_EQ;
+    r->res.resProperty.ulPropTag = tag;
+    r->res.resProperty.lpProp.ulPropTag = tag;
+    r->res.resProperty.lpProp.value.bin.cb = strlen(key) + 1;
+    r->res.resProperty.lpProp.value.bin.lpb = (uint8_t *)talloc_strdup(root, key);
+    return r;
+}
+
+static struct ActionBlockData *act(uint8_t type)
+{
+    struct ActionBlockData *a = talloc_zero(root, struct ActionBlockData);
+    a->ActionType = type;
+    if (type == ActionType_OP_MOVE || type == ActionType_OP_COPY) {
+        struct MoveCopy_Action *m = type == ActionType_OP_MOVE ? &a->ActionDataBuffer.MoveAction : &a->ActionDataBuffer.CopyAction;
+        static uint8_t eid[21] = { 0x01, 0x01, 0, 0, 0, 0, 0, 0x30, 0 };
+        m->FolderInThisStore = 1;
+        m->FolderEID.cb = sizeof(eid);
+        m->FolderEID.lpb = eid;
+    }
+    return a;
+}
+
+/* A rule as Outlook sends it: id, sequence, state, condition (or none) and actions. */
+static struct mapi_SPropValue_array *mk_rule(uint64_t id, uint32_t seq, uint32_t state, struct mapi_SRestriction *c,
+                                             struct ActionBlockData **acts, uint16_t nacts)
+{
+    struct mapi_SPropValue_array *r = talloc_zero(root, struct mapi_SPropValue_array);
+    struct RuleAction *ra;
+    DATA_BLOB blob;
+    uint16_t i;
+    r->lpProps = talloc_zero_array(r, struct mapi_SPropValue, 5);
+    r->lpProps[r->cValues].ulPropTag = PidTagRuleId; r->lpProps[r->cValues++].value.d = id;
+    r->lpProps[r->cValues].ulPropTag = PidTagRuleSequence; r->lpProps[r->cValues++].value.l = seq;
+    r->lpProps[r->cValues].ulPropTag = PidTagRuleState; r->lpProps[r->cValues++].value.l = state;
+    if (c) {
+        r->lpProps[r->cValues].ulPropTag = PidTagRuleCondition;
+        memcpy(&r->lpProps[r->cValues++].value.Restrictions, c, sizeof(*c));
+    }
+    r->lpProps[r->cValues].ulPropTag = PidTagRuleActions;
+    ra = &r->lpProps[r->cValues++].value.RuleAction;
+    ra->count = nacts;
+    ra->ActionBlock = talloc_zero_array(r, struct ActionBlock, nacts);
+    for (i = 0; i < nacts; i++) {
+        ra->ActionBlock[i].ActionBlockData = *acts[i];
+        /* the subcontext size NDR checks on push, as Outlook sends it (MS-OXORULE 2.2.5.1) */
+        ra->ActionBlock[i].ActionLength = 9;
+        switch (acts[i]->ActionType) {
+        case ActionType_OP_MOVE:
+        case ActionType_OP_COPY:
+            ra->ActionBlock[i].ActionLength += 1 + 2 + 2 + acts[i]->ActionDataBuffer.MoveAction.FolderEID.cb;
+            break;
+        case ActionType_OP_REPLY:
+            ra->ActionBlock[i].ActionLength += 32;
+            break;
+        case ActionType_OP_TAG:
+            ra->ActionBlock[i].ActionLength += 8;
+            break;
+        case ActionType_OP_FORWARD: {
+            struct ForwardDelegate_Action *f = &acts[i]->ActionDataBuffer.ForwardAction;
+            uint16_t j;
+            ra->ActionBlock[i].ActionLength += 2;
+            for (j = 0; j < f->RecipientCount; j++) {
+                if (!NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&blob, root, &f->RecipientBlock[j].PropertyValue,
+                        (ndr_push_flags_fn_t)ndr_push_mapi_SPropValue_array))) return NULL;
+                ra->ActionBlock[i].ActionLength += 1 + blob.length;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return r;
+}
+
+static const char *rule_script(struct mapi_SPropValue_array *r)
+{
+    return imap_rules_encode(root, r, 1, rules_mailbox, NULL);
+}
+
+static uint32_t rule_state(struct mapi_SPropValue_array *r)
+{
+    const uint32_t *st = find_mapi_SPropValue_data(r, PidTagRuleState);
+    return st ? *st : 0xffffffff;
+}
+
+#define ON (ST_ENABLED)
+static int expect_block(struct mapi_SPropValue_array *r, const char *require, const char *block)
+{
+    const char *sc = rule_script(r);
+    CHECK(r && sc);
+    if (!strstr(sc, block) || (require && !strstr(sc, require))) {
+        fprintf(stderr, "script:\n%s\nwanted:\n%s\n", sc, block);
+        return 1;
+    }
+    CHECK(!(rule_state(r) & ST_ERROR));
+    return 0;
+}
+
+static int test_sieve_conditions(void)
+{
+    struct ActionBlockData *mv[] = { act(ActionType_OP_MOVE) };
+    struct mapi_SRestriction *c, *sub;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "Relatório"), mv, 1),
+                     "require [\"fileinto\",\"mailbox\"];",
+                     "if header :contains \"subject\" \"Relatório\" {\n  fileinto :create \"INBOX/R1\";\n}\n")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_FULLSTRING, PidTagSubject, "x"), mv, 1), NULL,
+                     "if header :is :comparator \"i;octet\" \"subject\" \"x\" {")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_PREFIX | FL_IGNORECASE, PidTagSubject, "a*b"), mv, 1), NULL,
+                     "if header :matches \"subject\" \"a\\\\*b*\" {")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagBody, "pix"), mv, 1), "\"body\"",
+                     "if body :text :contains \"pix\" {")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSenderEmailAddress, "ana@"), mv, 1), NULL,
+                     "if address :contains \"from\" \"ana@\" {")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagDisplayCc, "Bruno"), mv, 1), NULL,
+                     "if header :contains \"cc\" \"Bruno\" {")) return 1;
+    /* "from <person>": a comment around the sender search key */
+    c = talloc_zero(root, struct mapi_SRestriction);
+    c->rt = RES_COMMENT;
+    c->res.resComment.RestrictionPresent = 1;
+    c->res.resComment.Restriction.res = (struct mapi_SRestriction_comment *)res_search_key(PidTagSenderSearchKey, "SMTP:ANA@EXAMPLE.INVALID");
+    if (expect_block(mk_rule(1, 10, ON, c, mv, 1), NULL, "if address :is \"from\" \"ANA@EXAMPLE.INVALID\" {")) return 1;
+    /* "sent to <person>": a subrestriction on the recipients */
+    sub = talloc_zero(root, struct mapi_SRestriction);
+    sub->rt = RES_SUBRESTRICTION;
+    sub->res.resSub.ulSubObject = PidTagMessageRecipients;
+    sub->res.resSub.res = (struct mapi_SRestriction_sub *)res_search_key(PidTagSearchKey, "SMTP:BOB@EXAMPLE.INVALID");
+    if (expect_block(mk_rule(1, 10, ON, sub, mv, 1), NULL, "if address :is [\"to\",\"cc\"] \"BOB@EXAMPLE.INVALID\" {")) return 1;
+    /* importance high, and AND/NOT */
+    c = talloc_zero(root, struct mapi_SRestriction);
+    c->rt = RES_PROPERTY;
+    c->res.resProperty.relop = RELOP_EQ;
+    c->res.resProperty.ulPropTag = PidTagImportance;
+    c->res.resProperty.lpProp.ulPropTag = PidTagImportance;
+    c->res.resProperty.lpProp.value.l = 2;
+    if (expect_block(mk_rule(1, 10, ON, c, mv, 1), NULL,
+                     "if anyof (header :is \"importance\" [\"1\",\"2\",\"high\",\"urgent\"], header :matches \"x-priority\" [\"1*\",\"2*\"]) {")) return 1;
+    {
+        struct mapi_SRestriction *and = talloc_zero(root, struct mapi_SRestriction);
+        /* resNot.res is a whole restriction placed inside this one: room for both */
+        struct mapi_SRestriction *not = talloc_zero_size(root, 2 * sizeof(struct mapi_SRestriction));
+        struct mapi_SRestriction *two = talloc_zero_array(root, struct mapi_SRestriction, 2);
+        not->rt = RES_NOT;
+        memcpy(&not->res.resNot.res, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "b"), sizeof(struct mapi_SRestriction));
+        two[0] = *res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "a");
+        two[1] = *not;
+        and->rt = RES_AND;
+        and->res.resAnd.cRes = 2;
+        and->res.resAnd.res = (struct mapi_SRestriction_and *)two;
+        if (expect_block(mk_rule(1, 10, ON, and, mv, 1), NULL,
+                         "if allof (header :contains \"subject\" \"a\", not header :contains \"subject\" \"b\") {")) return 1;
+    }
+    if (expect_block(mk_rule(1, 10, ON, NULL, mv, 1), NULL, "if true {")) return 1;
+    return 0;
+}
+
+static int test_sieve_actions(void)
+{
+    struct ActionBlockData *read_flag[] = { act(ActionType_OP_MARK_AS_READ), act(ActionType_OP_TAG) };
+    struct ActionBlockData *cp[] = { act(ActionType_OP_COPY) }, *del[] = { act(ActionType_OP_DELETE) };
+    struct ActionBlockData *fwd[] = { act(ActionType_OP_FORWARD) };
+    struct mapi_SPropValue *flag = (struct mapi_SPropValue *)&read_flag[1]->ActionDataBuffer.PropValue;
+    struct mapi_SPropValue_array *rcpt;
+    flag->ulPropTag = PidTagFlagStatus;
+    flag->value.l = 2;
+    if (expect_block(mk_rule(1, 10, ON | ST_EXIT_LEVEL, NULL, read_flag, 2), "require [\"imap4flags\"];",
+                     "if true {\n  addflag \"\\\\Seen\";\n  addflag \"\\\\Flagged\";\n  stop;\n}\n")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, NULL, cp, 1), "require [\"fileinto\",\"copy\",\"mailbox\"];",
+                     "  fileinto :copy :create \"INBOX/R1\";\n")) return 1;
+    if (expect_block(mk_rule(1, 10, ON, NULL, del, 1), NULL, "  fileinto \"Trash\";\n")) return 1;
+    fwd[0]->ActionDataBuffer.ForwardAction.RecipientCount = 1;
+    fwd[0]->ActionDataBuffer.ForwardAction.RecipientBlock = talloc_zero_array(root, struct RecipientBlock, 1);
+    rcpt = (struct mapi_SPropValue_array *)&fwd[0]->ActionDataBuffer.ForwardAction.RecipientBlock[0].PropertyValue;
+    rcpt->cValues = 2;
+    rcpt->lpProps = talloc_zero_array(root, struct mapi_SPropValue, 2);
+    rcpt->lpProps[0].ulPropTag = PidTagAddressType; rcpt->lpProps[0].value.lpszW = "SMTP";
+    rcpt->lpProps[1].ulPropTag = PidTagEmailAddress; rcpt->lpProps[1].value.lpszW = "bruno@example.invalid";
+    if (expect_block(mk_rule(1, 10, ON, NULL, fwd, 1), "\"copy\"", "  redirect :copy \"bruno@example.invalid\";\n")) return 1;
+    fwd[0]->ActionFlavor = 0x4; /* as attachment */
+    CHECK(rule_script(mk_rule(1, 10, ON, NULL, fwd, 1)) != NULL);
+    {
+        struct mapi_SPropValue_array *r = mk_rule(1, 10, ON, NULL, fwd, 1);
+        CHECK(rule_script(r) && (rule_state(r) & ST_ERROR));
+    }
+    return 0;
+}
+
+static int test_sieve_escape_and_errors(void)
+{
+    struct ActionBlockData *mv[] = { act(ActionType_OP_MOVE) }, *reply[] = { act(ActionType_OP_REPLY) };
+    struct ActionBlockData *defer[] = { act(ActionType_OP_DEFER_ACTION) };
+    struct mapi_SPropValue_array *r;
+    const char *sc;
+    if (expect_block(mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "a\"b\\c"), mv, 1), NULL,
+                     "header :contains \"subject\" \"a\\\"b\\\\c\" {")) return 1;
+    r = mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "a\"\n} discard; if true {"), mv, 1);
+    CHECK((sc = rule_script(r)) && (rule_state(r) & ST_ERROR) && !strstr(sc, "discard") && !strstr(sc, "if "));
+    r = mk_rule(1, 10, ON, NULL, reply, 1);
+    CHECK((sc = rule_script(r)) && (rule_state(r) & ST_ERROR) && strstr(sc, "# rule ") && !strstr(sc, "if "));
+    r = mk_rule(1, 10, 0, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "x"), mv, 1);
+    CHECK((sc = rule_script(r)) && !(rule_state(r) & ST_ERROR) && strstr(sc, "# rule ") && !strstr(sc, "if ") && !strstr(sc, "require"));
+    r = mk_rule(1, 10, ON, NULL, defer, 1);
+    CHECK((sc = rule_script(r)) && !(rule_state(r) & ST_ERROR) && !strstr(sc, "if "));
+    /* a client sending ST_ERROR does not keep it */
+    r = mk_rule(1, 10, ON | ST_ERROR, NULL, mv, 1);
+    CHECK(rule_script(r) && !(rule_state(r) & ST_ERROR));
+    return 0;
+}
+
+static int test_rules_order_roundtrip(void)
+{
+    struct ActionBlockData *mv[] = { act(ActionType_OP_MOVE) }, *rd[] = { act(ActionType_OP_MARK_AS_READ) };
+    struct mapi_SPropValue_array *two = talloc_zero_array(root, struct mapi_SPropValue_array, 2), *back = NULL;
+    const char *sc, *a, *b;
+    char *garbage;
+    uint32_t n = 0, i;
+    DATA_BLOB x, y;
+    two[0] = *mk_rule(1, 20, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "second"), mv, 1);
+    two[1] = *mk_rule(2, 10, ON | ST_EXIT_LEVEL, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "first"), rd, 1);
+    CHECK((sc = imap_rules_encode(root, two, 2, rules_mailbox, NULL)) != NULL);
+    CHECK(strncmp(sc, "# openchange-rules v1 -- generated by OpenChange; edits are overwritten\n", 72) == 0);
+    a = strstr(sc, "\"first\"");
+    b = strstr(sc, "\"second\"");
+    CHECK(a && b && a < b);
+    CHECK(imap_rules_decode(root, sc, &back, &n) == 0 && n == 2);
+    for (i = 0; i < 2; i++) {
+        /* decoded in script order: rule 2 (sequence 10) first */
+        CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&x, root, &two[1 - i], (ndr_push_flags_fn_t)ndr_push_mapi_SPropValue_array)));
+        CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&y, root, &back[i], (ndr_push_flags_fn_t)ndr_push_mapi_SPropValue_array)));
+        CHECK(x.length == y.length && memcmp(x.data, y.data, x.length) == 0);
+    }
+    garbage = talloc_asprintf(root, "if true { discard; }\n# rule !!!\n# rule \n%s", strstr(sc, "# rule "));
+    CHECK(imap_rules_decode(root, garbage, &back, &n) == 0 && n == 2);
+    CHECK(imap_rules_decode(root, NULL, &back, &n) == 0 && n == 0);
+    /* the generated script compiles (when Pigeonhole is installed) */
+    if (managesieve && access("/usr/bin/sievec", X_OK) == 0) {
+        char *path = talloc_asprintf(root, "%s/rules.sieve", fixture);
+        char *cmd = talloc_asprintf(root, "/usr/bin/sievec -c %s/dovecot.conf %s %s/rules.svbin", fixture, path, fixture);
+        CHECK(write_file(path, sc, 0644) == 0);
+        CHECK(system(cmd) == 0);
+    }
+    return 0;
+}
+
+/* Stage B Task 3: rules on the Inbox through the backend ops. */
+static struct RuleData rule_row(uint8_t flags, struct mapi_SPropValue_array *props)
+{
+    struct RuleData d;
+    d.RuleDataFlags = flags;
+    d.PropertyValues = *props;
+    return d;
+}
+
+static struct mapi_SPropValue_array *rule_to(uint64_t id, const char *name, const char *subject, uint64_t fid);
+
+static struct mapi_SPropValue_array *rule_named(uint64_t id, const char *name, const char *subject)
+{
+    return rule_to(id, name, subject, 0x7777);
+}
+
+/* A system folder (Deleted Items) is known to openchangedb only, not to the mapistore indexing. */
+static enum MAPISTATUS fake_oc_uri(TALLOC_CTX *mem_ctx, struct openchangedb_context *oc, const char *user, uint64_t fid,
+                                   char **uri, bool mailboxstore)
+{
+    (void) oc; (void) user; (void) mailboxstore;
+    if (fid != 0xf803000000000001ULL) return MAPI_E_NOT_FOUND;
+    *uri = talloc_strdup(mem_ctx, "imap://alice%40example.invalid/Trash/");
+    return MAPI_E_SUCCESS;
+}
+
+static struct mapi_SPropValue_array *rule_to(uint64_t id, const char *name, const char *subject, uint64_t fid)
+{
+    struct ActionBlockData *mv[] = { act(ActionType_OP_MOVE) };
+    struct MoveCopy_Action *m = &mv[0]->ActionDataBuffer.MoveAction;
+    struct mapi_SPropValue_array *r;
+    uint8_t *eid = talloc_zero_array(root, uint8_t, 21);
+    int i;
+    eid[0] = 0x01;
+    for (i = 0; i < 8; i++) eid[1 + i] = (fid >> (8 * i)) & 0xff; /* ServerEid: little-endian FID */
+    m->FolderEID.lpb = eid;
+    r = mk_rule(id, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, subject), mv, 1);
+    r->lpProps = talloc_realloc(root, r->lpProps, struct mapi_SPropValue, r->cValues + 1);
+    r->lpProps[r->cValues].ulPropTag = PidTagRuleName;
+    r->lpProps[r->cValues++].value.lpszW = name;
+    return r;
+}
+
+static uint32_t rule_rows(void *inbox, const char **first_name, uint64_t *first_id)
+{
+    void *table = NULL;
+    uint32_t count = 0;
+    enum MAPITAGS cols[] = { PidTagRuleId, PidTagRuleName, PidTagRuleState, PidTagRuleCondition, PidTagRuleActions };
+    struct mapistore_property_data *row;
+    if (ops()->folder.open_table(inbox, root, MAPISTORE_RULE_TABLE, 0, &table, &count) != MAPISTORE_SUCCESS) return 0xffffffff;
+    if (count && ops()->table.set_columns(table, 5, cols) == MAPISTORE_SUCCESS &&
+        ops()->table.get_row(table, root, MAPISTORE_PREFILTERED_QUERY, 0, &row) == MAPISTORE_SUCCESS) {
+        if (first_name) *first_name = row[1].error == MAPISTORE_SUCCESS ? row[1].data : NULL;
+        if (first_id) *first_id = row[0].error == MAPISTORE_SUCCESS ? *(uint64_t *)row[0].data : 0;
+        if (row[3].error || row[4].error || ((struct mapi_SRestriction *)row[3].data)->rt != RES_CONTENT ||
+            ((struct RuleAction *)row[4].data)->count != 1 || (*(uint32_t *)row[2].data & ST_ERROR)) return 0xfffffffe;
+    }
+    return count;
+}
+
+/* The id of the rule called `name`, or 0. */
+static uint64_t rule_id(void *inbox, const char *name)
+{
+    void *table = NULL;
+    uint32_t count = 0, i;
+    enum MAPITAGS cols[] = { PidTagRuleId, PidTagRuleName };
+    struct mapistore_property_data *row;
+    if (ops()->folder.open_table(inbox, root, MAPISTORE_RULE_TABLE, 0, &table, &count) != MAPISTORE_SUCCESS ||
+        ops()->table.set_columns(table, 2, cols) != MAPISTORE_SUCCESS) return 0;
+    for (i = 0; i < count; i++) {
+        if (ops()->table.get_row(table, root, MAPISTORE_PREFILTERED_QUERY, i, &row) == MAPISTORE_SUCCESS &&
+            row[1].error == MAPISTORE_SUCCESS && strcmp(row[1].data, name) == 0) return *(uint64_t *)row[0].data;
+    }
+    return 0;
+}
+
+static int test_rules_inbox(void)
+{
+    void *inbox = context_for("INBOX"), *other = context_for("Drafts");
+    struct RuleData d[2];
+    const char *name = NULL;
+    char *script = NULL, *before;
+    uint64_t id = 0, id1, id_del, id2, id3;
+    struct imap_settings down;
+    if (!managesieve) return 0;
+    CHECK(inbox && other && ops());
+    CHECK(fi_add_fmid(&ictx, "alice@example.invalid", 0x7777, imap_uri(root, "alice@example.invalid", "INBOX/R1", '/')) == MAPISTORE_SUCCESS);
+    CHECK(rule_rows(inbox, NULL, NULL) == 0);
+    d[0] = rule_row(ROW_ADD, rule_named(0, "r1", "x"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(rule_rows(inbox, &name, &id) == 1 && name && strcmp(name, "r1") == 0 && id != 0);
+    id1 = id;
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
+    CHECK(strstr(script, "if header :contains \"subject\" \"x\" {\n  fileinto :create \"INBOX/R1\";\n}\n"));
+    /* the rule runs at delivery (sieve-test, when installed) */
+    if (access("/usr/bin/sieve-test", X_OK) == 0) {
+        char *sp = talloc_asprintf(root, "%s/outlook-test.sieve", fixture), *mp = talloc_asprintf(root, "%s/msg.eml", fixture);
+        char *cmd = talloc_asprintf(root, "/usr/bin/sieve-test -c %s/dovecot.conf %s %s 2>&1 | grep -q 'INBOX/R1'", fixture, sp, mp);
+        CHECK(write_file(sp, script, 0644) == 0);
+        CHECK(write_file(mp, "From: ana@example.invalid\r\nTo: alice@example.invalid\r\nSubject: tem X aqui\r\n\r\nbody\r\n", 0644) == 0);
+        CHECK(system(cmd) == 0);
+    }
+    /* "delete it": Outlook moves to Deleted Items, whose FID only openchangedb knows */
+    {
+        struct openchangedb_context oc = { 0 };
+        struct imap_context *ic = ((struct imap_folder *)inbox)->ctx;
+        oc.get_mapistoreURI = fake_oc_uri;
+        ic->oc_ctx = &oc;
+        d[0] = rule_row(ROW_ADD, rule_to(0, "del", "apagar", 0xf803000000000001ULL));
+        CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+        ic->oc_ctx = NULL;
+        CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
+        CHECK(strstr(script, "if header :contains \"subject\" \"apagar\" {\n  fileinto :create \"Trash\";\n}\n"));
+        id_del = rule_id(inbox, "del");
+        CHECK(id_del != 0 && id_del != id1);
+        d[0] = rule_row(ROW_REMOVE, rule_named(id_del, "", ""));
+        CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS && rule_rows(inbox, NULL, NULL) == 1);
+    }
+    /* modify, then an unknown id changes nothing */
+    d[0] = rule_row(ROW_MODIFY, rule_named(id1, "r1b", "y"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(rule_rows(inbox, &name, NULL) == 1 && strcmp(name, "r1b") == 0);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &before) == 0 && strstr(before, "\"y\""));
+    d[0] = rule_row(ROW_MODIFY, rule_named(99, "nope", "z"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && strcmp(script, before) == 0);
+    /* removing a rule that is not there (Outlook's stale client stream) is a no-op */
+    d[0] = rule_row(ROW_REMOVE, rule_named(99, "nope", "z"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && strcmp(script, before) == 0);
+    /* ids are never reused, so a stale id cannot hit another rule; Replace drops what was there */
+    d[0] = rule_row(ROW_ADD, rule_named(0, "r2", "w"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS && rule_rows(inbox, NULL, NULL) == 2);
+    id2 = rule_id(inbox, "r2");
+    CHECK(id2 != 0 && id2 != id1 && id2 != id_del);
+    d[0] = rule_row(ROW_ADD, rule_named(0, "r3", "v"));
+    CHECK(ops()->folder.modify_rules(inbox, ModifyRulesFlag_Replace, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(rule_rows(inbox, &name, &id) == 1 && strcmp(name, "r3") == 0);
+    id3 = id;
+    CHECK(id3 != id1 && id3 != id_del && id3 != id2);
+    /* Outlook restricts the rules table by a string column (RuleProvider) before reading it */
+    {
+        void *table = NULL;
+        uint32_t count = 0;
+        uint8_t status;
+        CHECK(ops()->folder.open_table(inbox, root, MAPISTORE_RULE_TABLE, 0, &table, &count) == MAPISTORE_SUCCESS && count == 1);
+        CHECK(imap_table_set_restrictions(table, res_content(FL_PREFIX | FL_IGNORECASE, PidTagRuleName, "R"), &status) == MAPISTORE_SUCCESS);
+        CHECK(((struct imap_table *)table)->view_count == 1);
+        CHECK(imap_table_set_restrictions(table, res_content(FL_FULLSTRING | FL_IGNORECASE, PidTagRuleName, "zz"), &status) == MAPISTORE_SUCCESS);
+        CHECK(((struct imap_table *)table)->view_count == 0);
+    }
+    /* ManageSieve down: an error, the script stays */
+    down = tunnel;
+    down.sieve_tunnel = "/nonexistent/managesieve";
+    imap_backend_set_state(&down, false);
+    d[0] = rule_row(ROW_REMOVE, rule_named(id3, "", ""));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_ERROR);
+    imap_backend_set_state(&tunnel, false);
+    CHECK(rule_rows(inbox, NULL, NULL) == 1);
+    /* the last removal deletes the script */
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script == NULL);
+    CHECK(rule_rows(inbox, NULL, NULL) == 0);
+    /* other folders keep the stub */
+    CHECK(ops()->folder.modify_rules(other, 0, 1, d) == MAPISTORE_ERR_NOT_IMPLEMENTED);
+    {
+        void *table = NULL;
+        uint32_t count = 0;
+        CHECK(ops()->folder.open_table(other, root, MAPISTORE_RULE_TABLE, 0, &table, &count) == MAPISTORE_ERR_NOT_IMPLEMENTED);
+    }
+    return 0;
+}
+
+/* Stage B Task 4: QueryRows on the rules table pushes condition and actions (it aborted before). */
+static int test_push_property_rule_types(void)
+{
+    struct ActionBlockData *rd[] = { act(ActionType_OP_MARK_AS_READ) };
+    struct mapi_SPropValue_array *r = mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "x"), rd, 1);
+    const struct mapi_SRestriction *c;
+    struct mapi_SPropValue *a = NULL;
+    DATA_BLOB pushed = { NULL, 0 }, direct;
+    uint32_t i;
+    for (i = 0; i < r->cValues; i++) if (r->lpProps[i].ulPropTag == PidTagRuleActions) a = &r->lpProps[i];
+    c = (const struct mapi_SRestriction *)&r->lpProps[3].value.Restrictions;
+    CHECK(a && r->lpProps[3].ulPropTag == PidTagRuleCondition);
+    CHECK(libmapiserver_push_property(root, PidTagRuleCondition, c, &pushed, 0, 0, 0) == 0);
+    CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&direct, root, c, (ndr_push_flags_fn_t)ndr_push_mapi_SRestriction)));
+    CHECK(pushed.length == direct.length && memcmp(pushed.data, direct.data, direct.length) == 0);
+    pushed.length = 0;
+    pushed.data = NULL;
+    CHECK(libmapiserver_push_property(root, PidTagRuleActions, &a->value.RuleAction, &pushed, 0, 0, 0) == 0);
+    CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&direct, root, &a->value.RuleAction, (ndr_push_flags_fn_t)ndr_push_RuleAction)));
+    CHECK(pushed.length == direct.length && direct.length == 2 + 2 + 9 && memcmp(pushed.data, direct.data, direct.length) == 0);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 4) {
-        fprintf(stderr, "usage: %s <dovecot imap binary> <fixture dir> <smtp_fake.py>\n", argv[0]);
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "usage: %s <dovecot imap binary> <fixture dir> <smtp_fake.py> [managesieve binary]\n", argv[0]);
         return 2;
+    }
+    if (argc == 5 && access(argv[4], X_OK) == 0) {
+        managesieve = argv[4];
+    } else {
+        printf("managesieve not found: Sieve tests skipped\n");
     }
     smtp_fake = argv[3];
     signal(SIGPIPE, SIG_IGN); /* as openchange-mapihttpd (Rust ignores SIGPIPE) */
@@ -2407,7 +2933,8 @@ int main(int argc, char **argv)
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
         test_client_change_key_kept() || test_uploaded_received_message_copies_original() ||
         test_uploaded_message_copies_original_from_expunged() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
-        test_purge_before_import()) {
+        test_purge_before_import() || test_sieve_settings() || test_sieve_roundtrip() || test_sieve_refused() ||
+        test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox() || test_push_property_rule_types()) {
         return 1;
     }
     talloc_free(root);
