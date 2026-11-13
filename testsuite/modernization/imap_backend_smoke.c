@@ -30,6 +30,7 @@
 #include "gen_ndr/ndr_exchange.h"
 #include "imap_backend.h"
 #include "mapiproxy/libmapiserver/libmapiserver.h"
+#include "mapiproxy/libmapiproxy/backends/openchangedb_backends.h"
 
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "imap backend check failed at %d: %s\n", __LINE__, #c); \
@@ -2701,13 +2702,29 @@ static struct RuleData rule_row(uint8_t flags, struct mapi_SPropValue_array *pro
     return d;
 }
 
+static struct mapi_SPropValue_array *rule_to(uint64_t id, const char *name, const char *subject, uint64_t fid);
+
 static struct mapi_SPropValue_array *rule_named(uint64_t id, const char *name, const char *subject)
+{
+    return rule_to(id, name, subject, 0x7777);
+}
+
+/* A system folder (Deleted Items) is known to openchangedb only, not to the mapistore indexing. */
+static enum MAPISTATUS fake_oc_uri(TALLOC_CTX *mem_ctx, struct openchangedb_context *oc, const char *user, uint64_t fid,
+                                   char **uri, bool mailboxstore)
+{
+    (void) oc; (void) user; (void) mailboxstore;
+    if (fid != 0xf803000000000001ULL) return MAPI_E_NOT_FOUND;
+    *uri = talloc_strdup(mem_ctx, "imap://alice%40example.invalid/Trash/");
+    return MAPI_E_SUCCESS;
+}
+
+static struct mapi_SPropValue_array *rule_to(uint64_t id, const char *name, const char *subject, uint64_t fid)
 {
     struct ActionBlockData *mv[] = { act(ActionType_OP_MOVE) };
     struct MoveCopy_Action *m = &mv[0]->ActionDataBuffer.MoveAction;
     struct mapi_SPropValue_array *r;
     uint8_t *eid = talloc_zero_array(root, uint8_t, 21);
-    uint64_t fid = 0x7777;
     int i;
     eid[0] = 0x01;
     for (i = 0; i < 8; i++) eid[1 + i] = (fid >> (8 * i)) & 0xff; /* ServerEid: little-endian FID */
@@ -2760,6 +2777,20 @@ static int test_rules_inbox(void)
         CHECK(write_file(sp, script, 0644) == 0);
         CHECK(write_file(mp, "From: ana@example.invalid\r\nTo: alice@example.invalid\r\nSubject: tem X aqui\r\n\r\nbody\r\n", 0644) == 0);
         CHECK(system(cmd) == 0);
+    }
+    /* "delete it": Outlook moves to Deleted Items, whose FID only openchangedb knows */
+    {
+        struct openchangedb_context oc = { 0 };
+        struct imap_context *ic = ((struct imap_folder *)inbox)->ctx;
+        oc.get_mapistoreURI = fake_oc_uri;
+        ic->oc_ctx = &oc;
+        d[0] = rule_row(ROW_ADD, rule_to(0, "del", "apagar", 0xf803000000000001ULL));
+        CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+        ic->oc_ctx = NULL;
+        CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
+        CHECK(strstr(script, "if header :contains \"subject\" \"apagar\" {\n  fileinto :create \"Trash\";\n}\n"));
+        d[0] = rule_row(ROW_REMOVE, rule_named(2, "", ""));
+        CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS && rule_rows(inbox, NULL, NULL) == 1);
     }
     /* modify, then an unknown id changes nothing */
     d[0] = rule_row(ROW_MODIFY, rule_named(1, "r1b", "y"));
