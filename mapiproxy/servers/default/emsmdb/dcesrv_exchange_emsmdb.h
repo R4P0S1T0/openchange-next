@@ -58,6 +58,11 @@ struct emsmdbp_context {
 
 	TALLOC_CTX				*mem_ctx;
 	struct GUID				session_uuid;
+
+	/* M5 (emsmdbp_notify.c): deep hierarchy tables Outlook keeps open, and the RopNotify replies for them */
+	struct emsmdbp_notify_table		*notify_tables;
+	struct emsmdbp_notify_entry		*notify_queue;
+	uint32_t				notify_room;	/* bytes the Execute in progress may still add; 0 = no bound */
 };
 
 struct emsmdbp_stream {
@@ -319,6 +324,14 @@ char                  *emsmdbp_get_owner(struct emsmdbp_object *object);
 int		      emsmdbp_get_uri_from_fid(TALLOC_CTX *, struct emsmdbp_context *, uint64_t, char **);
 int		      emsmdbp_get_fid_from_uri(struct emsmdbp_context *, const char *, uint64_t *);
 uint32_t	      emsmdbp_get_contextID(struct emsmdbp_object *);
+
+/* definitions from emsmdbp_notify.c */
+enum emsmdbp_folder_change { EMSMDBP_FOLDER_MODIFIED, EMSMDBP_FOLDER_ADDED, EMSMDBP_FOLDER_DELETED };
+void		      emsmdbp_notify_track_table(struct emsmdbp_context *, struct emsmdbp_object *, uint32_t, uint8_t);
+int		      emsmdbp_notify_folder_changed(struct emsmdbp_context *, uint64_t, enum emsmdbp_folder_change);
+enum MAPISTATUS       emsmdbp_fid_for_mailbox(struct emsmdbp_context *, const char *, char, uint64_t *);
+bool		      emsmdbp_notify_pending(struct emsmdbp_context *);
+enum MAPISTATUS       emsmdbp_notify_append(struct emsmdbp_context *, struct mapi_response *, uint32_t *, uint16_t *, uint32_t);
 
 /* definitions from emsmdbp_provisioning.c */
 enum MAPISTATUS       emsmdbp_mailbox_provision(struct emsmdbp_context *, const char *);

@@ -1209,6 +1209,7 @@ mapiproxy/servers/exchange_nsp.$(SHLIBEXT):	mapiproxy/servers/default/nspi/dcesr
 # The EMSMDB provider without the DCE/RPC entry points; shared with liboc_emsmdb.
 EMSMDB_PROVIDER_OBJS =	mapiproxy/servers/default/emsmdb/emsmdbp.po			\
 			mapiproxy/servers/default/emsmdb/emsmdbp_object.po		\
+			mapiproxy/servers/default/emsmdb/emsmdbp_notify.po		\
 			mapiproxy/servers/default/emsmdb/emsmdbp_provisioning.po	\
 			mapiproxy/servers/default/emsmdb/emsmdbp_provisioning_names.po	\
 			mapiproxy/servers/default/emsmdb/oxcstor.po			\

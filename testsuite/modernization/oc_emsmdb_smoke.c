@@ -1002,6 +1002,168 @@ static int test_unread_count_from_backend(void)
     return 0;
 }
 
+/* M5: cached-mode Outlook keeps a deep hierarchy table (TableFlags 0x84) open on the mailbox root;
+   a changed folder reaches it as RopNotify TableModified on that table's handle. */
+static enum MAPITAGS hier_columns[] = { PidTagFolderId, PidTagDisplayName, PidTagContentCount };
+
+/* RopGetHierarchyTable on the mailbox root then RopSetColumns; returns the table handle or 0. */
+static uint32_t open_hierarchy(oc_emsmdb_session *session, uint8_t flags)
+{
+    struct emsmdbp_object *mailbox;
+    struct mapi_handles *mh, *th;
+    struct EcDoRpc_MAPI_REQ req;
+    struct EcDoRpc_MAPI_REPL repl;
+    uint32_t handles[2];
+    uint16_t size = 0;
+    void *data;
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    if (!mailbox || mapi_handles_add(session->ctx->handles_ctx, 0, &mh) != MAPI_E_SUCCESS ||
+        mapi_handles_set_private_data(mh, mailbox) != MAPI_E_SUCCESS) return 0;
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    handles[0] = mh->handle; handles[1] = 0xFFFFFFFF;
+    req.opnum = op_MAPI_GetHierarchyTable; req.handle_idx = 0;
+    req.u.mapi_GetHierarchyTable.handle_idx = 1; req.u.mapi_GetHierarchyTable.TableFlags = flags;
+    if (EcDoRpc_RopGetHierarchyTable(session, session->ctx, &req, &repl, handles, &size) != MAPI_E_SUCCESS ||
+        repl.error_code != MAPI_E_SUCCESS) return 0;
+    if (mapi_handles_search(session->ctx->handles_ctx, handles[1], &th) != MAPI_E_SUCCESS ||
+        mapi_handles_get_private_data(th, &data) != MAPI_E_SUCCESS || !data) return 0;
+    ((struct emsmdbp_object *) data)->object.table->prop_count = 3;
+    ((struct emsmdbp_object *) data)->object.table->properties = hier_columns;
+    return handles[1];
+}
+
+/* Execute(GetStatus) with a reply cap; returns the number of RopNotify replies (-1 on failure), the first in *note. */
+static int execute_notifies(oc_emsmdb_session *session, size_t cap, struct EcDoRpc_MAPI_REPL *note)
+{
+    uint8_t out[4096];
+    size_t len, i;
+    struct mapi2k7_response decoded = {0};
+    struct ndr_pull *pull;
+    DATA_BLOB in = get_status_request(session), blob;
+    int n = 0;
+    if (!in.length || cap > sizeof out ||
+        oc_emsmdb_execute(session, 0, in.data, in.length, out, cap, &len) != MAPI_E_SUCCESS) return -1;
+    blob = data_blob_const(out, len);
+    pull = ndr_pull_init_blob(&blob, session);
+    decoded.mapi_response = talloc_zero(session, struct mapi_response);
+    if (!pull || !decoded.mapi_response ||
+        ndr_pull_mapi2k7_response(pull, NDR_SCALARS | NDR_BUFFERS, &decoded) != NDR_ERR_SUCCESS) return -1;
+    for (i = 0; decoded.mapi_response->mapi_repl && decoded.mapi_response->mapi_repl[i].opnum; i++) {
+        if (decoded.mapi_response->mapi_repl[i].opnum != op_MAPI_Notify) continue;
+        if (n++ == 0 && note) *note = decoded.mapi_response->mapi_repl[i];
+    }
+    return n;
+}
+
+static int test_notify_row_modified(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct EcDoRpc_MAPI_REPL note;
+    struct HierarchyRowModifiedNotification *row;
+    uint32_t table;
+    uint64_t fid;
+    const uint8_t *p;
+    static const uint8_t inbox_utf16[] = { 'I', 0, 'n', 0, 'b', 0, 'o', 0, 'x', 0, 0, 0 };
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK((table = open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications)) != 0);
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 1);
+    CHECK(emsmdbp_notify_pending(session->ctx));
+    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(!emsmdbp_notify_pending(session->ctx));
+    CHECK(note.u.mapi_Notify.NotificationHandle == table);
+    CHECK(note.u.mapi_Notify.NotificationType == fnevTableModified);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_MODIFIED);
+    row = &note.u.mapi_Notify.NotificationData.HierarchyTableChange.HierarchyTableChangeUnion.HierarchyRowModifiedNotification;
+    CHECK(row->FID == first_fids[5]);
+    /* PropertyRow: StandardPropertyRow (0) or FlaggedPropertyRow (1, one flag byte per column), FolderId first. */
+    p = row->Columns.data;
+    CHECK(row->Columns.length == row->ColumnSize && row->ColumnSize > 9 && p[0] <= 1);
+    p += p[0] == 1 ? 2 : 1;
+    memcpy(&fid, p, 8);
+    CHECK(fid == first_fids[5]);
+    CHECK(memmem(row->Columns.data, row->Columns.length, inbox_utf16, sizeof inbox_utf16) != NULL);
+    /* A deleted folder only names its FID. */
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, 0x7777000000000001ULL, EMSMDBP_FOLDER_DELETED) == 1);
+    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_DELETED);
+    CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.HierarchyTableChangeUnion.HierarchyRowDeletedNotification.FID
+          == 0x7777000000000001ULL);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_notify_without_table(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 0);
+    /* Tables that asked for no notifications, or are not deep, are not Outlook's sync trigger. */
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_NoNotifications) != 0);
+    CHECK(open_hierarchy(session, 0) != 0);
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 0);
+    CHECK(!emsmdbp_notify_pending(session->ctx));
+    CHECK(execute_notifies(session, 4096, NULL) == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+static int test_notify_after_table_release(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint32_t table;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK((table = open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications)) != 0);
+    CHECK(mapi_handles_delete(session->ctx->handles_ctx, table) == MAPI_E_SUCCESS);  /* RopRelease */
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 0);
+    /* A session that ends with rows still queued frees them with its tables, in whatever order. */
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
+    CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 1);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* What does not fit in one Execute reply waits for the next; a folder changed again is queued once. */
+static int test_notify_overflow_kept(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    size_t i;
+    int total = 0, n, rounds = 0;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
+    for (i = 1; i <= N_PROVISIONED; i++)
+        CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[i], EMSMDBP_FOLDER_MODIFIED) == 1);
+    for (i = 0; i < 50; i++)
+        CHECK(emsmdbp_notify_folder_changed(session->ctx, first_fids[5], EMSMDBP_FOLDER_MODIFIED) == 1);
+    while ((n = execute_notifies(session, 160, NULL)) > 0) { total += n; rounds++; CHECK(rounds < 50); }
+    CHECK(n == 0 && total == (int) N_PROVISIONED && rounds > 1);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
+/* IMAP names mailboxes in modified UTF-7; the backend's URIs keep that form, %-encoding the rest. */
+static int test_fid_for_mailbox_utf7(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t sync_issues, fid = 0;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Sync Issues", &sync_issues)
+        == MAPI_E_SUCCESS);
+    CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, sync_issues,
+        "imap://alice%40example.invalid/Lixo%20Eletr&APQ-nico/") == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_fid_for_mailbox(session->ctx, "Lixo Eletr&APQ-nico", '/', &fid) == MAPI_E_SUCCESS && fid == sync_issues);
+    CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, sync_issues,
+        "imap://alice%40example.invalid/INBOX/Lixo%20Eletr&APQ-nico/") == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_fid_for_mailbox(session->ctx, "INBOX.Lixo Eletr&APQ-nico", '.', &fid) == MAPI_E_SUCCESS && fid == sync_issues);
+    CHECK(emsmdbp_fid_for_mailbox(session->ctx, "Nowhere", '/', &fid) == MAPI_E_NOT_FOUND);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
@@ -1011,12 +1173,13 @@ int main(int argc, char **argv)
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
         test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
+        test_notify_row_modified() || test_notify_without_table() || test_notify_after_table_release() || test_notify_overflow_kept() ||
         test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
         test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
-        test_connect_fails_closed() || test_execute()) return 1;
+        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");
     return 0;

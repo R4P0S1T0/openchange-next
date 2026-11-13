@@ -207,9 +207,11 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetHierarchyTable(TALLOC_CTX *mem_ctx,
 	}
 	mapi_repl->u.mapi_GetHierarchyTable.RowCount = object->object.table->denominator;
 
-	/* notifications */
+	/* notifications: cached-mode Outlook keeps a deep table open and synchronizes the folders it reports */
 	if ((mapi_req->u.mapi_GetHierarchyTable.TableFlags & TableFlags_NoNotifications)) {
 		OC_DEBUG(5, "  notifications skipped\n");
+	} else if (object->object.table->flags & TableFlags_Depth) {
+		emsmdbp_notify_track_table(emsmdbp_ctx, object, rec->handle, mapi_req->logon_id);
 	}
 
 end:
