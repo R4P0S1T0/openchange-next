@@ -529,6 +529,8 @@ Known limits:
 - Outlook itself makes rules with "flag", "mark as read" or "reply using a template"
   client-only (it warns so), as with Exchange; they never reach the server, although the
   translator handles flag and mark as read for other MAPI clients.
+- "Forward" and "redirect" become a Sieve `redirect`, also to outside addresses; limit it
+  where Exchange admins would (Dovecot `sieve_max_redirects`, Postfix policy).
 - Scripts written before the id fix keep their small ids; on the lab the script was reset
   and Outlook's "keep the client rules" prompt re-sent them.
 
