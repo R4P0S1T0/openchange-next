@@ -1021,9 +1021,9 @@ mapistore_imap-clean:
 # The backend against Dovecot's imap binary in PREAUTH mode (no root, no network).
 DOVECOT_IMAP ?= /usr/lib/dovecot/imap
 DOVECOT_MANAGESIEVE ?= /usr/lib/dovecot/managesieve
-bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+bin/imap-backend-test: testsuite/modernization/imap_backend_smoke.c $(MAPISTORE_IMAP_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
+	$(CC) $(CFLAGS) $(LIBETPAN_CFLAGS) -Imapiproxy/libmapistore/backends/imap -o $@ $< $(MAPISTORE_IMAP_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBETPAN_LIBS) $(LIBS)
 
 .PHONY: check-imap-backend
 check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test

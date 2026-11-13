@@ -98,7 +98,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSetColumns(TALLOC_CTX *mem_ctx,
 		table = object->object.table;
 		OPENCHANGE_RETVAL_IF(!table, MAPI_E_INVALID_PARAMETER, NULL);
 
-		if (table->ulType == MAPISTORE_RULE_TABLE) {
+		if (table->ulType == MAPISTORE_RULE_TABLE && !object->backend_object) {
 			OC_DEBUG(5, "  query on rules table are all faked right now\n");
 			goto end;
 		}
@@ -423,7 +423,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopRestrict(TALLOC_CTX *mem_ctx,
 	OPENCHANGE_RETVAL_IF(!table, MAPI_E_INVALID_PARAMETER, NULL);
 
 	table->restricted = true;
-	if (table->ulType == MAPISTORE_RULE_TABLE) {
+	if (table->ulType == MAPISTORE_RULE_TABLE && !object->backend_object) {
 		OC_DEBUG(5, "  query on rules table are all faked right now\n");
 		goto end;
 	}
@@ -561,7 +561,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopQueryRows(TALLOC_CTX *mem_ctx,
 	table = object->object.table;
 
 	count = 0;
-	if (table->ulType == MAPISTORE_RULE_TABLE) {
+	if (table->ulType == MAPISTORE_RULE_TABLE && !object->backend_object) {
 		OC_DEBUG(5, "  query on rules table are all faked right now\n");
 		goto finish;
 	}
@@ -954,7 +954,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopFindRow(TALLOC_CTX *mem_ctx,
 	 * entire table, nor do we handle bookmarks */
 
 	table = object->object.table;
-	if (table->ulType == MAPISTORE_RULE_TABLE) {
+	if (table->ulType == MAPISTORE_RULE_TABLE && !object->backend_object) {
 		OC_DEBUG(5, "  query on rules table are all faked right now\n");
 		goto end;
 	}
@@ -1187,7 +1187,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopResetTable(TALLOC_CTX *mem_ctx,
 	mapi_repl->error_code = MAPI_E_SUCCESS;
 
 	table = object->object.table;
-	if (table->ulType == MAPISTORE_RULE_TABLE) {
+	if (table->ulType == MAPISTORE_RULE_TABLE && !object->backend_object) {
 		OC_DEBUG(5, "  query on rules table are all faked right now\n");
 	}
 	else {

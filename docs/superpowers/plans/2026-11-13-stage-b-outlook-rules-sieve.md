@@ -47,12 +47,12 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
   - `int imap_sieve_get(const struct imap_settings *s, const char *username, TALLOC_CTX *mem_ctx, char **script);` — 0 and `*script` = text; 0 and `*script = NULL` when the script does not exist (`NO (NONEXISTENT)`); -1 on connection/auth error.
   - `int imap_sieve_put(const struct imap_settings *s, const char *username, const char *script);` — `script == NULL` means `DELETESCRIPT` (missing script is success); 0 ok, -1 connection/auth error, -2 refused by server (text logged at level 1).
 
-- [ ] **Step 1: Fixture.** The harness's dovecot.conf gains `protocols = imap sieve`, `sieve_script personal { driver = file; path = ~/sieve; active_path = ~/.dovecot.sieve }` and `sieve_script outlook { type = before; driver = file; path = ~/sieve/outlook.sieve }`; a `sieve_tunnel` built like `tunnel.tunnel` but with argv[2] = the managesieve binary (new 4th CLI argument). Skip the sieve tests with a printed notice when the binary is missing.
-- [ ] **Step 2: Failing tests** `test_sieve_roundtrip`: get on empty store → 0, NULL; put `"require \"fileinto\";\r\nkeep;\r\n"` → 0; get → same text; put NULL → 0; get → 0, NULL. `test_sieve_refused`: put `"if {"` → -2. `test_sieve_settings`: `imap_settings_load` with `sieve_host = 10.0.0.1` → NULL; defaults → `127.0.0.1`/4190.
-- [ ] **Step 3: Run** `make check-imap-backend` → the new tests fail to link/fail.
-- [ ] **Step 4: Implement** on `mailstream` (socket or tunnel fd via `imap_tunnel_spawn`), 10 s timeout like SMTP: read greeting/capabilities until `OK`; if not tunnel → `STARTTLS`, `mailstream_ssl_open`-style upgrade, re-read capabilities; `AUTHENTICATE "PLAIN" "<base64(\0<user>*<master>\0<password>)>"`; `GETSCRIPT "outlook"` parses the `{n}` literal; `PUTSCRIPT "outlook" {n+}`; `DELETESCRIPT "outlook"`; `LOGOUT`. Reject usernames with CR/LF/`"`.
-- [ ] **Step 5: Run** `make check-imap-backend` → PASS; also in the lab with `labmake.sh` (CI image parity).
-- [ ] **Step 6: Commit** `feat(mapistore/imap): ManageSieve client for the outlook script`.
+- [x] **Step 1: Fixture.** The harness's dovecot.conf gains `protocols = imap sieve`, `sieve_script personal { driver = file; path = ~/sieve; active_path = ~/.dovecot.sieve }` and `sieve_script outlook { type = before; driver = file; path = ~/sieve/outlook.sieve }`; a `sieve_tunnel` built like `tunnel.tunnel` but with argv[2] = the managesieve binary (new 4th CLI argument). Skip the sieve tests with a printed notice when the binary is missing.
+- [x] **Step 2: Failing tests** `test_sieve_roundtrip`: get on empty store → 0, NULL; put `"require \"fileinto\";\r\nkeep;\r\n"` → 0; get → same text; put NULL → 0; get → 0, NULL. `test_sieve_refused`: put `"if {"` → -2. `test_sieve_settings`: `imap_settings_load` with `sieve_host = 10.0.0.1` → NULL; defaults → `127.0.0.1`/4190.
+- [x] **Step 3: Run** `make check-imap-backend` → the new tests fail to link/fail.
+- [x] **Step 4: Implement** on `mailstream` (socket or tunnel fd via `imap_tunnel_spawn`), 10 s timeout like SMTP: read greeting/capabilities until `OK`; if not tunnel → `STARTTLS`, `mailstream_ssl_open`-style upgrade, re-read capabilities; `AUTHENTICATE "PLAIN" "<base64(\0<user>*<master>\0<password>)>"`; `GETSCRIPT "outlook"` parses the `{n}` literal; `PUTSCRIPT "outlook" {n+}`; `DELETESCRIPT "outlook"`; `LOGOUT`. Reject usernames with CR/LF/`"`.
+- [x] **Step 5: Run** `make check-imap-backend` → PASS; also in the lab with `labmake.sh` (CI image parity).
+- [x] **Step 6: Commit** `feat(mapistore/imap): ManageSieve client for the outlook script`.
 
 ### Task 2: Rule codec and Sieve translator
 
@@ -69,7 +69,7 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
   - `char *imap_rules_encode(TALLOC_CTX *mem_ctx, struct imap_rule *rules, uint32_t count, imap_rules_mailbox_fn mailbox, void *private_data);` — returns the full script text; sets/clears `ST_ERROR` in each rule's `PidTagRuleState`; returns NULL only on OOM. `count == 0` → NULL is not used: caller deletes instead.
   - `typedef const char *(*imap_rules_mailbox_fn)(void *private_data, TALLOC_CTX *mem_ctx, const struct SBinary_short *folder_eid, bool in_this_store);` — UTF-8 mailbox name or NULL (→ `ST_ERROR`). Special return for the Trash is the backend's Trash mailbox name.
 
-- [ ] **Step 1: Failing tests**, one per row of the spec's two tables (`test_sieve_cond_*`, `test_sieve_act_*`), each building the `RuleData` props in C and asserting the exact Sieve block; plus:
+- [x] **Step 1: Failing tests**, one per row of the spec's two tables (`test_sieve_cond_*`, `test_sieve_act_*`), each building the `RuleData` props in C and asserting the exact Sieve block; plus:
   - `test_sieve_escape`: subject `a"b\c` → `"a\"b\\c"`; subject with `\n` → rule state has `ST_ERROR` and no block.
   - `test_sieve_unsupported`: `OP_REPLY` → `ST_ERROR`, rule line still present.
   - `test_sieve_disabled`: state without `ST_ENABLED` → line present, no block.
@@ -78,10 +78,10 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
   - `test_rules_roundtrip`: encode → decode gives byte-identical NDR for every prop, including condition and actions.
   - `test_rules_decode_garbage`: script with a hand-written `if` block, a `# rule !!!` line and a valid rule line → 1 rule, no crash.
   - When `/usr/bin/sievec` exists, every generated script compiles (`sievec <file> <out>` exit 0).
-- [ ] **Step 2: Run** → fail.
-- [ ] **Step 3: Implement.** Encode: `ndr_push_mapi_SPropValue_array` with `LIBNDR_FLAG_NOALIGN` → `base64_encode_data_blob`; decode the reverse, skipping bad lines with `OC_DEBUG(1, …)`. `require` lists only extensions used. Mailbox names in Sieve are UTF-8 (`require "mailbox"` for `:create`).
-- [ ] **Step 4: Run** → PASS.
-- [ ] **Step 5: Commit** `feat(mapistore/imap): translate Outlook rules to Sieve`.
+- [x] **Step 2: Run** → fail.
+- [x] **Step 3: Implement.** Encode: `ndr_push_mapi_SPropValue_array` with `LIBNDR_FLAG_NOALIGN` → `base64_encode_data_blob`; decode the reverse, skipping bad lines with `OC_DEBUG(1, …)`. `require` lists only extensions used. Mailbox names in Sieve are UTF-8 (`require "mailbox"` for `:create`).
+- [x] **Step 4: Run** → PASS.
+- [x] **Step 5: Commit** `feat(mapistore/imap): translate Outlook rules to Sieve`.
 
 ### Task 3: mapistore op and IMAP Inbox rules
 
@@ -93,17 +93,17 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
 - Consumes: `imap_sieve_get/put` (Task 1), `imap_rules_decode/encode` (Task 2).
 - Produces: `enum mapistore_error mapistore_folder_modify_rules(struct mapistore_context *, uint32_t context_id, void *folder, uint8_t flags, uint16_t count, struct RuleData *rules);` and backend `folder.modify_rules(void *folder, uint8_t flags, uint16_t count, struct RuleData *rules)`. The rule table's `get_row` returns `struct mapistore_property_data` with `data` pointing at the value for scalar types, and at a `struct mapi_SRestriction` / `struct RuleAction` for `PT_SRESTRICT` / `PT_ACTIONS`.
 
-- [ ] **Step 1: Failing tests** through the backend ops with the tunnels:
+- [x] **Step 1: Failing tests** through the backend ops with the tunnels:
   - `test_rules_add_list`: `modify_rules(inbox, 0, 1, {ROW_ADD, name "r1", condition subject contains "x", action move to folder FID of "INBOX/R1"})` → SUCCESS; rule table row count 1; row has `PidTagRuleId` = 1, `PidTagRuleName` = "r1", state without `ST_ERROR`; `imap_sieve_get` text contains `fileinto :create "INBOX/R1"` (with the fixture's delimiter).
   - `test_rules_modify_remove`, `test_rules_replace` (flag `ModifyRulesFlag_Replace` drops existing ones), last remove → script deleted (`imap_sieve_get` → NULL).
   - `test_rules_unknown_id`: `ROW_REMOVE` id 99 → `MAPISTORE_ERR_NOT_FOUND`, script byte-identical.
   - `test_rules_put_refused`: settings with a bad `sieve_tunnel` → `MAPISTORE_ERROR`, nothing changed.
   - `test_rules_not_inbox`: on another folder → `MAPISTORE_ERR_NOT_IMPLEMENTED`.
   - `sieve-test` (when present) on the fixture user with a message `Subject: x` → reports `fileinto INBOX/R1`.
-- [ ] **Step 2: Run** → fail.
-- [ ] **Step 3: Implement.** `modify_rules`: get → decode → apply (Replace clears; `ROW_ADD` id = max+1; `ROW_MODIFY` replaces given props; `ROW_REMOVE` drops) → encode → put (0 rules → put NULL). Move/copy target resolution callback: `in_this_store` + `FolderEID` ServerEid (`0x01` + 8-byte FID) → URI via the context's `ictx` → mailbox name with the existing M3/M4 helpers; Deleted Items → Trash mailbox. Map: get/put -1 or -2 → `MAPISTORE_ERROR`; unknown id → `MAPISTORE_ERR_NOT_FOUND`. Rule table: load once at `open_table`, rows served by `get_row`.
-- [ ] **Step 4: Run** → PASS.
-- [ ] **Step 5: Commit** `feat(mapistore): rules on the IMAP Inbox through Sieve`.
+- [x] **Step 2: Run** → fail.
+- [x] **Step 3: Implement.** `modify_rules`: get → decode → apply (Replace clears; `ROW_ADD` id = max+1; `ROW_MODIFY` replaces given props; `ROW_REMOVE` drops) → encode → put (0 rules → put NULL). Move/copy target resolution callback: `in_this_store` + `FolderEID` ServerEid (`0x01` + 8-byte FID) → URI via the context's `ictx` → mailbox name with the existing M3/M4 helpers; Deleted Items → Trash mailbox. Map: get/put -1 or -2 → `MAPISTORE_ERROR`; unknown id → `MAPISTORE_ERR_NOT_FOUND`. Rule table: load once at `open_table`, rows served by `get_row`.
+- [x] **Step 4: Run** → PASS.
+- [x] **Step 5: Commit** `feat(mapistore): rules on the IMAP Inbox through Sieve`.
 
 ### Task 4: emsmdb wiring
 
@@ -114,9 +114,9 @@ Lab precheck already done (2026-11-13): `sieve_script outlook { type = before; d
 **Interfaces:**
 - Consumes: `mapistore_folder_modify_rules`, `MAPISTORE_RULE_TABLE` via `emsmdbp_folder_open_table`.
 
-- [ ] **Step 1: Failing test** `test_push_property_rule_types`: pushing a `PT_SRESTRICT` (RES_CONTENT on PidTagSubject "x") and a `PT_ACTIONS` (one OP_MARK_AS_READ) gives the same bytes as `ndr_push_mapi_SRestriction`/`ndr_push_RuleAction` directly.
-- [ ] **Step 2: Run** → fail. **Step 3: Implement** push cases; `GetRulesTable`: mapistore folder → `emsmdbp_folder_open_table(rec, parent, MAPISTORE_RULE_TABLE, …)`, on NULL fall back to today's stub table; `ModifyRules`: mapistore folder → `mapistore_folder_modify_rules`; `NOT_IMPLEMENTED` → today's success; `NOT_FOUND` → `MAPI_E_NOT_FOUND`; other errors → `MAPI_E_CALL_FAILED`; log level 3 with the rule count. **Step 4: Run** the suite → PASS; `make all` + `liboc_emsmdb.so` build clean.
-- [ ] **Step 5: Commit** `feat(emsmdb): serve Outlook rules from the mapistore backend`.
+- [x] **Step 1: Failing test** `test_push_property_rule_types`: pushing a `PT_SRESTRICT` (RES_CONTENT on PidTagSubject "x") and a `PT_ACTIONS` (one OP_MARK_AS_READ) gives the same bytes as `ndr_push_mapi_SRestriction`/`ndr_push_RuleAction` directly.
+- [x] **Step 2: Run** → fail. **Step 3: Implement** push cases; `GetRulesTable`: mapistore folder → `emsmdbp_folder_open_table(rec, parent, MAPISTORE_RULE_TABLE, …)`, on NULL fall back to today's stub table; `ModifyRules`: mapistore folder → `mapistore_folder_modify_rules`; `NOT_IMPLEMENTED` → today's success; `NOT_FOUND` → `MAPI_E_NOT_FOUND`; other errors → `MAPI_E_CALL_FAILED`; log level 3 with the rule count. **Step 4: Run** the suite → PASS; `make all` + `liboc_emsmdb.so` build clean.
+- [x] **Step 5: Commit** `feat(emsmdb): serve Outlook rules from the mapistore backend`.
 
 ### Task 5: Lab deploy, Outlook acceptance, docs
 

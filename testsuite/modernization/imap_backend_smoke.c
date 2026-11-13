@@ -29,6 +29,7 @@
 #include "libmapi/libmapi_private.h"
 #include "gen_ndr/ndr_exchange.h"
 #include "imap_backend.h"
+#include "mapiproxy/libmapiserver/libmapiserver.h"
 
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "imap backend check failed at %d: %s\n", __LINE__, #c); \
@@ -2796,6 +2797,29 @@ static int test_rules_inbox(void)
     return 0;
 }
 
+/* Stage B Task 4: QueryRows on the rules table pushes condition and actions (it aborted before). */
+static int test_push_property_rule_types(void)
+{
+    struct ActionBlockData *rd[] = { act(ActionType_OP_MARK_AS_READ) };
+    struct mapi_SPropValue_array *r = mk_rule(1, 10, ON, res_content(FL_SUBSTRING | FL_IGNORECASE, PidTagSubject, "x"), rd, 1);
+    const struct mapi_SRestriction *c;
+    struct mapi_SPropValue *a = NULL;
+    DATA_BLOB pushed = { NULL, 0 }, direct;
+    uint32_t i;
+    for (i = 0; i < r->cValues; i++) if (r->lpProps[i].ulPropTag == PidTagRuleActions) a = &r->lpProps[i];
+    c = (const struct mapi_SRestriction *)&r->lpProps[3].value.Restrictions;
+    CHECK(a && r->lpProps[3].ulPropTag == PidTagRuleCondition);
+    CHECK(libmapiserver_push_property(root, PidTagRuleCondition, c, &pushed, 0, 0, 0) == 0);
+    CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&direct, root, c, (ndr_push_flags_fn_t)ndr_push_mapi_SRestriction)));
+    CHECK(pushed.length == direct.length && memcmp(pushed.data, direct.data, direct.length) == 0);
+    pushed.length = 0;
+    pushed.data = NULL;
+    CHECK(libmapiserver_push_property(root, PidTagRuleActions, &a->value.RuleAction, &pushed, 0, 0, 0) == 0);
+    CHECK(NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(&direct, root, &a->value.RuleAction, (ndr_push_flags_fn_t)ndr_push_RuleAction)));
+    CHECK(pushed.length == direct.length && direct.length == 2 + 2 + 9 && memcmp(pushed.data, direct.data, direct.length) == 0);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4 && argc != 5) {
@@ -2841,7 +2865,7 @@ int main(int argc, char **argv)
         test_client_change_key_kept() || test_uploaded_received_message_copies_original() ||
         test_uploaded_message_copies_original_from_expunged() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
         test_purge_before_import() || test_sieve_settings() || test_sieve_roundtrip() || test_sieve_refused() ||
-        test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox()) {
+        test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox() || test_push_property_rule_types()) {
         return 1;
     }
     talloc_free(root);

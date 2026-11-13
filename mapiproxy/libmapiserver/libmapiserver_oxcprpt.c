@@ -522,6 +522,12 @@ _PUBLIC_ int libmapiserver_push_property(TALLOC_CTX *mem_ctx,
 			ndr_push_SBinary_short(ndr, NDR_SCALARS, &bin);
 		}
 		break;
+	case PT_SRESTRICT:	/* rules table: PidTagRuleCondition */
+		ndr_push_mapi_SRestriction(ndr, NDR_SCALARS | NDR_BUFFERS, (const struct mapi_SRestriction *) value);
+		break;
+	case PT_ACTIONS:	/* rules table: PidTagRuleActions */
+		ndr_push_RuleAction(ndr, NDR_SCALARS | NDR_BUFFERS, (const struct RuleAction *) value);
+		break;
 	default:
 		if (property != 0) {
 			OC_DEBUG(5, "unsupported type: %.4x", (property & 0xffff));

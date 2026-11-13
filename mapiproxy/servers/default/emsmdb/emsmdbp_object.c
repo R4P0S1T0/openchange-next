@@ -1929,6 +1929,9 @@ _PUBLIC_ struct emsmdbp_object *emsmdbp_folder_open_table(TALLOC_CTX *mem_ctx,
 			case MAPISTORE_PERMISSIONS_TABLE:
 				mstore_type = MAPISTORE_PERMISSIONS_TABLE;
 				break;
+			case MAPISTORE_RULE_TABLE:
+				mstore_type = MAPISTORE_RULE_TABLE;
+				break;
 			default:
 				OC_PANIC(false, ("Unhandled table type for folders: %d\n", table_type));
 				talloc_free(table_object);

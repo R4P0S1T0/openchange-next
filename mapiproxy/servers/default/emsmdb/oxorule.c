@@ -56,10 +56,11 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetRulesTable(TALLOC_CTX *mem_ctx,
 	struct mapi_handles	*parent;
 	struct mapi_handles	*rec;
 	struct emsmdbp_object	*object;
+	struct emsmdbp_object	*table;
 	void			*data = NULL;
 	uint32_t		handle;
 
-	OC_DEBUG(4, "exchange_emsmdb: [OXORULE] GetRulesTable (0x3f) -- stub\n");
+	OC_DEBUG(4, "exchange_emsmdb: [OXORULE] GetRulesTable (0x3f)\n");
 
 	/* Sanity checks */
 	OPENCHANGE_RETVAL_IF(!emsmdbp_ctx, MAPI_E_NOT_INITIALIZED, NULL);
@@ -101,12 +102,17 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopGetRulesTable(TALLOC_CTX *mem_ctx,
 	retval = mapi_handles_add(emsmdbp_ctx->handles_ctx, handle, &rec);
 	handles[mapi_repl->handle_idx] = rec->handle;
 
-	object = emsmdbp_object_table_init((TALLOC_CTX *)rec, emsmdbp_ctx, object);
-	if (object) {
-		retval = mapi_handles_set_private_data(rec, object);
-		/* rules tables are stub objects for now */
-		object->object.table->denominator = 0;
-		object->object.table->ulType = MAPISTORE_RULE_TABLE;
+	/* A backend that keeps rules serves them (IMAP: the Inbox); anything else gets an empty table. */
+	table = emsmdbp_is_mapistore(object) ? emsmdbp_folder_open_table(rec, object, MAPISTORE_RULE_TABLE, mapi_repl->handle_idx) : NULL;
+	if (!table) {
+		table = emsmdbp_object_table_init((TALLOC_CTX *)rec, emsmdbp_ctx, object);
+		if (table) {
+			table->object.table->denominator = 0;
+			table->object.table->ulType = MAPISTORE_RULE_TABLE;
+		}
+	}
+	if (table) {
+		retval = mapi_handles_set_private_data(rec, table);
 	}
 end:
 	*size += libmapiserver_RopGetRulesTable_size();
@@ -170,6 +176,29 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopModifyRules(TALLOC_CTX *mem_ctx,
 	}
 
 	handles[mapi_repl->handle_idx] = handles[mapi_req->handle_idx];
+
+	if (emsmdbp_is_mapistore(object)) {
+		struct ModifyRules_req	*req = &mapi_req->u.mapi_ModifyRules;
+		enum mapistore_error	ret;
+
+		ret = mapistore_folder_modify_rules(emsmdbp_ctx->mstore_ctx, emsmdbp_get_contextID(object), object->backend_object,
+						    req->ModifyRulesFlags, req->RulesCount, req->RulesData);
+		OC_DEBUG(3, "exchange_emsmdb: [OXORULE] ModifyRules: %u rule row(s): %s\n", req->RulesCount, mapistore_errstr(ret));
+		switch (ret) {
+		case MAPISTORE_SUCCESS:
+		case MAPISTORE_ERR_NOT_IMPLEMENTED:	/* not a rules folder: accepted, as before */
+			break;
+		case MAPISTORE_ERR_NOT_FOUND:
+			mapi_repl->error_code = MAPI_E_NOT_FOUND;
+			break;
+		case MAPISTORE_ERR_INVALID_PARAMETER:
+			mapi_repl->error_code = MAPI_E_INVALID_PARAMETER;
+			break;
+		default:
+			mapi_repl->error_code = MAPI_E_CALL_FAILED;
+			break;
+		}
+	}
 
 end:
 	*size += libmapiserver_RopModifyRules_size();
