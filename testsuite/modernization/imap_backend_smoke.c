@@ -2753,13 +2753,29 @@ static uint32_t rule_rows(void *inbox, const char **first_name, uint64_t *first_
     return count;
 }
 
+/* The id of the rule called `name`, or 0. */
+static uint64_t rule_id(void *inbox, const char *name)
+{
+    void *table = NULL;
+    uint32_t count = 0, i;
+    enum MAPITAGS cols[] = { PidTagRuleId, PidTagRuleName };
+    struct mapistore_property_data *row;
+    if (ops()->folder.open_table(inbox, root, MAPISTORE_RULE_TABLE, 0, &table, &count) != MAPISTORE_SUCCESS ||
+        ops()->table.set_columns(table, 2, cols) != MAPISTORE_SUCCESS) return 0;
+    for (i = 0; i < count; i++) {
+        if (ops()->table.get_row(table, root, MAPISTORE_PREFILTERED_QUERY, i, &row) == MAPISTORE_SUCCESS &&
+            row[1].error == MAPISTORE_SUCCESS && strcmp(row[1].data, name) == 0) return *(uint64_t *)row[0].data;
+    }
+    return 0;
+}
+
 static int test_rules_inbox(void)
 {
     void *inbox = context_for("INBOX"), *other = context_for("Drafts");
     struct RuleData d[2];
     const char *name = NULL;
     char *script = NULL, *before;
-    uint64_t id = 0;
+    uint64_t id = 0, id1, id_del, id2, id3;
     struct imap_settings down;
     if (!managesieve) return 0;
     CHECK(inbox && other && ops());
@@ -2767,7 +2783,8 @@ static int test_rules_inbox(void)
     CHECK(rule_rows(inbox, NULL, NULL) == 0);
     d[0] = rule_row(ROW_ADD, rule_named(0, "r1", "x"));
     CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
-    CHECK(rule_rows(inbox, &name, &id) == 1 && name && strcmp(name, "r1") == 0 && id == 1);
+    CHECK(rule_rows(inbox, &name, &id) == 1 && name && strcmp(name, "r1") == 0 && id != 0);
+    id1 = id;
     CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
     CHECK(strstr(script, "if header :contains \"subject\" \"x\" {\n  fileinto :create \"INBOX/R1\";\n}\n"));
     /* the rule runs at delivery (sieve-test, when installed) */
@@ -2789,23 +2806,33 @@ static int test_rules_inbox(void)
         ic->oc_ctx = NULL;
         CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
         CHECK(strstr(script, "if header :contains \"subject\" \"apagar\" {\n  fileinto :create \"Trash\";\n}\n"));
-        d[0] = rule_row(ROW_REMOVE, rule_named(2, "", ""));
+        id_del = rule_id(inbox, "del");
+        CHECK(id_del != 0 && id_del != id1);
+        d[0] = rule_row(ROW_REMOVE, rule_named(id_del, "", ""));
         CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS && rule_rows(inbox, NULL, NULL) == 1);
     }
     /* modify, then an unknown id changes nothing */
-    d[0] = rule_row(ROW_MODIFY, rule_named(1, "r1b", "y"));
+    d[0] = rule_row(ROW_MODIFY, rule_named(id1, "r1b", "y"));
     CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
     CHECK(rule_rows(inbox, &name, NULL) == 1 && strcmp(name, "r1b") == 0);
     CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &before) == 0 && strstr(before, "\"y\""));
-    d[0] = rule_row(ROW_REMOVE, rule_named(99, "nope", "z"));
+    d[0] = rule_row(ROW_MODIFY, rule_named(99, "nope", "z"));
     CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_ERR_NOT_FOUND);
     CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && strcmp(script, before) == 0);
-    /* a second add gets the next id; Replace drops what was there */
+    /* removing a rule that is not there (Outlook's stale client stream) is a no-op */
+    d[0] = rule_row(ROW_REMOVE, rule_named(99, "nope", "z"));
+    CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS);
+    CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && strcmp(script, before) == 0);
+    /* ids are never reused, so a stale id cannot hit another rule; Replace drops what was there */
     d[0] = rule_row(ROW_ADD, rule_named(0, "r2", "w"));
     CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_SUCCESS && rule_rows(inbox, NULL, NULL) == 2);
+    id2 = rule_id(inbox, "r2");
+    CHECK(id2 != 0 && id2 != id1 && id2 != id_del);
     d[0] = rule_row(ROW_ADD, rule_named(0, "r3", "v"));
     CHECK(ops()->folder.modify_rules(inbox, ModifyRulesFlag_Replace, 1, d) == MAPISTORE_SUCCESS);
-    CHECK(rule_rows(inbox, &name, &id) == 1 && strcmp(name, "r3") == 0 && id == 3);
+    CHECK(rule_rows(inbox, &name, &id) == 1 && strcmp(name, "r3") == 0);
+    id3 = id;
+    CHECK(id3 != id1 && id3 != id_del && id3 != id2);
     /* Outlook restricts the rules table by a string column (RuleProvider) before reading it */
     {
         void *table = NULL;
@@ -2821,7 +2848,7 @@ static int test_rules_inbox(void)
     down = tunnel;
     down.sieve_tunnel = "/nonexistent/managesieve";
     imap_backend_set_state(&down, false);
-    d[0] = rule_row(ROW_REMOVE, rule_named(3, "", ""));
+    d[0] = rule_row(ROW_REMOVE, rule_named(id3, "", ""));
     CHECK(ops()->folder.modify_rules(inbox, 0, 1, d) == MAPISTORE_ERROR);
     imap_backend_set_state(&tunnel, false);
     CHECK(rule_rows(inbox, NULL, NULL) == 1);

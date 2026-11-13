@@ -650,7 +650,6 @@ _PUBLIC_ enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t fla
 	struct mapi_SPropValue		*idp;
 	const uint64_t			*v;
 	enum mapistore_error		ret;
-	uint64_t			next_id = 1;
 	uint32_t			n = 0, i;
 	int64_t				at;
 	char				*script = NULL;
@@ -670,12 +669,6 @@ _PUBLIC_ enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t fla
 	if (ret != MAPISTORE_SUCCESS) {
 		goto done;
 	}
-	for (i = 0; i < n; i++) {
-		v = find_mapi_SPropValue_data(&rules[i], PidTagRuleId);
-		if (*v >= next_id) {
-			next_id = *v + 1;
-		}
-	}
 	if (flags & ModifyRulesFlag_Replace) {
 		n = 0;
 	}
@@ -683,6 +676,8 @@ _PUBLIC_ enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t fla
 	ret = MAPISTORE_ERR_NO_MEMORY;
 	for (i = 0; i < count; i++) {
 		v = find_mapi_SPropValue_data(&data[i].PropertyValues, PidTagRuleId);
+		OC_DEBUG(5, "IMAP backend: ModifyRules row %u: flags %u, rule id %"PRIu64", %u properties\n", i,
+			 data[i].RuleDataFlags, v ? *v : 0, data[i].PropertyValues.cValues);
 		if (data[i].RuleDataFlags == ROW_ADD) {
 			rules = talloc_realloc(tmp, rules, struct mapi_SPropValue_array, n + 1);
 			if (!rules) {
@@ -695,10 +690,21 @@ _PUBLIC_ enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t fla
 			}
 			idp = &rules[n].lpProps[rules[n].cValues++];
 			idp->ulPropTag = PidTagRuleId;
-			idp->value.d = next_id++;
+			/* From the indexing ID counter: never reused, as Outlook's client rules stream may
+			   still name a rule id removed long ago (Exchange never reuses them either). */
+			ret = f->ctx->ictx->allocate_fmid(f->ctx->ictx, f->ctx->username, &idp->value.d);
+			if (ret != MAPISTORE_SUCCESS) {
+				goto done;
+			}
+			ret = MAPISTORE_ERR_NO_MEMORY;
 			n++;
 		} else if (data[i].RuleDataFlags == ROW_MODIFY || data[i].RuleDataFlags == ROW_REMOVE) {
 			at = v ? rule_index(rules, n, *v) : -1;
+			if (at < 0 && data[i].RuleDataFlags == ROW_REMOVE) {
+				/* already gone: Outlook's client rules stream can name a rule that no longer exists */
+				OC_DEBUG(3, "IMAP backend: ModifyRules removes an unknown rule id; ignored\n");
+				continue;
+			}
 			if (at < 0) {
 				OC_DEBUG(3, "IMAP backend: ModifyRules on an unknown rule id\n");
 				ret = MAPISTORE_ERR_NOT_FOUND;
