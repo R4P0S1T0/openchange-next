@@ -1163,7 +1163,8 @@ _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, 
 	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
 	case PidTagChangeKey:			return own ? binary_dup(mem_ctx, own->ck) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
 	case PidTagPredecessorChangeList:	return own ? binary_dup(mem_ctx, own->pcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
-	case PidTagLastModificationTime:	return change_time(mem_ctx, when);
+	case PidTagLastModificationTime:
+	case PidTagLocalCommitTimeMax:		return change_time(mem_ctx, when);
 	default:				return NULL;
 	}
 }
@@ -1189,13 +1190,16 @@ _PUBLIC_ enum mapistore_error imap_folder_properties(struct imap_folder *f, TALL
 		case PidTagChangeKey:
 		case PidTagPredecessorChangeList:
 		case PidTagLastModificationTime:
+		/* Cached-mode Outlook resyncs a folder when its hierarchy row brings a newer commit time. */
+		case PidTagLocalCommitTimeMax:
 			if (!have_status && !status_failed) {
 				status_failed = imap_status(imap_context_conn(f->ctx), f->mailbox, &st) != MAPISTORE_SUCCESS;
 				have_status = !status_failed;
 			}
 			if (have_status) {
 				char *uri = imap_uri(mem_ctx, f->ctx->username, f->mailbox, imap_context_delimiter(f->ctx));
-				char *state = talloc_asprintf(mem_ctx, "%u:%u:%u:%u", st.uidvalidity, st.messages, st.unseen, st.uidnext);
+				char *state = talloc_asprintf(mem_ctx, "%u:%u:%u:%u:%llu", st.uidvalidity, st.messages, st.unseen, st.uidnext,
+							      (unsigned long long) st.highestmodseq);
 				uint64_t cn;
 				time_t when;
 

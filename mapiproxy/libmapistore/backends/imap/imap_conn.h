@@ -64,6 +64,7 @@ struct imap_status {
 	uint32_t	unseen;
 	uint32_t	uidvalidity;
 	uint32_t	uidnext;
+	uint64_t	highestmodseq;	/* 0 when the server has no CONDSTORE */
 };
 
 struct imap_conn;

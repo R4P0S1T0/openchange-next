@@ -941,6 +941,67 @@ static int test_execute(void)
     return 0;
 }
 
+/* M5: cached-mode Outlook reads the unread count from its hierarchy rows; a mapistore folder answers it. */
+static enum mapistore_error trash_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                           struct mapistore_contexts_list **list)
+{
+    struct mapistore_contexts_list *entry = talloc_zero(mem, struct mapistore_contexts_list);
+    if (entry == NULL) return MAPISTORE_ERR_NO_MEMORY;
+    entry->url = talloc_strdup(entry, "unreadfake://trash/");
+    entry->name = talloc_strdup(entry, "Deleted Items");
+    entry->main_folder = true;
+    entry->role = MAPISTORE_DELETEDITEMS_ROLE;
+    entry->prev = entry;  /* DLIST head: prev is the tail */
+    *list = entry;
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error unread_props(void *obj, TALLOC_CTX *mem, uint16_t n, enum MAPITAGS *tags,
+                                         struct mapistore_property_data *d)
+{
+    uint16_t i;
+    for (i = 0; i < n; i++) {
+        d[i].data = NULL; d[i].error = MAPISTORE_ERR_NOT_FOUND;
+        if (tags[i] == PidTagContentUnreadCount) {
+            uint32_t *v = talloc(mem, uint32_t);
+            if (v == NULL) return MAPISTORE_ERR_NO_MEMORY;
+            *v = 7; d[i].data = v; d[i].error = MAPISTORE_SUCCESS;
+        }
+    }
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_unread_count_from_backend(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct emsmdbp_object *mailbox, *trash = NULL;
+    struct mapi_handles *fh;
+    enum MAPITAGS tag = PR_CONTENT_UNREAD;
+    struct SPropTagArray props = { 1, &tag };
+    enum MAPISTATUS *rv = NULL;
+    void **v;
+    uint64_t fid;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "unreadfake"; fake.backend.description = "test"; fake.backend.namespace = "unreadfake://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = trash_contexts;
+    fake.backend.create_context = fai_create_context; fake.context.get_root_folder = fai_root_folder;
+    fake.properties.get_properties = unread_props;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_mailbox_provision(session->ctx, "alice@example.invalid") == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, "alice@example.invalid", EMSMDBP_DELETED_ITEMS, &fid) == MAPI_E_SUCCESS);
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    CHECK(mailbox && mapi_handles_add(session->ctx->handles_ctx, 0, &fh) == MAPI_E_SUCCESS);
+    CHECK(emsmdbp_object_open_folder(fh, session->ctx, mailbox, fid, &trash) == MAPISTORE_SUCCESS);
+    CHECK(emsmdbp_is_mapistore(trash));
+    v = emsmdbp_object_get_properties(session, session->ctx, trash, &props, &rv);
+    CHECK(v && rv && rv[0] == MAPI_E_SUCCESS && v[0] && *(uint32_t *) v[0] == 7);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
@@ -954,7 +1015,7 @@ int main(int argc, char **argv)
         test_logon_private_mailbox() || test_logon_other_users_dn() ||
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
-        test_fai_in_backend_root_kept_in_openchangedb() || test_native_message_without_freebusy_subject_opens() ||
+        test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
         test_connect_fails_closed() || test_execute()) return 1;
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

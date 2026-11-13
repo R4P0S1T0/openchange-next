@@ -3190,7 +3190,7 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 			data_pointers[i] = obj_count;
 			retval = MAPI_E_SUCCESS;
 		}
-		else if (properties->aulPropTag[i] == PR_CONTENT_UNREAD || properties->aulPropTag[i] == PR_DELETED_COUNT_TOTAL) {
+		else if (properties->aulPropTag[i] == PR_DELETED_COUNT_TOTAL) {
 			/* TODO: temporary hack */
 			obj_count = talloc_zero(data_pointers, uint32_t);
 			OPENCHANGE_RETVAL_IF(!obj_count, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
@@ -3198,7 +3198,7 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 			data_pointers[i] = obj_count;
 			retval = MAPI_E_SUCCESS;
 		}
-		else if (properties->aulPropTag[i] == PidTagChangeNumber || properties->aulPropTag[i] == PidTagChangeKey ||
+		else if (properties->aulPropTag[i] == PR_CONTENT_UNREAD || properties->aulPropTag[i] == PidTagChangeNumber || properties->aulPropTag[i] == PidTagChangeKey ||
 			 properties->aulPropTag[i] == PidTagPredecessorChangeList || properties->aulPropTag[i] == PidTagLastModificationTime ||
 			 properties->aulPropTag[i] == PidTagLocalCommitTimeMax || properties->aulPropTag[i] == PR_RIGHTS || properties->aulPropTag[i] == PR_ACCESS || properties->aulPropTag[i] == PR_ACCESS_LEVEL || properties->aulPropTag[i] == PidTagRights || properties->aulPropTag[i] == PidTagAccessControlListData || properties->aulPropTag[i] == PidTagExtendedACLData) {
 			struct mapistore_property_data prop_data;
@@ -3225,6 +3225,13 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 				owner = emsmdbp_get_owner(object);
 				retval = openchangedb_get_folder_property(data_pointers, emsmdbp_ctx->oc_ctx, owner ? owner : emsmdbp_ctx->username,
 									  properties->aulPropTag[i], folder->folderID, data_pointers + i);
+			}
+			/* A backend without an unread count keeps the old answer, 0. */
+			if (retval != MAPI_E_SUCCESS && properties->aulPropTag[i] == PR_CONTENT_UNREAD) {
+				obj_count = talloc_zero(data_pointers, uint32_t);
+				OPENCHANGE_RETVAL_IF(!obj_count, MAPI_E_NOT_ENOUGH_MEMORY, NULL);
+				data_pointers[i] = obj_count;
+				retval = MAPI_E_SUCCESS;
 			}
 		}
 		else {

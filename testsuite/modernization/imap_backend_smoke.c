@@ -995,6 +995,47 @@ static int test_change_numbers(void)
     return 0;
 }
 
+/* M5: cached-mode Outlook resyncs a folder when its hierarchy row brings a newer commit time. */
+static int test_folder_commit_time_present(void)
+{
+    enum MAPITAGS tags[] = { PidTagLocalCommitTimeMax, PidTagLastModificationTime };
+    struct mapistore_property_data d[2];
+    const struct FILETIME *a, *b;
+    CHECK(imap_properties_get(context_for("Projects"), root, 2, tags, d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == MAPISTORE_SUCCESS && d[1].error == MAPISTORE_SUCCESS);
+    a = d[0].data; b = d[1].data;
+    CHECK(a->dwHighDateTime == b->dwHighDateTime && a->dwLowDateTime == b->dwLowDateTime);
+    return 0;
+}
+
+static uint64_t commit_time(const char *mailbox)
+{
+    enum MAPITAGS tag = PidTagLocalCommitTimeMax;
+    struct mapistore_property_data d;
+    const struct FILETIME *ft;
+    if (imap_properties_get(context_for(mailbox), root, 1, &tag, &d) != MAPISTORE_SUCCESS || d.error) return 0;
+    ft = d.data;
+    return ((uint64_t) ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+}
+
+/* A flag-only change (\Flagged from SOGo) moves no count, yet Outlook must see the folder changed. */
+static int test_folder_commit_time_on_flag_change(void)
+{
+    struct imap_conn *c = imap_conn_open(root, &tunnel, "alice@example.invalid");
+    struct imap_status st;
+    uint64_t before, after;
+    CHECK(c && imap_status(c, "Projects", &st) == MAPISTORE_SUCCESS && st.uidnext > 1);
+    before = commit_time("Projects");
+    CHECK(before != 0);
+    sleep(1);
+    CHECK(imap_uid_set_flags(c, "Projects", st.uidnext - 1, IMAP_FLAG_FLAGGED, 0) == 0);
+    after = commit_time("Projects");
+    CHECK(after > before);
+    CHECK(imap_uid_set_flags(c, "Projects", st.uidnext - 1, 0, IMAP_FLAG_FLAGGED) == 0);
+    talloc_free(c);
+    return 0;
+}
+
 /* Every operation gets a default: emsmdb calls preload_message_bodies during cached-mode sync,
    and an unset pointer in a stack-allocated backend crashed the daemon. */
 static int test_defaults_cover_every_operation(void)
@@ -2934,7 +2975,8 @@ int main(int argc, char **argv)
         test_client_change_key_kept() || test_uploaded_received_message_copies_original() ||
         test_uploaded_message_copies_original_from_expunged() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
         test_purge_before_import() || test_sieve_settings() || test_sieve_roundtrip() || test_sieve_refused() ||
-        test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox() || test_push_property_rule_types()) {
+        test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox() || test_push_property_rule_types() ||
+        test_folder_commit_time_present() || test_folder_commit_time_on_flag_change()) {
         return 1;
     }
     talloc_free(root);
