@@ -329,7 +329,7 @@ pub(crate) mod tests {
         let h = srv
             .sessions
             .credential_hash("user", &Password::from("pass"));
-        srv.sessions.create(h, 1, now)
+        srv.sessions.create("user", h, 1, now)
     }
 
     #[test]

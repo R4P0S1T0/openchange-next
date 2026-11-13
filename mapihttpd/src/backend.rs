@@ -1,5 +1,6 @@
 //! EMSMDB behind the MAPI/HTTP endpoints: the C library in production, a fake in tests.
 
+use crate::auth::Password;
 use crate::session::SessionId;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -28,6 +29,25 @@ pub struct Connected {
     pub dn_prefix: String,
 }
 
+/// What happened to an IMAP mailbox (oc_emsmdb_folder_changed kind).
+#[allow(dead_code)] // constructed by the IMAP watcher (next commit)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderChange {
+    Modified = 0,
+    Added = 1,
+    Deleted = 2,
+}
+
+/// The loopback Dovecot and master login the IMAP backend uses (oc_emsmdb_imap_watch_params).
+#[allow(dead_code)] // read by the IMAP watcher (next commit)
+#[derive(Debug, Clone)]
+pub struct WatchParams {
+    pub host: String,
+    pub port: u16,
+    pub master_user: String,
+    pub master_password: Password,
+}
+
 /// Errors are MAPI status codes for the response's ErrorCode field.
 pub trait Backend: Send + Sync {
     fn connect(&self, req: ConnectParams) -> impl Future<Output = Result<Connected, u32>> + Send;
@@ -39,6 +59,17 @@ pub trait Backend: Send + Sync {
         max_out: usize,
     ) -> impl Future<Output = Result<Vec<u8>, u32>> + Send;
     fn disconnect(&self, id: SessionId) -> impl Future<Output = ()> + Send;
+    /// An IMAP mailbox (modified UTF-7; `delimiter` 0 when flat) changed; true when the session
+    /// now has notifications queued for its next Execute.
+    fn folder_changed(
+        &self,
+        id: SessionId,
+        mailbox: String,
+        delimiter: u8,
+        kind: FolderChange,
+    ) -> impl Future<Output = bool> + Send;
+    /// None when the IMAP backend is not configured.
+    fn watch_params(&self) -> impl Future<Output = Option<WatchParams>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +82,12 @@ pub enum Call {
         max_out: usize,
     },
     Disconnect(SessionId),
+    FolderChanged {
+        id: SessionId,
+        mailbox: String,
+        delimiter: u8,
+        kind: FolderChange,
+    },
 }
 
 /// Records every call; answers from the scripted queues, failing once they are empty.
@@ -59,6 +96,8 @@ pub struct FakeBackend {
     pub calls: Mutex<Vec<Call>>,
     pub connects: Mutex<VecDeque<Result<Connected, u32>>>,
     pub executes: Mutex<VecDeque<Result<Vec<u8>, u32>>>,
+    /// What watch_params answers.
+    pub watch: Mutex<Option<WatchParams>>,
 }
 
 impl FakeBackend {
@@ -94,6 +133,21 @@ impl Backend for FakeBackend {
     async fn disconnect(&self, id: SessionId) {
         self.record(Call::Disconnect(id));
     }
+
+    /// Every change leaves notifications pending.
+    async fn folder_changed(&self, id: SessionId, mailbox: String, delimiter: u8, kind: FolderChange) -> bool {
+        self.record(Call::FolderChanged {
+            id,
+            mailbox,
+            delimiter,
+            kind,
+        });
+        true
+    }
+
+    async fn watch_params(&self) -> Option<WatchParams> {
+        self.watch.lock().unwrap().clone()
+    }
 }
 
 /// Stands in for EMSMDB in builds without the C library: every Connect fails closed.
@@ -111,11 +165,19 @@ impl Backend for NoBackend {
     }
 
     async fn disconnect(&self, _id: SessionId) {}
+
+    async fn folder_changed(&self, _: SessionId, _: String, _: u8, _: FolderChange) -> bool {
+        false
+    }
+
+    async fn watch_params(&self) -> Option<WatchParams> {
+        None
+    }
 }
 
 #[cfg(feature = "c-backend")]
 pub mod c {
-    use super::{Backend, ConnectParams, Connected, EC_RPC_FAILED};
+    use super::{Backend, ConnectParams, Connected, FolderChange, WatchParams, EC_RPC_FAILED};
     use crate::ffi;
     use crate::session::SessionId;
     use std::collections::HashMap;
@@ -137,6 +199,14 @@ pub mod c {
             reply: oneshot::Sender<Result<Vec<u8>, u32>>,
         },
         Disconnect(SessionId, oneshot::Sender<()>),
+        FolderChanged {
+            id: SessionId,
+            mailbox: String,
+            delimiter: u8,
+            kind: FolderChange,
+            reply: oneshot::Sender<bool>,
+        },
+        WatchParams(oneshot::Sender<Option<WatchParams>>),
     }
 
     /// One OS thread makes every C call and owns every C session handle.
@@ -210,6 +280,21 @@ pub mod c {
                     sessions.remove(&id);
                     let _ = reply.send(());
                 }
+                Job::FolderChanged {
+                    id,
+                    mailbox,
+                    delimiter,
+                    kind,
+                    reply,
+                } => {
+                    let pending = sessions
+                        .get_mut(&id)
+                        .is_some_and(|s| s.folder_changed(&mailbox, delimiter, kind as u32));
+                    let _ = reply.send(pending);
+                }
+                Job::WatchParams(reply) => {
+                    let _ = reply.send(ffi::watch_params());
+                }
             }
         }
     }
@@ -241,6 +326,28 @@ pub mod c {
 
         async fn disconnect(&self, id: SessionId) {
             self.ask(|tx| Job::Disconnect(id, tx)).await;
+        }
+
+        async fn folder_changed(
+            &self,
+            id: SessionId,
+            mailbox: String,
+            delimiter: u8,
+            kind: FolderChange,
+        ) -> bool {
+            self.ask(|reply| Job::FolderChanged {
+                id,
+                mailbox,
+                delimiter,
+                kind,
+                reply,
+            })
+            .await
+            .unwrap_or(false)
+        }
+
+        async fn watch_params(&self) -> Option<WatchParams> {
+            self.ask(Job::WatchParams).await.flatten()
         }
     }
 }
@@ -277,6 +384,8 @@ mod tests {
             assert_eq!(fake.execute(7, 1, vec![9], 64).await, Ok(vec![1, 2]));
             assert_eq!(fake.execute(7, 1, vec![9], 64).await, Err(EC_RPC_FAILED));
             fake.disconnect(7).await;
+            assert!(fake.folder_changed(7, "INBOX".into(), b'/', FolderChange::Added).await);
+            assert!(fake.watch_params().await.is_none());
         });
         let exec = Call::Execute {
             id: 7,
@@ -291,7 +400,13 @@ mod tests {
                 Call::Connect(params()),
                 exec.clone(),
                 exec,
-                Call::Disconnect(7)
+                Call::Disconnect(7),
+                Call::FolderChanged {
+                    id: 7,
+                    mailbox: "INBOX".into(),
+                    delimiter: b'/',
+                    kind: FolderChange::Added
+                }
             ]
         );
     }
