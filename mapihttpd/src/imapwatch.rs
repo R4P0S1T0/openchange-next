@@ -247,7 +247,12 @@ fn parse_event(toks: &[Tok]) -> Option<MailboxEvent> {
 type Snapshot = BTreeMap<String, String>;
 
 fn diff(old: &Snapshot, new: &Snapshot) -> Vec<(String, FolderChange)> {
-    let mut out = Vec::new();
+    // Deletions first: see test_diff.
+    let mut out: Vec<(String, FolderChange)> = old
+        .keys()
+        .filter(|n| !new.contains_key(*n))
+        .map(|n| (n.clone(), FolderChange::Deleted))
+        .collect();
     for (name, state) in new {
         match old.get(name) {
             None => out.push((name.clone(), FolderChange::Added)),
@@ -255,11 +260,6 @@ fn diff(old: &Snapshot, new: &Snapshot) -> Vec<(String, FolderChange)> {
             _ => {}
         }
     }
-    out.extend(
-        old.keys()
-            .filter(|n| !new.contains_key(*n))
-            .map(|n| (n.clone(), FolderChange::Deleted)),
-    );
     out
 }
 
@@ -613,6 +613,9 @@ mod tests {
         let old: Snapshot = [("INBOX".into(), "a".into()), ("Old".into(), "a".into())].into();
         let new: Snapshot = [("INBOX".into(), "b".into()), ("New".into(), "a".into())].into();
         let mut d = diff(&old, &new);
+        // A rename is a deletion and an addition: the deletion goes first, while the old folder
+        // still has the ID Outlook knows (the addition re-provisions top-level folders).
+        assert_eq!(d[0], ("Old".to_owned(), FolderChange::Deleted));
         d.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(
             d,
