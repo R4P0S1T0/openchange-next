@@ -729,40 +729,40 @@ _PUBLIC_ enum mapistore_error imap_rules_table_load(struct imap_table *t)
 	return rules_load(t->folder, t, &t->rules, &t->row_count);
 }
 
+/* One column of rule `row`, in the form mapistore rows carry it, or NULL. */
+_PUBLIC_ void *imap_rules_value(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row, uint32_t tag)
+{
+	struct mapi_SPropValue	*p = find_prop(&t->rules[row], tag);
+	struct Binary_r		*bin;
+
+	if (!p) {
+		return NULL;
+	}
+	switch (p->ulPropTag & 0xFFFF) {
+	case PT_SRESTRICT:
+		return (struct mapi_SRestriction *)&p->value.Restrictions;
+	case PT_ACTIONS:
+		return &p->value.RuleAction;
+	case PT_BINARY:
+		/* mapistore rows carry Binary_r, the rule SBinary_short */
+		bin = talloc_zero(mem_ctx, struct Binary_r);
+		if (bin) {
+			bin->cb = p->value.bin.cb;
+			bin->lpb = p->value.bin.lpb;
+		}
+		return bin;
+	default:
+		return (void *)get_mapi_SPropValue_data(p);
+	}
+}
+
 _PUBLIC_ enum mapistore_error imap_rules_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
 					     struct mapistore_property_data *data)
 {
-	struct mapi_SPropValue	*p;
-	struct Binary_r		*bin;
-	uint16_t		i;
+	uint16_t i;
 
 	for (i = 0; i < t->column_count; i++) {
-		data[i].error = MAPISTORE_ERR_NOT_FOUND;
-		p = find_prop(&t->rules[row], t->columns[i]);
-		if (!p) {
-			continue;
-		}
-		switch (p->ulPropTag & 0xFFFF) {
-		case PT_SRESTRICT:
-			data[i].data = (struct mapi_SRestriction *)&p->value.Restrictions;
-			break;
-		case PT_ACTIONS:
-			data[i].data = &p->value.RuleAction;
-			break;
-		case PT_BINARY:
-			/* mapistore rows carry Binary_r, the rule SBinary_short */
-			bin = talloc_zero(mem_ctx, struct Binary_r);
-			if (!bin) {
-				return MAPISTORE_ERR_NO_MEMORY;
-			}
-			bin->cb = p->value.bin.cb;
-			bin->lpb = p->value.bin.lpb;
-			data[i].data = bin;
-			break;
-		default:
-			data[i].data = (void *)get_mapi_SPropValue_data(p);
-			break;
-		}
+		data[i].data = imap_rules_value(t, mem_ctx, row, t->columns[i]);
 		data[i].error = data[i].data ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NOT_FOUND;
 	}
 	return MAPISTORE_SUCCESS;

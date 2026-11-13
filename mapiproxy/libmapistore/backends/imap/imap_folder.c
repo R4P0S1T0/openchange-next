@@ -627,6 +627,8 @@ static void *table_value(TALLOC_CTX *mem_ctx, struct imap_table *t, uint32_t row
 	case MAPISTORE_ATTACHMENT_TABLE:
 		imap_attachment_properties(&t->message->attachments[row], mem_ctx, 1, &tag, &d);
 		return d.error == MAPISTORE_SUCCESS ? d.data : NULL;
+	case MAPISTORE_RULE_TABLE:
+		return imap_rules_value(t, mem_ctx, row, tag);
 	default:
 		return NULL;
 	}

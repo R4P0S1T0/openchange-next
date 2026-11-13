@@ -52,6 +52,7 @@ struct imap_table;
 /* Rules on the Inbox, kept in the user's "outlook" Sieve script; other folders: NOT_IMPLEMENTED. */
 enum mapistore_error imap_folder_modify_rules(void *folder, uint8_t flags, uint16_t count, struct RuleData *rules);
 enum mapistore_error imap_rules_table_load(struct imap_table *t);
+void *imap_rules_value(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row, uint32_t tag);
 enum mapistore_error imap_rules_row(struct imap_table *t, TALLOC_CTX *mem_ctx, uint32_t row,
 				    struct mapistore_property_data *data);
 int imap_rules_decode(TALLOC_CTX *mem_ctx, const char *script, struct mapi_SPropValue_array **rules, uint32_t *count);

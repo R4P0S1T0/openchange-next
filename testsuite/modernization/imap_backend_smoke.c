@@ -2775,6 +2775,17 @@ static int test_rules_inbox(void)
     d[0] = rule_row(ROW_ADD, rule_named(0, "r3", "v"));
     CHECK(ops()->folder.modify_rules(inbox, ModifyRulesFlag_Replace, 1, d) == MAPISTORE_SUCCESS);
     CHECK(rule_rows(inbox, &name, &id) == 1 && strcmp(name, "r3") == 0 && id == 3);
+    /* Outlook restricts the rules table by a string column (RuleProvider) before reading it */
+    {
+        void *table = NULL;
+        uint32_t count = 0;
+        uint8_t status;
+        CHECK(ops()->folder.open_table(inbox, root, MAPISTORE_RULE_TABLE, 0, &table, &count) == MAPISTORE_SUCCESS && count == 1);
+        CHECK(imap_table_set_restrictions(table, res_content(FL_PREFIX | FL_IGNORECASE, PidTagRuleName, "R"), &status) == MAPISTORE_SUCCESS);
+        CHECK(((struct imap_table *)table)->view_count == 1);
+        CHECK(imap_table_set_restrictions(table, res_content(FL_FULLSTRING | FL_IGNORECASE, PidTagRuleName, "zz"), &status) == MAPISTORE_SUCCESS);
+        CHECK(((struct imap_table *)table)->view_count == 0);
+    }
     /* ManageSieve down: an error, the script stays */
     down = tunnel;
     down.sieve_tunnel = "/nonexistent/managesieve";
