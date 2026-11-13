@@ -2452,6 +2452,23 @@ static int test_sieve_refused(void)
     return 0;
 }
 
+/* A tunnel that is gone before the request is written: the session ends, it never waits on the dead socket. */
+static int test_sieve_tunnel_gone(void)
+{
+    struct imap_settings gone = tunnel;
+    char *got = NULL;
+    int i;
+    if (!managesieve) return 0;
+    gone.sieve_tunnel = "/bin/true";
+    alarm(60);  /* a hang fails the suite instead of stalling it */
+    for (i = 0; i < 30; i++) {
+        CHECK(imap_sieve_get(&gone, "alice@example.invalid", root, &got) == -1);
+        CHECK(imap_sieve_put(&gone, "alice@example.invalid", "keep;") == -1);
+    }
+    alarm(0);
+    return 0;
+}
+
 static int test_sieve_settings(void)
 {
     char *path = talloc_asprintf(root, "%s/master-sieve.pw", fixture);
@@ -2974,7 +2991,7 @@ int main(int argc, char **argv)
         test_reply_subject_prefix() || test_move_already_filed() || test_created_sent_item_not_draft() ||
         test_client_change_key_kept() || test_uploaded_received_message_copies_original() ||
         test_uploaded_message_copies_original_from_expunged() || test_transport_send_no_sent_copy() || test_foreign_from_refused() ||
-        test_purge_before_import() || test_sieve_settings() || test_sieve_roundtrip() || test_sieve_refused() ||
+        test_purge_before_import() || test_sieve_settings() || test_sieve_roundtrip() || test_sieve_refused() || test_sieve_tunnel_gone() ||
         test_sieve_conditions() || test_sieve_actions() || test_sieve_escape_and_errors() || test_rules_order_roundtrip() || test_rules_inbox() || test_push_property_rule_types() ||
         test_folder_commit_time_present() || test_folder_commit_time_on_flag_change()) {
         return 1;

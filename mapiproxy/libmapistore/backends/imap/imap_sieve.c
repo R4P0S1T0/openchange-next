@@ -76,9 +76,14 @@ static int tcp_connect(const char *host, uint16_t port)
 	return fd;
 }
 
+/* A failed write means the peer is gone: libetpan would wait on the closed socket forever, so no read follows. */
 static int send_str(struct sieve_session *ss, const char *text, size_t len)
 {
-	return (mailstream_write(ss->stream, text, len) == (ssize_t)len) ? 0 : -1;
+	if (mailstream_write(ss->stream, text, len) == (ssize_t)len) {
+		return 0;
+	}
+	ss->dead = true;
+	return -1;
 }
 
 /* Reads exactly n bytes of a literal into a new talloc string. */
@@ -261,9 +266,9 @@ done:
 static void session_close(struct sieve_session *ss)
 {
 	if (ss->stream && !ss->dead) {
-		send_str(ss, "LOGOUT\r\n", 8);
-		mailstream_flush(ss->stream);
-		read_response(ss, NULL, NULL, "LOGOUT");
+		if (!send_str(ss, "LOGOUT\r\n", 8) && !mailstream_flush(ss->stream)) {
+			read_response(ss, NULL, NULL, "LOGOUT");
+		}
 	}
 	if (ss->stream) {
 		mailstream_close(ss->stream);
