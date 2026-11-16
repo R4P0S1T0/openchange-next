@@ -501,7 +501,9 @@ _PUBLIC_ int imap_status(struct imap_conn *conn, const char *name, struct imap_s
 	if (mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_MESSAGES) != MAILIMAP_NO_ERROR ||
 	    mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UNSEEN) != MAILIMAP_NO_ERROR ||
 	    mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UIDVALIDITY) != MAILIMAP_NO_ERROR ||
-	    mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UIDNEXT) != MAILIMAP_NO_ERROR) {
+	    mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_UIDNEXT) != MAILIMAP_NO_ERROR ||
+	    (mailimap_has_condstore(conn->imap) &&
+	     mailimap_status_att_list_add(atts, MAILIMAP_STATUS_ATT_HIGHESTMODSEQ) != MAILIMAP_NO_ERROR)) {
 		mailimap_status_att_list_free(atts);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
@@ -523,6 +525,15 @@ _PUBLIC_ int imap_status(struct imap_conn *conn, const char *name, struct imap_s
 		case MAILIMAP_STATUS_ATT_UNSEEN:	status->unseen = info->st_value; break;
 		case MAILIMAP_STATUS_ATT_UIDVALIDITY:	status->uidvalidity = info->st_value; break;
 		case MAILIMAP_STATUS_ATT_UIDNEXT:	status->uidnext = info->st_value; break;
+		case MAILIMAP_STATUS_ATT_HIGHESTMODSEQ:	status->highestmodseq = info->st_value; break;
+		case MAILIMAP_STATUS_ATT_EXTENSION:
+			/* CONDSTORE reports HIGHESTMODSEQ (64 bits) as extension data */
+			if (info->st_ext_data && info->st_ext_data->ext_extension &&
+			    info->st_ext_data->ext_extension->ext_id == MAILIMAP_EXTENSION_CONDSTORE &&
+			    info->st_ext_data->ext_type == MAILIMAP_CONDSTORE_TYPE_STATUS_INFO && info->st_ext_data->ext_data) {
+				status->highestmodseq = ((struct mailimap_condstore_status_info *) info->st_ext_data->ext_data)->cs_highestmodseq_value;
+			}
+			break;
 		default: break;
 		}
 	}

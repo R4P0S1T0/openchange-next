@@ -40,4 +40,16 @@ uint32_t oc_emsmdb_execute(oc_emsmdb_session *session, uint32_t flags,
 			   size_t *rop_out_len);
 void	 oc_emsmdb_disconnect(oc_emsmdb_session *session);
 
+/* M5: an IMAP mailbox changed (kind 0 modified, 1 added, 2 deleted). mailbox is modified UTF-7 as IMAP
+   sends it, delimiter the server's hierarchy delimiter ('\0' when flat). *pending is set to 1 when the
+   session has notifications queued for its next Execute; left as is when the mailbox is unknown. */
+uint32_t oc_emsmdb_folder_changed(oc_emsmdb_session *session, const char *mailbox, char delimiter,
+				  uint32_t kind, uint32_t *pending);
+/* Where the IMAP backend reaches Dovecot (smb.conf mapistore:imap_*), for a watcher of the same mailboxes.
+   Strings are malloc()ed, freed with oc_emsmdb_free; MAPI_E_NOT_FOUND when not configured. */
+uint32_t oc_emsmdb_imap_watch_params(char **host, uint16_t *port, char **master_user, char **master_password);
+void	 oc_emsmdb_free(void *p);
+/* The session's mailbox owner; NULL for no session. */
+const char *oc_emsmdb_username(oc_emsmdb_session *session);
+
 #endif	/* __OC_EMSMDB_H */

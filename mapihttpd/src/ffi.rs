@@ -12,12 +12,13 @@ pub struct OcEmsmdbSession {
 }
 
 #[cfg(feature = "c-backend")]
-pub use linked::{connect, init};
+pub use linked::{connect, init, watch_params};
 
 #[cfg(feature = "c-backend")]
 mod linked {
     use super::{OcEmsmdbSession, Session};
-    use crate::backend::{ConnectParams, EC_RPC_FAILED};
+    use crate::auth::Password;
+    use crate::backend::{ConnectParams, WatchParams, EC_RPC_FAILED};
     use std::ffi::{c_char, CStr, CString};
     use std::ptr;
 
@@ -46,6 +47,22 @@ mod linked {
             rop_out_len: *mut usize,
         ) -> u32;
         pub(super) fn oc_emsmdb_disconnect(session: *mut OcEmsmdbSession);
+        pub(super) fn oc_emsmdb_folder_changed(
+            session: *mut OcEmsmdbSession,
+            mailbox: *const c_char,
+            delimiter: c_char,
+            kind: u32,
+            pending: *mut u32,
+        ) -> u32;
+        pub(super) fn oc_emsmdb_imap_watch_params(
+            host: *mut *mut c_char,
+            port: *mut u16,
+            master_user: *mut *mut c_char,
+            master_password: *mut *mut c_char,
+        ) -> u32;
+        pub(super) fn oc_emsmdb_free(p: *mut std::ffi::c_void);
+        #[allow(dead_code)] // the session table keeps the Connect user instead
+        pub(super) fn oc_emsmdb_username(session: *mut OcEmsmdbSession) -> *const c_char;
     }
 
     pub fn init(smb_conf: &CStr) -> u32 {
@@ -63,6 +80,42 @@ mod linked {
         }
         // SAFETY: guaranteed by the caller.
         unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+
+    /// Copies and frees a string C malloc()ed for us; None for NULL.
+    ///
+    /// # Safety
+    /// `p` is NULL or a NUL-terminated string from oc_emsmdb_imap_watch_params, not yet freed.
+    unsafe fn take(p: *mut c_char) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: guaranteed by the caller.
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        // SAFETY: p came from C's malloc and is freed here once; nothing reads it afterwards.
+        unsafe { oc_emsmdb_free(p.cast()) };
+        Some(s)
+    }
+
+    /// Where the IMAP backend reaches Dovecot; None when it is not configured.
+    pub fn watch_params() -> Option<WatchParams> {
+        let (mut host, mut user, mut password) =
+            (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+        let mut port = 0u16;
+        // SAFETY: the four out pointers point at live locals of the declared types.
+        let status =
+            unsafe { oc_emsmdb_imap_watch_params(&mut host, &mut port, &mut user, &mut password) };
+        // SAFETY: C set each to NULL or a string it malloc()ed for us; each is taken once.
+        let (host, user, password) = unsafe { (take(host), take(user), take(password)) };
+        match (status, host, user, password) {
+            (0, Some(host), Some(master_user), Some(password)) => Some(WatchParams {
+                host,
+                port,
+                master_user,
+                master_password: Password::from(password.as_str()),
+            }),
+            _ => None,
+        }
     }
 
     /// Returns the session with its display name and DN prefix.
@@ -135,6 +188,26 @@ mod linked {
             }
             out.truncate(len);
             Ok(out)
+        }
+
+        /// Queues the notifications for a changed mailbox; true when the session has some pending.
+        pub fn folder_changed(&mut self, mailbox: &str, delimiter: u8, kind: u32) -> bool {
+            let Ok(mailbox) = CString::new(mailbox) else {
+                return false;
+            };
+            let mut pending = 0u32;
+            // SAFETY: the handle is live (owned by self); mailbox is NUL-terminated and outlives
+            // the call; pending points at a live local.
+            let status = unsafe {
+                oc_emsmdb_folder_changed(
+                    self.ptr.as_ptr(),
+                    mailbox.as_ptr(),
+                    delimiter as c_char,
+                    kind,
+                    &mut pending,
+                )
+            };
+            status == 0 && pending == 1
         }
     }
 }
@@ -211,6 +284,8 @@ mod tests {
         };
         // check-oc-emsmdb seeds the openchangedb this smb.conf names.
         assert_eq!(init(&conf), 0, "run make check-oc-emsmdb first");
+        // No mapistore:imap_* options in the test smb.conf: nothing to watch.
+        assert!(watch_params().is_none());
         // SamDB is unavailable (decision 5): connect fails and keeps nothing.
         let failed = connect(&req).map(|_| ()).unwrap_err();
         assert_ne!(failed, 0);

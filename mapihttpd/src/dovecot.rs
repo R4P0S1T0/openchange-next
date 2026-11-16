@@ -305,6 +305,7 @@ mod tests {
                 ),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
+                watch: crate::imapwatch::WatchManager::disabled(),
                 autodiscover: crate::request::tests::settings(),
             };
             let rep = handle(&srv, ping("/mapi/emsmdb/")).await;
@@ -345,6 +346,7 @@ mod tests {
                 ),
                 backend: crate::backend::FakeBackend::default(),
                 notification_wait: Duration::from_secs(300),
+                watch: crate::imapwatch::WatchManager::disabled(),
                 autodiscover: crate::request::tests::settings(),
             };
             let t0 = tokio::time::Instant::now();
@@ -370,6 +372,7 @@ mod tests {
             ),
             backend: crate::backend::FakeBackend::default(),
             notification_wait: Duration::from_secs(300),
+            watch: crate::imapwatch::WatchManager::disabled(),
             autodiscover: crate::request::tests::settings(),
         };
         let rep = run(handle(&srv, ping("/mapi/emsmdb/")));

@@ -123,7 +123,7 @@ pub async fn bind<A: Authenticator, B: Backend>(
     body.extend_from_slice(&srv.nspi.server_guid);
     put(&mut body, &[0]); // AuxiliaryBufferSize
     let mut rep = with_body(req, body);
-    rep.set_cookie = Some(srv.nspi.sessions.create(cred_hash, 0, Instant::now()));
+    rep.set_cookie = Some(srv.nspi.sessions.create("", cred_hash, 0, Instant::now())); // no user: NSPI gets no notifications
     rep.expiration_ms = srv.nspi.sessions.idle_ms();
     rep
 }

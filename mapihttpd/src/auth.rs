@@ -6,6 +6,7 @@ use std::future::Future;
 use std::net::IpAddr;
 
 /// A password that never appears in `Debug` output.
+#[derive(Clone)]
 pub struct Password(String);
 
 impl Password {

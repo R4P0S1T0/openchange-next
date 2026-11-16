@@ -85,6 +85,9 @@ struct oxcfxics_sync_data {
 	struct rawidset			*cnset_read;
 
 	struct rawidset			*deleted_eid_set;
+	bool				incomplete; /* hierarchy walk missed a folder: eid_set is not every folder */
+	uint64_t			*present_fids; /* hierarchy walk: every folder met */
+	uint32_t			present_count;
 
 	struct oxcfxics_message_sync_data	*message_sync_data;
 };
@@ -1384,6 +1387,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 	table_object = emsmdbp_folder_open_table(mem_ctx, folder_object, MAPISTORE_FOLDER_TABLE, 0); 
 	if (!table_object) {
 		OC_DEBUG(5, "folder does not handle hierarchy tables\n");
+		sync_data->incomplete = true;
+		talloc_free(mem_ctx);
 		return;
 	}
 
@@ -1429,6 +1434,7 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			/* source key */
 			if (retvals[sync_data->prop_index.eid] != MAPI_E_SUCCESS || !data_pointers[sync_data->prop_index.eid]) {
 				OC_DEBUG(1, "hierarchy sync: a subfolder row has no folder ID; skipped\n");
+				sync_data->incomplete = true;
 				talloc_free(header_data_pointers);
 				talloc_free(data_pointers);
 				continue;
@@ -1436,11 +1442,19 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			eid = *(uint64_t *) data_pointers[sync_data->prop_index.eid];
 			if (eid == 0x7fffffffffffffffLL) {
 				OC_DEBUG(0, "folder without a valid eid\n");
+				sync_data->incomplete = true;
 				talloc_free(header_data_pointers);
 				continue;
 			}
 			emsmdbp_replid_to_guid(emsmdbp_ctx, owner, eid & 0xffff, &replica_guid);
 			RAWIDSET_push_guid_glob(sync_data->eid_set, &replica_guid, (eid >> 16) & 0x0000ffffffffffff);
+			sync_data->present_fids = talloc_realloc(sync_data, sync_data->present_fids, uint64_t, sync_data->present_count + 1);
+			if (sync_data->present_fids) {
+				sync_data->present_fids[sync_data->present_count++] = eid;
+			} else {
+				sync_data->present_count = 0;
+				sync_data->incomplete = true;
+			}
 
 			/* bin_data = oxcfxics_make_gid(header_data_pointers, &sync_data->replica_guid, eid >> 16); */
 			emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, eid, &bin_data);
@@ -1580,11 +1594,82 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 				talloc_free(subfolder_object);
 			} else {
 				OC_DEBUG(5, "[oxcfxics] Fail open folder %"PRIu64" from parent folder %"PRIu64" (retval %d)", eid, folder_object->object.folder->folderID, retval);
+				sync_data->incomplete = true;
 			}
+		}
+		else {
+			sync_data->incomplete = true;
 		}
 	}
 
 	talloc_free(mem_ctx);
+}
+
+static bool oxcfxics_fid_present(const struct oxcfxics_sync_data *sync_data, uint64_t fid)
+{
+	uint32_t i;
+
+	for (i = 0; i < sync_data->present_count; i++) {
+		if (sync_data->present_fids[i] == fid) return true;
+	}
+	return false;
+}
+
+/* Folders gone from the store, which Outlook may hold in or outside its IdsetGiven (one learnt from a
+   hierarchy notification is outside): every folder the store indexed for the user whose fmid the walk did
+   not meet and whose URI no folder met has either. The URI test keeps a live folder's other fmids (a provisioned root is indexed twice)
+   out. Only for a walk of the whole mailbox: a narrower one does not meet every live folder. Outlook ignores
+   an ID it does not hold.
+   shortcut: a gone folder's index row stays, so it goes out on every whole-mailbox synchronization; purge
+   the row once every profile has seen it if mailboxes with many deleted folders make that heavy. */
+static void oxcfxics_push_tombstones(struct emsmdbp_context *emsmdbp_ctx, const char *owner,
+				     struct emsmdbp_object *topmost_folder_object, struct oxcfxics_sync_data *sync_data,
+				     struct rawidset *deleted)
+{
+	TALLOC_CTX	*tmp;
+	uint64_t	topmost_fid, root_fid = 0, ipm_fid = 0, *fmids = NULL, globcnt;
+	char		**uris = NULL, **present_uris, *uri;
+	uint32_t	count = 0, i, j, n = 0;
+	struct GUID	guid;
+	bool		alive;
+
+	if (strcmp(owner, emsmdbp_ctx->username) != 0 || topmost_folder_object->type != EMSMDBP_OBJECT_FOLDER) {
+		return;
+	}
+	topmost_fid = topmost_folder_object->object.folder->folderID;
+	openchangedb_get_SystemFolderID(emsmdbp_ctx->oc_ctx, owner, EMSMDBP_MAILBOX_ROOT, &root_fid);
+	openchangedb_get_SystemFolderID(emsmdbp_ctx->oc_ctx, owner, EMSMDBP_TOP_INFORMATION_STORE, &ipm_fid);
+	if (topmost_fid != root_fid && topmost_fid != ipm_fid) {
+		return;
+	}
+	tmp = talloc_new(NULL);
+	if (!tmp || mapistore_indexing_list_folders(emsmdbp_ctx->mstore_ctx, owner, tmp, &count, &fmids, &uris) != MAPISTORE_SUCCESS) {
+		talloc_free(tmp);
+		return;
+	}
+	present_uris = talloc_array(tmp, char *, sync_data->present_count ? sync_data->present_count : 1);
+	if (!present_uris) {
+		talloc_free(tmp);
+		return;
+	}
+	for (i = 0; i < sync_data->present_count; i++) {
+		if (emsmdbp_get_uri_from_fid(tmp, emsmdbp_ctx, sync_data->present_fids[i], &uri) == MAPISTORE_SUCCESS && uri) {
+			present_uris[n++] = uri;
+		}
+	}
+	for (i = 0; i < count; i++) {
+		if (oxcfxics_fid_present(sync_data, fmids[i])) continue;
+		for (alive = false, j = 0; j < n && !alive; j++) {
+			alive = strcmp(present_uris[j], uris[i]) == 0;
+		}
+		if (alive) continue;
+		globcnt = (fmids[i] >> 16) & 0x0000ffffffffffffULL;
+		if (emsmdbp_replid_to_guid(emsmdbp_ctx, owner, fmids[i] & 0xffff, &guid) != MAPI_E_SUCCESS) {
+			continue;
+		}
+		RAWIDSET_push_guid_glob(deleted, &guid, globcnt);
+	}
+	talloc_free(tmp);
 }
 
 static void oxcfxics_prepare_synccontext_with_folderChange(struct emsmdbp_object_synccontext *synccontext, TALLOC_CTX *mem_ctx, struct emsmdbp_context *emsmdbp_ctx, const char *owner, struct emsmdbp_object *parent_object)
@@ -1613,7 +1698,33 @@ static void oxcfxics_prepare_synccontext_with_folderChange(struct emsmdbp_object
 
 	oxcfxics_push_folderChange(emsmdbp_ctx, synccontext, owner, parent_object, sync_data, parent_object);
 
-	/* deletions (mapistore v2) */
+	/* deletions: only folders the store knows it had (see oxcfxics_push_tombstones). Not "in IdsetGiven but
+	   not met": Outlook's IdsetGiven also holds folders it created with its own reserved IDs that the store
+	   never kept, and deleting those makes Outlook recreate them on every synchronization. Only after a
+	   complete walk, or a folder that failed to open would be deleted in Outlook. */
+	if (!synccontext->request.no_deletions && !sync_data->incomplete) {
+		struct rawidset		*deleted = RAWIDSET_make(sync_data, false, false);
+
+		oxcfxics_push_tombstones(emsmdbp_ctx, owner, parent_object, sync_data, deleted);
+		if (deleted->count > 0) {
+			IDSET_remove_rawidset(synccontext->idset_given, deleted);
+			new_idset = RAWIDSET_convert_to_idset(NULL, deleted);
+			/* as in the contents synchronization: the deleted idset goes out REPLID-based */
+			new_idset->idbased = true;
+			new_idset->repl.id = 1;
+			ndr_push_uint32(sync_data->ndr, NDR_SCALARS, IncrSyncDel);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			ndr_push_uint32(sync_data->ndr, NDR_SCALARS, MetaTagIdsetDeleted);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			ndr_push_idset(sync_data->ndr, new_idset);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			OC_DEBUG(3, "hierarchy sync: %d folder(s) deleted on the server\n", deleted->count);
+			talloc_free(new_idset);
+		}
+	}
 
 	/* state */
 	ndr_push_uint32(sync_data->ndr, NDR_SCALARS, IncrSyncStateBegin);
@@ -2119,7 +2230,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 		table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_MESSAGE_TABLE, 0);
 		if (!table_object) {
 			OC_DEBUG(5, "could not open message table\n");
-			abort();
+			goto table_failed;
 		}
 		if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 			for (j = 0; j < available_properties->cValues; j++) {
@@ -2143,7 +2254,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 			table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_FAI_TABLE, 0);
 			if (!table_object) {
 				OC_DEBUG(5, "could not open FAI table\n");
-				abort();
+				goto table_failed;
 			}
 			if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 				for (j = 0; j < available_properties->cValues; j++) {
@@ -2164,7 +2275,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 		table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_FOLDER_TABLE, 0);
 		if (!table_object) {
 			OC_DEBUG(5, "could not open folder table\n");
-			abort();
+			goto table_failed;
 		}
 		if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 			for (j = 0; j < available_properties->cValues; j++) {
@@ -2190,6 +2301,13 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
         mapi_handles_set_private_data(synccontext_rec, synccontext_object);
 	talloc_free(synccontext_object);
         handles[mapi_repl->handle_idx] = synccontext_rec->handle;
+	goto end;
+
+table_failed:
+	/* The folder is gone from the backend (e.g. deleted in another client): answer, do not crash the server. */
+	talloc_free(properties_exclusion);
+	talloc_free(synccontext_object);
+	mapi_repl->error_code = MAPI_E_NOT_FOUND;
 end:
 	*size += libmapiserver_RopSyncConfigure_size(mapi_repl);
 

@@ -473,6 +473,33 @@ START_TEST(test_update_uri_prefix) {
 	ck_assert_str_eq(uri, "imap://u/Y/");
 } END_TEST
 
+START_TEST(test_list_folders) {
+	static const struct { uint64_t fmid; const char *uri; } rows[] = {
+		{ 1, "imap://u/A/" }, { 2, "imap://u/A/B/" }, { 3, "imap://u/A/B/7_1" }, { 4, "imap://u/C/" },
+	};
+	uint32_t	count = 0, i, seen = 0;
+	uint64_t	*fmids = NULL;
+	char		**uris = NULL;
+	size_t		j;
+
+	for (j = 0; j < sizeof rows / sizeof rows[0]; j++) {
+		ck_assert_int_eq(g_ictx->add_fmid(g_ictx, g_test_username, rows[j].fmid, rows[j].uri), MAPISTORE_SUCCESS);
+	}
+	ck_assert_int_eq(g_ictx->del_fmid(g_ictx, g_test_username, 4, MAPISTORE_SOFT_DELETE), MAPISTORE_SUCCESS);
+
+	ck_assert_int_eq(g_ictx->list_folders(g_ictx, g_test_username, g_ictx, &count, &fmids, &uris), MAPISTORE_SUCCESS);
+	/* folders only (URI ends with '/'), not soft-deleted */
+	for (i = 0; i < count; i++) {
+		if (fmids[i] == 1) { ck_assert_str_eq(uris[i], "imap://u/A/"); seen |= 1; }
+		else if (fmids[i] == 2) { ck_assert_str_eq(uris[i], "imap://u/A/B/"); seen |= 2; }
+		else ck_assert_msg(0, "unexpected fmid 0x%"PRIx64, fmids[i]);
+	}
+	ck_assert_int_eq(seen, 3);
+	ck_assert_int_eq(count, 2);
+
+	ck_assert_int_eq(g_ictx->list_folders(g_ictx, NULL, g_ictx, &count, &fmids, &uris), MAPISTORE_ERR_INVALID_PARAMETER);
+} END_TEST
+
 START_TEST(test_get_fmid_with_wildcard) {
 	enum mapistore_error	ret;
 	uint64_t		fid_1, fid_2;
@@ -612,6 +639,7 @@ static TCase *create_test_case_indexing_interface(const char *name, SFun setup,
 	tcase_add_test(tc_interface, test_get_fmid);
 	tcase_add_test(tc_interface, test_get_fmid_with_wildcard);
 	tcase_add_test(tc_interface, test_update_uri_prefix);
+	tcase_add_test(tc_interface, test_list_folders);
 	tcase_add_test(tc_interface, test_allocate_fmid);
 
 	return tc_interface;

@@ -139,7 +139,7 @@ pub async fn connect<A: Authenticator, B: Backend>(
     user: String,
     cred_hash: [u8; 32],
 ) -> MapiReply {
-    let params = match parse_connect(req.body, user) {
+    let params = match parse_connect(req.body, user.clone()) {
         Ok((params, _aux)) => params,
         Err(code) => return reply(req, 200, code),
     };
@@ -159,7 +159,8 @@ pub async fn connect<A: Authenticator, B: Backend>(
     body.extend_from_slice(&[0, 0]); // UTF-16 NUL
     put(&mut body, &[0]); // AuxiliaryBufferSize
     let mut rep = with_body(req, body);
-    rep.set_cookie = Some(srv.sessions.create(cred_hash, c.id, Instant::now()));
+    rep.set_cookie = Some(srv.sessions.create(&user, cred_hash, c.id, Instant::now()));
+    srv.watch.session_started(&user);
     rep.expiration_ms = srv.sessions.idle_ms();
     rep
 }
@@ -212,15 +213,19 @@ pub async fn disconnect<A: Authenticator, B: Backend>(
     if let Err(code) = Reader(req.body).aux() {
         return reply(req, 200, code);
     }
+    let user = session.user();
     if let Some(id) = session.remove() {
         srv.backend.disconnect(id).await;
+    }
+    if let Some(user) = user {
+        srv.watch.session_ended(&user);
     }
     let mut body = Vec::new();
     put(&mut body, &[0, 0, 0]);
     with_body(req, body)
 }
 
-/// NotificationWait (3.2.5.5): no event source exists yet, so it always times out.
+/// NotificationWait (3.2.5.5): returns when the session has notifications queued, else at the timeout.
 pub async fn notification_wait<A: Authenticator, B: Backend>(
     srv: &Server<A, B>,
     req: &MapiRequest<'_>,
@@ -230,10 +235,14 @@ pub async fn notification_wait<A: Authenticator, B: Backend>(
     if let Err(code) = r.u32().and_then(|_flags| r.aux()) {
         return reply(req, 200, code);
     }
-    tokio::time::sleep(srv.notification_wait).await;
+    let pending = match session.signal() {
+        Some(signal) => signal.wait(srv.notification_wait).await,
+        None => false,
+    };
     session.refresh(Instant::now());
     let mut body = Vec::new();
-    put(&mut body, &[0, 0, 0, 0]); // StatusCode, ErrorCode, EventPending 0, AuxiliaryBufferSize
+    // StatusCode, ErrorCode, EventPending, AuxiliaryBufferSize
+    put(&mut body, &[0, 0, u32::from(pending), 0]);
     with_body(req, body)
 }
 
@@ -494,6 +503,77 @@ mod tests {
         assert_eq!(rep.body, words(&[0, 0, 0, 0]));
         assert!(srv.sessions.last_used(value).unwrap() > then);
         assert_eq!(rep.expiration_ms, 1_800_000);
+    }
+
+    /// A paused runtime: NotificationWait's timers run without real waiting.
+    fn paused() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    fn raise(srv: &TestServer, user: &str) {
+        for (_, signal) in srv.sessions.sessions_of(user) {
+            signal.raise();
+        }
+    }
+
+    #[test]
+    fn test_notification_wait_wakes_on_raise() {
+        let srv = server();
+        let sc = new_session(&srv, Instant::now());
+        let body = words(&[0, 0]);
+        let (rep, waited) = paused().block_on(async {
+            let t0 = tokio::time::Instant::now();
+            let (_, signal) = srv.sessions.sessions_of("user").pop().unwrap();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                signal.raise();
+            });
+            let rep = handle(&srv, post("NotificationWait", &body, Some(cookie_of(&sc)))).await;
+            (rep, t0.elapsed())
+        });
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+        assert_eq!(rep.body, words(&[0, 0, 1, 0]));
+    }
+
+    #[test]
+    fn test_notification_wait_pending_before_wait() {
+        let srv = server();
+        let sc = new_session(&srv, Instant::now());
+        raise(&srv, "user");
+        assert!(srv.sessions.sessions_of("other").is_empty());
+        let body = words(&[0, 0]);
+        let (rep, waited) = paused().block_on(async {
+            let t0 = tokio::time::Instant::now();
+            let rep = handle(&srv, post("NotificationWait", &body, Some(cookie_of(&sc)))).await;
+            (rep, t0.elapsed())
+        });
+        assert_eq!(waited, Duration::ZERO);
+        assert_eq!(rep.body, words(&[0, 0, 1, 0]));
+        // Reported once: the next wait times out.
+        let rep = paused().block_on(handle(
+            &srv,
+            post("NotificationWait", &body, Some(cookie_of(&sc))),
+        ));
+        assert_eq!(rep.body, words(&[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_notification_wait_timeout_unchanged() {
+        let mut srv = server();
+        srv.notification_wait = Duration::from_secs(1);
+        let sc = new_session(&srv, Instant::now());
+        let body = words(&[0, 0]);
+        let (rep, waited) = paused().block_on(async {
+            let t0 = tokio::time::Instant::now();
+            let rep = handle(&srv, post("NotificationWait", &body, Some(cookie_of(&sc)))).await;
+            (rep, t0.elapsed())
+        });
+        assert!(waited >= Duration::from_secs(1));
+        assert_eq!(rep.body, words(&[0, 0, 0, 0]));
     }
 
     #[test]

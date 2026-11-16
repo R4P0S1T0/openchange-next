@@ -478,6 +478,65 @@ static enum mapistore_error tdb_record_update_uri_prefix(struct indexing_context
 	return ret == 0 ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
 }
 
+struct tdb_folders_data {
+	TALLOC_CTX	*mem_ctx;
+	uint64_t	*fmids;
+	char		**uris;
+	uint32_t	count;
+	bool		failed;
+};
+
+/* Live records only: their key is exactly "0x" and 16 hex digits (soft-deleted ones carry a tag first). */
+static int tdb_folders_traverse(struct tdb_context *tdb_ctx, TDB_DATA key, TDB_DATA value, void *data)
+{
+	struct tdb_folders_data	*d = data;
+	char			hex[19];
+
+	if (key.dsize != 18 || memcmp(key.dptr, "0x", 2) != 0 || !value.dsize || value.dptr[value.dsize - 1] != '/') {
+		return 0;
+	}
+	memcpy(hex, key.dptr, 18);
+	hex[18] = '\0';
+	d->fmids = talloc_realloc(d->mem_ctx, d->fmids, uint64_t, d->count + 1);
+	d->uris = talloc_realloc(d->mem_ctx, d->uris, char *, d->count + 1);
+	if (!d->fmids || !d->uris) {
+		d->failed = true;
+		return -1;
+	}
+	d->fmids[d->count] = strtoull(hex, NULL, 16);
+	d->uris[d->count] = talloc_strndup(d->uris, (const char *) value.dptr, value.dsize);
+	if (!d->uris[d->count]) {
+		d->failed = true;
+		return -1;
+	}
+	d->count++;
+	return 0;
+}
+
+static enum mapistore_error tdb_record_list_folders(struct indexing_context *ictx,
+						   const char *username,
+						   TALLOC_CTX *mem_ctx,
+						   uint32_t *countp,
+						   uint64_t **fmidsp,
+						   char ***urisp)
+{
+	struct tdb_folders_data	d = { 0 };
+
+	MAPISTORE_RETVAL_IF(!ictx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !countp || !fmidsp || !urisp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+
+	d.mem_ctx = mem_ctx;
+	if (tdb_traverse_read(TDB_WRAP(ictx)->tdb, tdb_folders_traverse, &d) == -1 || d.failed) {
+		talloc_free(d.fmids);
+		talloc_free(d.uris);
+		return MAPISTORE_ERR_DATABASE_OPS;
+	}
+	*countp = d.count;
+	*fmidsp = d.fmids;
+	*urisp = d.uris;
+	return MAPISTORE_SUCCESS;
+}
+
 static enum mapistore_error tdb_record_allocate_fmids(struct indexing_context *ictx,
 						      const char *username,
 						      int count,
@@ -592,6 +651,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_tdb_init(struct mapistore_conte
 	ictx->allocate_fmid = tdb_record_allocate_fmid;
 	ictx->allocate_fmids = tdb_record_allocate_fmids;
 	ictx->update_uri_prefix = tdb_record_update_uri_prefix;
+	ictx->list_folders = tdb_record_list_folders;
 
 	*ictxp = ictx;
 

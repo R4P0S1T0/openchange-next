@@ -746,6 +746,17 @@ notif:
 		}
 	}
 
+	/* Folder changes queued for this session's hierarchy tables (emsmdbp_notify.c), within the reply size. */
+	{
+		uint32_t limit = UINT16_MAX, room = emsmdbp_ctx->notify_room;
+
+		if (room) limit = room < 8 ? 0 : (room - 8 < limit ? room - 8 : limit);
+		limit = limit < 2 + handles_length ? 0 : limit - 2 - handles_length;
+		if (emsmdbp_notify_append(emsmdbp_ctx, mapi_response, &idx, &size, limit) != MAPI_E_SUCCESS) {
+			return MAPI_E_NOT_ENOUGH_RESOURCES;
+		}
+	}
+
 end:
 	if (mapi_response->mapi_repl) {
 		mapi_response->mapi_repl[idx].opnum = 0;
@@ -802,7 +813,9 @@ enum MAPISTATUS emsmdb_execute_buffer(TALLOC_CTX *mem_ctx, struct emsmdbp_contex
 	result = ecRpcFormat;
 	/* Chained requests require a transaction scheduler; accept one final frame. */
 	if (error != NDR_ERR_SUCCESS || pull->offset != rop_in->length || !(request.header.Flags & RHEF_Last)) goto done;
+	ctx->notify_room = max_out;
 	result = EcDoRpc_process_transaction(transaction, ctx, request.mapi_request, &response);
+	ctx->notify_room = 0;
 	if (result != MAPI_E_SUCCESS) goto done;
 	result = MAPI_E_NOT_ENOUGH_RESOURCES;
 	body = ndr_push_init_ctx(transaction);

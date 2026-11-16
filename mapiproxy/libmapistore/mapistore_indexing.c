@@ -341,6 +341,33 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_record_get_uri(struct mapistore
 	return ictx->get_uri(ictx, username, mem_ctx, fmid, urip, soft_deletedp);
 }
 
+/**
+   \details Lists the user's indexed folders (not soft-deleted)
+
+   \param mstore_ctx pointer to the mapistore context
+   \param username the account whose indexing database is read
+   \param mem_ctx memory context for the arrays
+   \param countp number of folders
+   \param fmidsp their fmids
+   \param urisp their URIs, each ending with '/'
+
+   \return MAPISTORE_SUCCESS on success, otherwise MAPISTORE error
+ */
+_PUBLIC_ enum mapistore_error mapistore_indexing_list_folders(struct mapistore_context *mstore_ctx, const char *username, TALLOC_CTX *mem_ctx, uint32_t *countp, uint64_t **fmidsp, char ***urisp)
+{
+	struct indexing_context	*ictx;
+	int			ret;
+
+	MAPISTORE_RETVAL_IF(!mstore_ctx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !countp || !fmidsp || !urisp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+
+	ret = mapistore_indexing_add(mstore_ctx, username, &ictx);
+	MAPISTORE_RETVAL_IF(ret, MAPISTORE_ERROR, NULL);
+	MAPISTORE_RETVAL_IF(!ictx || !ictx->list_folders, MAPISTORE_ERR_NOT_IMPLEMENTED, NULL);
+
+	return ictx->list_folders(ictx, username, mem_ctx, countp, fmidsp, urisp);
+}
+
 _PUBLIC_ enum mapistore_error mapistore_indexing_record_get_fmid(struct mapistore_context *mstore_ctx, const char *username, const char *uri, bool partial, uint64_t *fmidp, bool *soft_deletedp)
 {
 	struct indexing_context		*ictx;

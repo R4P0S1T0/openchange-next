@@ -4,18 +4,54 @@ use crate::auth::Password;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
+use tokio::sync::Notify;
 
 /// Key of the C worker's handle table (Task 4).
 pub type SessionId = u64;
 
 const COOKIE_NAME: &str = "MapiContext";
 
+/// Raised when the backend queued notifications for a session: its NotificationWait returns at once.
+#[derive(Default)]
+pub struct SessionSignal {
+    pending: AtomicBool,
+    notify: Notify,
+}
+
+impl SessionSignal {
+    pub fn raise(&self) {
+        self.pending.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// Waits up to `limit` for a raise; true when there was one (consumed).
+    pub async fn wait(&self, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            if self.pending.swap(false, Ordering::SeqCst) {
+                return true;
+            }
+            // A permit left by a raise already consumed wakes us early: check again.
+            if tokio::time::timeout_at(deadline, self.notify.notified())
+                .await
+                .is_err()
+            {
+                return self.pending.swap(false, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
 struct Session {
     cred_hash: [u8; 32],
     backend: SessionId,
+    /// The account Dovecot verified at Connect; the IMAP watcher finds sessions by it.
+    user: String,
+    signal: Arc<SessionSignal>,
     last_used: Instant,
     busy: bool,
     waiting: bool,
@@ -109,11 +145,19 @@ impl SessionTable {
     }
 
     /// Returns the Set-Cookie value of the new session.
-    pub fn create(&self, cred_hash: [u8; 32], backend: SessionId, now: Instant) -> String {
+    pub fn create(
+        &self,
+        user: &str,
+        cred_hash: [u8; 32],
+        backend: SessionId,
+        now: Instant,
+    ) -> String {
         let cookie = format!("{:032x}", u128::from_ne_bytes(random()));
         let session = Session {
             cred_hash,
             backend,
+            user: user.to_owned(),
+            signal: Arc::default(),
             last_used: now,
             busy: false,
             waiting: false,
@@ -194,6 +238,20 @@ impl SessionTable {
         })
     }
 
+    /// The live sessions of an account, with their backend sessions and signals.
+    pub fn sessions_of(&self, user: &str) -> Vec<(SessionId, Arc<SessionSignal>)> {
+        self.lock()
+            .values()
+            .filter(|s| s.user == user)
+            .map(|s| (s.backend, Arc::clone(&s.signal)))
+            .collect()
+    }
+
+    /// The signal of the session a cookie names.
+    fn signal(&self, cookie: &str) -> Option<Arc<SessionSignal>> {
+        self.lock().get(cookie).map(|s| Arc::clone(&s.signal))
+    }
+
     pub fn remove(&self, cookie: &str) -> Option<SessionId> {
         self.lock().remove(cookie).map(|s| s.backend)
     }
@@ -246,6 +304,16 @@ impl SessionGuard<'_> {
         self.backend
     }
 
+    /// The account of the session; None once it is gone.
+    pub fn user(&self) -> Option<String> {
+        self.table.lock().get(&self.cookie).map(|s| s.user.clone())
+    }
+
+    /// The session's notification signal; None once it is gone.
+    pub fn signal(&self) -> Option<Arc<SessionSignal>> {
+        self.table.signal(&self.cookie)
+    }
+
     /// Resets the idle clock, as at the end of a NotificationWait (3.2.5.5).
     pub fn refresh(&self, now: Instant) {
         if let Some(s) = self.table.lock().get_mut(&self.cookie) {
@@ -295,7 +363,7 @@ pub mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 7, now);
+        let sc = t.create("user", h, 7, now);
         let value = sc
             .strip_prefix("MapiContext=")
             .and_then(|r| r.strip_suffix("; Path=/mapi/emsmdb/; Secure; HttpOnly"))
@@ -307,7 +375,7 @@ pub mod tests {
         let g = t.begin(Some(cookie_of(&sc)), h, now).ok().unwrap();
         assert_eq!(g.expiration_ms(), 1_800_000);
         assert_eq!(g.set_cookie(), sc);
-        assert_ne!(t.create(h, 8, now), sc);
+        assert_ne!(t.create("user", h, 8, now), sc);
     }
 
     #[test]
@@ -326,7 +394,7 @@ pub mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 1, now);
+        let sc = t.create("user", h, 1, now);
         let code = |c: Option<&str>| t.begin(c, h, now).err();
         assert_eq!(code(None), Some(13));
         assert_eq!(code(Some("other=1")), Some(13));
@@ -352,7 +420,7 @@ pub mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 1, now);
+        let sc = t.create("user", h, 1, now);
         let g = t.begin(Some(cookie_of(&sc)), h, now).ok().unwrap();
         assert_eq!(t.begin(Some(cookie_of(&sc)), h, now).err(), Some(15));
         drop(g);
@@ -364,7 +432,7 @@ pub mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 42, now);
+        let sc = t.create("user", h, 42, now);
         let value = &cookie_of(&sc)["MapiContext=".len()..];
         assert_eq!(t.remove(value), Some(42));
         assert_eq!(t.remove(value), None);
@@ -377,7 +445,7 @@ pub mod tests {
         let now = Instant::now();
         let later = now + Duration::from_secs(60);
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 1, now);
+        let sc = t.create("user", h, 1, now);
         let value = &cookie_of(&sc)["MapiContext=".len()..];
         let other = t.credential_hash("other", &Password::from("pass"));
         assert!(t.touch(Some(cookie_of(&sc)), other, later).is_none());
@@ -402,8 +470,8 @@ pub mod tests {
         let t = table();
         let now = Instant::now();
         let h = t.credential_hash("user", &Password::from("pass"));
-        let sc = t.create(h, 9, now);
-        let keep = t.create(h, 10, now + Duration::from_secs(1000));
+        let sc = t.create("user", h, 9, now);
+        let keep = t.create("user", h, 10, now + Duration::from_secs(1000));
         let later = now + Duration::from_secs(1801);
         assert_eq!(t.begin(Some(cookie_of(&sc)), h, later).err(), Some(10));
         assert_eq!(t.expire(later), vec![9]);
