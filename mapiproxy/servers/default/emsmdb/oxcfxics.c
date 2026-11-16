@@ -85,6 +85,7 @@ struct oxcfxics_sync_data {
 	struct rawidset			*cnset_read;
 
 	struct rawidset			*deleted_eid_set;
+	bool				incomplete; /* hierarchy walk missed a folder: eid_set is not every folder */
 
 	struct oxcfxics_message_sync_data	*message_sync_data;
 };
@@ -1384,6 +1385,8 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 	table_object = emsmdbp_folder_open_table(mem_ctx, folder_object, MAPISTORE_FOLDER_TABLE, 0); 
 	if (!table_object) {
 		OC_DEBUG(5, "folder does not handle hierarchy tables\n");
+		sync_data->incomplete = true;
+		talloc_free(mem_ctx);
 		return;
 	}
 
@@ -1429,6 +1432,7 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			/* source key */
 			if (retvals[sync_data->prop_index.eid] != MAPI_E_SUCCESS || !data_pointers[sync_data->prop_index.eid]) {
 				OC_DEBUG(1, "hierarchy sync: a subfolder row has no folder ID; skipped\n");
+				sync_data->incomplete = true;
 				talloc_free(header_data_pointers);
 				talloc_free(data_pointers);
 				continue;
@@ -1436,6 +1440,7 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			eid = *(uint64_t *) data_pointers[sync_data->prop_index.eid];
 			if (eid == 0x7fffffffffffffffLL) {
 				OC_DEBUG(0, "folder without a valid eid\n");
+				sync_data->incomplete = true;
 				talloc_free(header_data_pointers);
 				continue;
 			}
@@ -1580,7 +1585,11 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 				talloc_free(subfolder_object);
 			} else {
 				OC_DEBUG(5, "[oxcfxics] Fail open folder %"PRIu64" from parent folder %"PRIu64" (retval %d)", eid, folder_object->object.folder->folderID, retval);
+				sync_data->incomplete = true;
 			}
+		}
+		else {
+			sync_data->incomplete = true;
 		}
 	}
 
@@ -1613,7 +1622,48 @@ static void oxcfxics_prepare_synccontext_with_folderChange(struct emsmdbp_object
 
 	oxcfxics_push_folderChange(emsmdbp_ctx, synccontext, owner, parent_object, sync_data, parent_object);
 
-	/* deletions (mapistore v2) */
+	/* deletions: a folder Outlook was given that the whole walk above did not meet is gone from the
+	   server (e.g. deleted while no session watched it). Only after a complete walk, or a folder that
+	   failed to open would be deleted in Outlook. */
+	if (!synccontext->request.no_deletions && !sync_data->incomplete) {
+		struct idset		*present = RAWIDSET_convert_to_idset(sync_data, sync_data->eid_set);
+		struct rawidset		*deleted = RAWIDSET_make(sync_data, false, false);
+		struct idset		*given;
+		struct globset_range	*range;
+		uint64_t		globcnt;
+
+		for (given = synccontext->idset_given; given && !given->idbased; given = given->next) {
+			for (range = given->ranges; range; range = range->next) {
+				/* The state comes from the client: a huge range is not a folder list, skip it. */
+				if (exchange_globcnt(range->high) - exchange_globcnt(range->low) > 0x10000) {
+					continue;
+				}
+				for (globcnt = exchange_globcnt(range->low); globcnt <= exchange_globcnt(range->high); globcnt++) {
+					if (!IDSET_includes_guid_glob(present, &given->repl.guid, exchange_globcnt(globcnt))) {
+						RAWIDSET_push_guid_glob(deleted, &given->repl.guid, exchange_globcnt(globcnt));
+					}
+				}
+			}
+		}
+		if (deleted->count > 0) {
+			IDSET_remove_rawidset(synccontext->idset_given, deleted);
+			new_idset = RAWIDSET_convert_to_idset(NULL, deleted);
+			/* as in the contents synchronization: the deleted idset goes out REPLID-based */
+			new_idset->idbased = true;
+			new_idset->repl.id = 1;
+			ndr_push_uint32(sync_data->ndr, NDR_SCALARS, IncrSyncDel);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			ndr_push_uint32(sync_data->ndr, NDR_SCALARS, MetaTagIdsetDeleted);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			ndr_push_idset(sync_data->ndr, new_idset);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, 0);
+			ndr_push_uint32(sync_data->cutmarks_ndr, NDR_SCALARS, sync_data->ndr->offset);
+			OC_DEBUG(3, "hierarchy sync: %d folder(s) deleted on the server\n", deleted->count);
+			talloc_free(new_idset);
+		}
+	}
 
 	/* state */
 	ndr_push_uint32(sync_data->ndr, NDR_SCALARS, IncrSyncStateBegin);
