@@ -2119,7 +2119,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 		table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_MESSAGE_TABLE, 0);
 		if (!table_object) {
 			OC_DEBUG(5, "could not open message table\n");
-			abort();
+			goto table_failed;
 		}
 		if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 			for (j = 0; j < available_properties->cValues; j++) {
@@ -2143,7 +2143,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 			table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_FAI_TABLE, 0);
 			if (!table_object) {
 				OC_DEBUG(5, "could not open FAI table\n");
-				abort();
+				goto table_failed;
 			}
 			if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 				for (j = 0; j < available_properties->cValues; j++) {
@@ -2164,7 +2164,7 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
 		table_object = emsmdbp_folder_open_table(NULL, folder_object, MAPISTORE_FOLDER_TABLE, 0);
 		if (!table_object) {
 			OC_DEBUG(5, "could not open folder table\n");
-			abort();
+			goto table_failed;
 		}
 		if (emsmdbp_object_table_get_available_properties(mem_ctx, emsmdbp_ctx, table_object, &available_properties) == MAPISTORE_SUCCESS) {
 			for (j = 0; j < available_properties->cValues; j++) {
@@ -2190,6 +2190,13 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncConfigure(TALLOC_CTX *mem_ctx,
         mapi_handles_set_private_data(synccontext_rec, synccontext_object);
 	talloc_free(synccontext_object);
         handles[mapi_repl->handle_idx] = synccontext_rec->handle;
+	goto end;
+
+table_failed:
+	/* The folder is gone from the backend (e.g. deleted in another client): answer, do not crash the server. */
+	talloc_free(properties_exclusion);
+	talloc_free(synccontext_object);
+	mapi_repl->error_code = MAPI_E_NOT_FOUND;
 end:
 	*size += libmapiserver_RopSyncConfigure_size(mapi_repl);
 
