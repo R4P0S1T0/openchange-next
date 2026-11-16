@@ -799,6 +799,67 @@ static enum mapistore_error mysql_record_update_uri_prefix(struct indexing_conte
 	return MAPISTORE_SUCCESS;
 }
 
+static enum mapistore_error mysql_record_list_folders(struct indexing_context *ictx,
+						     const char *username,
+						     TALLOC_CTX *mem_ctx,
+						     uint32_t *countp,
+						     uint64_t **fmidsp,
+						     char ***urisp)
+{
+	const char	*e_user;
+	char		*sql;
+	MYSQL_RES	*res = NULL;
+	MYSQL_ROW	row;
+	TALLOC_CTX	*local;
+	uint64_t	*fmids;
+	char		**uris;
+	uint32_t	count = 0;
+	my_ulonglong	rows;
+	int		ret;
+
+	MAPISTORE_RETVAL_IF(!ictx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !countp || !fmidsp || !urisp, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+
+	local = talloc_new(NULL);
+	MAPISTORE_RETVAL_IF(!local, MAPISTORE_ERR_NO_MEMORY, NULL);
+	e_user = _sql(local, username);
+	MAPISTORE_RETVAL_IF(!e_user, MAPISTORE_ERR_NO_MEMORY, local);
+	sql = talloc_asprintf(local, "SELECT fmid, url FROM %s WHERE username = '%s' AND soft_deleted = 0 "
+			      "AND url LIKE BINARY '%%/'", INDEXING_TABLE, e_user);
+	MAPISTORE_RETVAL_IF(!sql, MAPISTORE_ERR_NO_MEMORY, local);
+	ret = select_without_fetch(MYSQL(ictx), sql, &res);
+	MAPISTORE_RETVAL_IF(ret != MYSQL_SUCCESS && ret != MYSQL_NOT_FOUND, MAPISTORE_ERR_DATABASE_OPS, local);
+
+	rows = res ? mysql_num_rows(res) : 0;
+	fmids = talloc_array(mem_ctx, uint64_t, rows ? rows : 1);
+	uris = talloc_array(mem_ctx, char *, rows ? rows : 1);
+	if (!fmids || !uris) {
+		if (res) mysql_free_result(res);
+		talloc_free(fmids);
+		talloc_free(uris);
+		MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_NO_MEMORY, local);
+	}
+	while (res && (row = mysql_fetch_row(res)) && count < rows) {
+		fmids[count] = strtoull(row[0], NULL, 0);
+		uris[count] = talloc_strdup(uris, row[1]);
+		if (!uris[count]) {
+			mysql_free_result(res);
+			talloc_free(fmids);
+			talloc_free(uris);
+			MAPISTORE_RETVAL_ERR(MAPISTORE_ERR_NO_MEMORY, local);
+		}
+		count++;
+	}
+	if (res) {
+		mysql_free_result(res);
+	}
+	talloc_free(local);
+	*countp = count;
+	*fmidsp = fmids;
+	*urisp = uris;
+	return MAPISTORE_SUCCESS;
+}
+
 static enum mapistore_error mysql_record_allocate_fmids(struct indexing_context *ictx,
 						      const char *username,
 						      int count,
@@ -969,6 +1030,7 @@ _PUBLIC_ enum mapistore_error mapistore_indexing_mysql_init(struct mapistore_con
 	ictx->allocate_fmid = mysql_record_allocate_fmid;
 	ictx->allocate_fmids = mysql_record_allocate_fmids;
 	ictx->update_uri_prefix = mysql_record_update_uri_prefix;
+	ictx->list_folders = mysql_record_list_folders;
 
 	/* Data pointers */
 	cache_url = mapistore_get_default_cache_url();

@@ -161,6 +161,8 @@ struct indexing_context {
 	enum mapistore_error	(*allocate_fmids)(struct indexing_context *, const char *, int, uint64_t *);
 	/* Every URI of the user starting with old_prefix gets new_prefix instead; fmids and soft-delete state stay. */
 	enum mapistore_error	(*update_uri_prefix)(struct indexing_context *, const char *, const char *, const char *);
+	/* The user's folders the store ever indexed and has not soft-deleted: a folder URI ends with '/'. */
+	enum mapistore_error	(*list_folders)(struct indexing_context *, const char *, TALLOC_CTX *, uint32_t *, uint64_t **, char ***);
 
 	/* Backend URL */
 	const char *url;
@@ -405,6 +407,7 @@ enum mapistore_error mapistore_indexing_record_add_mid(struct mapistore_context 
 enum mapistore_error mapistore_indexing_record_del_mid(struct mapistore_context *, uint32_t, const char *, uint64_t, uint8_t);
 enum mapistore_error mapistore_indexing_record_add_fmid_for_uri(struct mapistore_context *, uint32_t, const char *, uint64_t, const char *);
 enum mapistore_error mapistore_indexing_record_get_uri(struct mapistore_context *, const char *, TALLOC_CTX *, uint64_t, char **, bool *);
+enum mapistore_error mapistore_indexing_list_folders(struct mapistore_context *, const char *, TALLOC_CTX *, uint32_t *, uint64_t **, char ***);
 enum mapistore_error mapistore_indexing_record_get_fmid(struct mapistore_context *, const char *, const char *, bool, uint64_t *, bool *);
 
 enum mapistore_error mapistore_indexing_get_new_folderID(struct mapistore_context *, uint64_t *);

@@ -86,6 +86,8 @@ struct oxcfxics_sync_data {
 
 	struct rawidset			*deleted_eid_set;
 	bool				incomplete; /* hierarchy walk missed a folder: eid_set is not every folder */
+	uint64_t			*present_fids; /* hierarchy walk: every folder met */
+	uint32_t			present_count;
 
 	struct oxcfxics_message_sync_data	*message_sync_data;
 };
@@ -1446,6 +1448,13 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 			}
 			emsmdbp_replid_to_guid(emsmdbp_ctx, owner, eid & 0xffff, &replica_guid);
 			RAWIDSET_push_guid_glob(sync_data->eid_set, &replica_guid, (eid >> 16) & 0x0000ffffffffffff);
+			sync_data->present_fids = talloc_realloc(sync_data, sync_data->present_fids, uint64_t, sync_data->present_count + 1);
+			if (sync_data->present_fids) {
+				sync_data->present_fids[sync_data->present_count++] = eid;
+			} else {
+				sync_data->present_count = 0;
+				sync_data->incomplete = true;
+			}
 
 			/* bin_data = oxcfxics_make_gid(header_data_pointers, &sync_data->replica_guid, eid >> 16); */
 			emsmdbp_source_key_from_fmid(header_data_pointers, emsmdbp_ctx, owner, eid, &bin_data);
@@ -1596,6 +1605,73 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 	talloc_free(mem_ctx);
 }
 
+static bool oxcfxics_fid_present(const struct oxcfxics_sync_data *sync_data, uint64_t fid)
+{
+	uint32_t i;
+
+	for (i = 0; i < sync_data->present_count; i++) {
+		if (sync_data->present_fids[i] == fid) return true;
+	}
+	return false;
+}
+
+/* Folders gone from the store, which Outlook may hold in or outside its IdsetGiven (one learnt from a
+   hierarchy notification is outside): every folder the store indexed for the user whose fmid the walk did
+   not meet and whose URI no folder met has either. The URI test keeps a live folder's other fmids (a provisioned root is indexed twice)
+   out. Only for a walk of the whole mailbox: a narrower one does not meet every live folder. Outlook ignores
+   an ID it does not hold.
+   shortcut: a gone folder's index row stays, so it goes out on every whole-mailbox synchronization; purge
+   the row once every profile has seen it if mailboxes with many deleted folders make that heavy. */
+static void oxcfxics_push_tombstones(struct emsmdbp_context *emsmdbp_ctx, const char *owner,
+				     struct emsmdbp_object *topmost_folder_object, struct oxcfxics_sync_data *sync_data,
+				     struct rawidset *deleted)
+{
+	TALLOC_CTX	*tmp;
+	uint64_t	topmost_fid, root_fid = 0, ipm_fid = 0, *fmids = NULL, globcnt;
+	char		**uris = NULL, **present_uris, *uri;
+	uint32_t	count = 0, i, j, n = 0;
+	struct GUID	guid;
+	bool		alive;
+
+	if (strcmp(owner, emsmdbp_ctx->username) != 0 || topmost_folder_object->type != EMSMDBP_OBJECT_FOLDER) {
+		return;
+	}
+	topmost_fid = topmost_folder_object->object.folder->folderID;
+	openchangedb_get_SystemFolderID(emsmdbp_ctx->oc_ctx, owner, EMSMDBP_MAILBOX_ROOT, &root_fid);
+	openchangedb_get_SystemFolderID(emsmdbp_ctx->oc_ctx, owner, EMSMDBP_TOP_INFORMATION_STORE, &ipm_fid);
+	if (topmost_fid != root_fid && topmost_fid != ipm_fid) {
+		return;
+	}
+	tmp = talloc_new(NULL);
+	if (!tmp || mapistore_indexing_list_folders(emsmdbp_ctx->mstore_ctx, owner, tmp, &count, &fmids, &uris) != MAPISTORE_SUCCESS) {
+		talloc_free(tmp);
+		return;
+	}
+	present_uris = talloc_array(tmp, char *, sync_data->present_count ? sync_data->present_count : 1);
+	if (!present_uris) {
+		talloc_free(tmp);
+		return;
+	}
+	for (i = 0; i < sync_data->present_count; i++) {
+		if (emsmdbp_get_uri_from_fid(tmp, emsmdbp_ctx, sync_data->present_fids[i], &uri) == MAPISTORE_SUCCESS && uri) {
+			present_uris[n++] = uri;
+		}
+	}
+	for (i = 0; i < count; i++) {
+		if (oxcfxics_fid_present(sync_data, fmids[i])) continue;
+		for (alive = false, j = 0; j < n && !alive; j++) {
+			alive = strcmp(present_uris[j], uris[i]) == 0;
+		}
+		if (alive) continue;
+		globcnt = (fmids[i] >> 16) & 0x0000ffffffffffffULL;
+		if (emsmdbp_replid_to_guid(emsmdbp_ctx, owner, fmids[i] & 0xffff, &guid) != MAPI_E_SUCCESS) {
+			continue;
+		}
+		RAWIDSET_push_guid_glob(deleted, &guid, globcnt);
+	}
+	talloc_free(tmp);
+}
+
 static void oxcfxics_prepare_synccontext_with_folderChange(struct emsmdbp_object_synccontext *synccontext, TALLOC_CTX *mem_ctx, struct emsmdbp_context *emsmdbp_ctx, const char *owner, struct emsmdbp_object *parent_object)
 {
 	struct oxcfxics_sync_data		*sync_data;
@@ -1622,29 +1698,14 @@ static void oxcfxics_prepare_synccontext_with_folderChange(struct emsmdbp_object
 
 	oxcfxics_push_folderChange(emsmdbp_ctx, synccontext, owner, parent_object, sync_data, parent_object);
 
-	/* deletions: a folder Outlook was given that the whole walk above did not meet is gone from the
-	   server (e.g. deleted while no session watched it). Only after a complete walk, or a folder that
-	   failed to open would be deleted in Outlook. */
+	/* deletions: only folders the store knows it had (see oxcfxics_push_tombstones). Not "in IdsetGiven but
+	   not met": Outlook's IdsetGiven also holds folders it created with its own reserved IDs that the store
+	   never kept, and deleting those makes Outlook recreate them on every synchronization. Only after a
+	   complete walk, or a folder that failed to open would be deleted in Outlook. */
 	if (!synccontext->request.no_deletions && !sync_data->incomplete) {
-		struct idset		*present = RAWIDSET_convert_to_idset(sync_data, sync_data->eid_set);
 		struct rawidset		*deleted = RAWIDSET_make(sync_data, false, false);
-		struct idset		*given;
-		struct globset_range	*range;
-		uint64_t		globcnt;
 
-		for (given = synccontext->idset_given; given && !given->idbased; given = given->next) {
-			for (range = given->ranges; range; range = range->next) {
-				/* The state comes from the client: a huge range is not a folder list, skip it. */
-				if (exchange_globcnt(range->high) - exchange_globcnt(range->low) > 0x10000) {
-					continue;
-				}
-				for (globcnt = exchange_globcnt(range->low); globcnt <= exchange_globcnt(range->high); globcnt++) {
-					if (!IDSET_includes_guid_glob(present, &given->repl.guid, exchange_globcnt(globcnt))) {
-						RAWIDSET_push_guid_glob(deleted, &given->repl.guid, exchange_globcnt(globcnt));
-					}
-				}
-			}
-		}
+		oxcfxics_push_tombstones(emsmdbp_ctx, owner, parent_object, sync_data, deleted);
 		if (deleted->count > 0) {
 			IDSET_remove_rawidset(synccontext->idset_given, deleted);
 			new_idset = RAWIDSET_convert_to_idset(NULL, deleted);
