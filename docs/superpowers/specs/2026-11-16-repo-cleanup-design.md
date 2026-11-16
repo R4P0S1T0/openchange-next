@@ -28,18 +28,26 @@ daemon, the C core or the tests that pass today.
 2. Work on branch `cleanup`; `main` changes only by merge after verification.
 3. Step 1 (not in the build): `php/`, `packaging/`, `.travis.yml`,
    `mapiproxy/services/`, plus the new `README.md`.
-4. Step 2 (wired into the build): `qt/`, `libexchange2ical/`, `libmapi++/`,
+4. Step 2 (wired into the build): `qt/`, `libmapi++/`,
    `pyopenchange/`, `testprogs/`, `mapiproxy/servers/default/rfr`,
    `mapiproxy/servers/default/asyncemsmdb`, with their `Makefile`, `configure.ac`,
    CI, script and doc references.
 5. Kept for now: `utils/`, `libmapiadmin/`, `vendor/` (offline Rust build, needed for
-   the M7 Debian package).
+   the M7 Debian package), `libexchange2ical/` (the M6 calendar plan reuses its
+   iCalendar to MAPI conversion; kept by ruling during execution).
 6. Merge gate: `make all`, the `check-*` targets, the Python and Rust tests pass, and
    the lab daemon built from `cleanup` serves the TSplus Outlook as before
    (opens, synchronizes, no new errors in the journal).
 7. The README describes: what the project is and is not, the target stack and clients,
    status per milestone (M1–M5 done, M6 next), how to build and test, where the docs
    are, licence. The 2008 goals text goes away.
+
+## Accepted behaviour change
+
+The Samba-hosted `dcesrv_mapiproxy` (RPC/TCP, unsupported) no longer has an RFR
+server module: in its server mode, RfrGetNewDSA/RfrGetFQDNFromLegacyDN are no longer
+answered and it no longer tries to load the module. Proxy mode is unchanged. The
+MAPI/HTTP service never used it.
 
 ## Left to the builder
 

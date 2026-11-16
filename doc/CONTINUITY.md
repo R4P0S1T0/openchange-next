@@ -88,7 +88,7 @@ python3 /tmp/openchange-build-tools/run.py make check-binary-properties \
   check-property-blobs check-recipient-blobs check-propsdump \
   check-libmapi-modernization check-ndr-modernization check-mapiadmin \
   check-ocpf-lexer check-mapiproxy-registries check-mapiproxy-rpc \
-  check-asyncemsmdb check-nspi check-emsmdb check-mpm-pack check-mpm-cache \
+  check-nspi check-emsmdb check-mpm-pack check-mpm-cache \
   check-namedprops check-mysql-utils
 ```
 

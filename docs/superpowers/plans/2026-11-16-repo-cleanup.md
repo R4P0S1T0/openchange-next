@@ -14,8 +14,8 @@
 
 - Tag `legacy-2026-11` on `main` before any deletion; push the tag.
 - Work on branch `cleanup`; `main` changes only by merge after verification.
-- Delete only: `php/`, `packaging/`, `.travis.yml`, `mapiproxy/services/`, `qt/`, `libexchange2ical/`, `libmapi++/`, `pyopenchange/`, `testprogs/`, `mapiproxy/servers/default/rfr`, `mapiproxy/servers/default/asyncemsmdb`, plus files that exist only to build or test them.
-- Keep: `utils/`, `libmapiadmin/`, `vendor/`.
+- Delete only: `php/`, `packaging/`, `.travis.yml`, `mapiproxy/services/`, `qt/`, `libmapi++/`, `pyopenchange/`, `testprogs/`, `mapiproxy/servers/default/rfr`, `mapiproxy/servers/default/asyncemsmdb`, plus files that exist only to build or test them.
+- Keep: `utils/`, `libmapiadmin/`, `vendor/`, `libexchange2ical/` (M6 reuses it).
 - No change to code that the daemon, the C core or the remaining tests use. No directory moves, no build-system change.
 - Merge gate: `make all`, every remaining `check-*` target in the CI workflow, the Python and Rust tests, and the lab daemon built from `cleanup` serving the TSplus Outlook as before.
 

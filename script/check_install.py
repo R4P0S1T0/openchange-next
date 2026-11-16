@@ -17,12 +17,12 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 LIBRARIES = tuple(name + '.so.0' for name in (
-    'libmapi', 'libmapipp', 'libocpf', 'libmapiadmin',
+    'libmapi', 'libocpf', 'libmapiadmin',
     'libmapiproxy', 'libmapiserver', 'libmapistore',
 ))
 MODULES = tuple(name + '.so' for name in (
-    'dcesrv_mapiproxy', 'dcesrv_asyncemsmdb', 'exchange_nsp',
-    'exchange_emsmdb', 'exchange_ds_rfr', 'mpm_pack', 'mpm_cache',
+    'dcesrv_mapiproxy', 'exchange_nsp',
+    'exchange_emsmdb', 'mpm_pack', 'mpm_cache',
     'mpm_dummy', 'mpm_downgrade',
 ))
 COMMANDS = ('mapiprofile', 'openchangeclient', 'openchangepfadmin', 'mapipropsdump')

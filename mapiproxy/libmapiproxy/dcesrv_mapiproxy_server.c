@@ -190,9 +190,9 @@ static NTSTATUS mapiproxy_server_load(struct dcesrv_context *dce_ctx)
 	const char				*nspi;
 	const char				*emsmdb;
 	const char				*rfr;
-	const char				*server_name[] = { NDR_EXCHANGE_NSP_NAME, 
-								   NDR_EXCHANGE_EMSMDB_NAME,
-								   NDR_EXCHANGE_DS_RFR_NAME, NULL };
+	/* No RFR server: its module was removed with RPC/TCP support (2026-11 cleanup). */
+	const char				*server_name[] = { NDR_EXCHANGE_NSP_NAME,
+								   NDR_EXCHANGE_EMSMDB_NAME, NULL };
 
 	/* Check server mode */
 	server_mode = lpcfg_parm_bool(dce_ctx->lp_ctx, NULL, "dcerpc_mapiproxy", "server", true);

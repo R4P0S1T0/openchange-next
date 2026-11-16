@@ -182,7 +182,7 @@ No interface blocker was found.
 **Files:**
 - Modify: `doc/MODERNIZATION.md` (new `## MAPIStore dav calendar backend (2026-10-30)`), `doc/CONTINUITY.md`, `doc/TEST_SERVER_READINESS.md` (storage-blocker row: candidate exists, not qualified), `testsuite/README.md` (commands)
 
-- [ ] **Step 1:** `make all` and all 17 targets: `make check-binary-properties check-property-blobs check-recipient-blobs check-propsdump check-libmapi-modernization check-ndr-modernization check-mapiadmin check-ocpf-lexer check-mapiproxy-registries check-mapiproxy-rpc check-asyncemsmdb check-nspi check-emsmdb check-mpm-pack check-mpm-cache check-namedprops check-mysql-utils` → all pass, plus `check-mapistore-dav` plain and sanitized. Record exact outputs.
+- [ ] **Step 1:** `make all` and all 16 targets: `make check-binary-properties check-property-blobs check-recipient-blobs check-propsdump check-libmapi-modernization check-ndr-modernization check-mapiadmin check-ocpf-lexer check-mapiproxy-registries check-mapiproxy-rpc check-nspi check-emsmdb check-mpm-pack check-mpm-cache check-namedprops check-mysql-utils` → all pass, plus `check-mapistore-dav` plain and sanitized. Record exact outputs.
 - [ ] **Step 2:** Default-build proof: plain configure (no flag) + `make all` + `grep -c curl config.mk` evidence that dav is off.
 - [ ] **Step 3:** Docs in existing style: what was done, what was validated (the commands above), and explicitly **not validated**: writes, contacts/CardDAV, mail/IMAP, authentication, Outlook, any real CalDAV/SOGo server, restrictions/sort, recurrence exceptions, sync/ICS, performance.
 - [ ] **Step 4: Commit** `docs: record dav calendar backend validation and limits`.
