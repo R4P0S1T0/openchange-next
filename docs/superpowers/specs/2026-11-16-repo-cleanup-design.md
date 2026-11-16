@@ -28,12 +28,13 @@ daemon, the C core or the tests that pass today.
 2. Work on branch `cleanup`; `main` changes only by merge after verification.
 3. Step 1 (not in the build): `php/`, `packaging/`, `.travis.yml`,
    `mapiproxy/services/`, plus the new `README.md`.
-4. Step 2 (wired into the build): `qt/`, `libexchange2ical/`, `libmapi++/`,
+4. Step 2 (wired into the build): `qt/`, `libmapi++/`,
    `pyopenchange/`, `testprogs/`, `mapiproxy/servers/default/rfr`,
    `mapiproxy/servers/default/asyncemsmdb`, with their `Makefile`, `configure.ac`,
    CI, script and doc references.
 5. Kept for now: `utils/`, `libmapiadmin/`, `vendor/` (offline Rust build, needed for
-   the M7 Debian package).
+   the M7 Debian package), `libexchange2ical/` (the M6 calendar plan reuses its
+   iCalendar to MAPI conversion; kept by ruling during execution).
 6. Merge gate: `make all`, the `check-*` targets, the Python and Rust tests pass, and
    the lab daemon built from `cleanup` serves the TSplus Outlook as before
    (opens, synchronizes, no new errors in the journal).

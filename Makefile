@@ -2,7 +2,6 @@
 # Written by Jelmer Vernooij <jelmer@openchange.org>, 2005.
 
 # C++11 support
-CXX11FLAGS=-std=c++0x
 
 ifneq ($(MAKECMDGOALS), samba)
 ifneq ($(MAKECMDGOALS), samba-git)
@@ -59,10 +58,8 @@ all: 		$(OC_IDL)		\
 		$(OC_SERVER)		\
 		$(OC_MAPIHTTP)		\
 		$(if $(OC_MAPIHTTP),mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT)) \
-		$(PYOPENCHANGEALL)	\
 		$(OC_TESTSUITE)		\
-		$(COVERAGE_INIT)	\
-		$(OPENCHANGE_QT4)
+		$(COVERAGE_INIT)
 
 install:: 	all 			\
 		installlib 		\
@@ -70,8 +67,7 @@ install:: 	all 			\
 		installheader 		\
 		$(OC_TOOLS_INSTALL) 	\
 		$(OC_TESTSUITE_INSTALL)	\
-		$(OC_SERVER_INSTALL) 	\
-		$(PYOPENCHANGEINSTALL)
+		$(OC_SERVER_INSTALL)
 
 installlib:	$(OC_LIBS_INSTALL)
 installpc:	$(OC_LIBS_INSTALLPC)
@@ -80,8 +76,7 @@ installheader:	$(OC_LIBS_INSTALLHEADERS)
 uninstall:: 	$(OC_LIBS_UNINSTALL)		\
 		$(OC_TOOLS_UNINSTALL)		\
 		$(OC_TESTSUITE_UNINSTALL)	\
-		$(OC_SERVER_UNINSTALL)		\
-		$(PYOPENCHANGEUNINSTALL)
+		$(OC_SERVER_UNINSTALL)
 
 dist:: distclean
 	./autogen.sh
@@ -93,7 +88,6 @@ distclean:: clean
 	rm -f libmapi/Doxyfile
 	rm -f libmapiadmin/Doxyfile
 	rm -f libocpf/Doxyfile
-	rm -f libmapi++/Doxyfile
 	rm -f mapiproxy/Doxyfile
 	rm -f mapiproxy/libmapistore/Doxyfile
 	rm -f config.status config.log
@@ -132,14 +126,6 @@ gen_ndr/%.h: %.idl | gen_ndr
 %.po: %.c libmapi/mapidefs.h libmapi/version.h | idl
 	@echo "Compiling $< with -fPIC"
 	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fPIC -c $< -o $@
-
-%.o: %.cpp libmapi/version.h | idl
-	@echo "Compiling $< with -fPIC"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) $(QT4_CXXFLAGS) -fPIC -c $< -o $@
-
-%.po: %.cpp libmapi/version.h | idl
-	@echo "Compiling $< with -fPIC"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -fPIC -c $< -o $@
 
 #################################################################
 # IDL compilation rules
@@ -369,189 +355,6 @@ libmapi/mapicode.c mapicodes_enum.h: libmapi/conf/mparse.pl libmapi/conf/mapi-co
 
 libmapi/codepage_lcid.c: libmapi/conf/mparse.pl libmapi/conf/codepage-lcid
 	libmapi/conf/mparse.pl --parser=codepage_lcid --outputdir=libmapi/ libmapi/conf/codepage-lcid
-
-#################################################################
-# libmapi++ compilation rules
-#################################################################
-
-LIBMAPIPP_SO_VERSION = 0
-
-libmapixx: libmapi \
-	libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION) \
-	libmapixx-tests \
-	libmapixx-examples
-
-libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION): 	\
-	libmapi++/src/attachment.po 		\
-	libmapi++/src/folder.po 		\
-	libmapi++/src/mapi_exception.po		\
-	libmapi++/src/message.po		\
-	libmapi++/src/object.po			\
-	libmapi++/src/profile.po		\
-	libmapi++/src/session.po \
-	libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
-	@echo "Linking $@"
-	@$(CXX) $(DSOOPT) $(CXX11FLAGS) $(CXXFLAGS) $(LDFLAGS) -Wl,-soname,libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION) -o $@ $^ $(LIBS)
-
-libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION): libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION)
-	ln -fs $< $@
-
-bin/libmapixx-test bin/libmapixx-attach bin/libmapixx-exception bin/libmapixx-profiletest libmapi++/examples/foldertree libmapi++/examples/messages: | libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION)
-
-libmapixx-installpc:
-	@echo "[*] install: libmapi++ pc files"
-	$(INSTALL) -d $(DESTDIR)$(libdir)/pkgconfig
-	$(INSTALL) -m 0644 libmapi++.pc $(DESTDIR)$(libdir)/pkgconfig
-
-libmapixx-distclean:
-	rm -f libmapi++.pc
-
-libmapixx-uninstallpc:
-	rm -f $(DESTDIR)$(libdir)/pkgconfig/libmapi++.pc
-
-distclean::libmapixx-distclean
-
-clean:: libmapixx-clean
-
-libmapixx-install: libmapixx-installheader libmapixx-installlib libmapixx-installpc
-
-libmapixx-uninstall: libmapixx-uninstallheader libmapixx-uninstalllib libmapixx-uninstallpc
-
-libmapixx-installheader:
-	@echo "[*] install: libmapi++ headers"
-	$(INSTALL) -d $(DESTDIR)$(includedir)/libmapi++
-	$(INSTALL) -m 0644 libmapi++/attachment.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/clibmapi.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/folder.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/libmapi++.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/mapi_exception.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/message.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/message_store.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/object.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/profile.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/property_container.h $(DESTDIR)$(includedir)/libmapi++/
-	$(INSTALL) -m 0644 libmapi++/session.h $(DESTDIR)$(includedir)/libmapi++/
-	@$(SED) $(DESTDIR)$(includedir)/libmapi++/*.h
-
-libmapixx-libs-clean:
-	rm -f libmapi++/src/*.po
-	rm -f libmapipp.$(SHLIBEXT)*
-	rm -f libmapi++/src/*.gcno libmapi++/src/*.gcda
-
-libmapixx-clean: libmapixx-tests-clean libmapixx-libs-clean
-
-libmapixx-installlib:
-	@echo "[*] install: libmapi++ library"
-	$(INSTALL) -d $(DESTDIR)$(libdir)
-	$(INSTALL) -m 0755 libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)
-	ln -sf libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapipp.$(SHLIBEXT)
-	ln -sf libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) $(DESTDIR)$(libdir)/libmapipp.$(SHLIBEXT).$(LIBMAPIPP_SO_VERSION)
-
-libmapixx-uninstallheader:
-	rm -rf $(DESTDIR)$(includedir)/libmapi++
-
-libmapixx-uninstalllib:
-	rm -f $(DESTDIR)$(libdir)/libmapipp.*
-
-libmapixx-tests:	libmapixx-test		\
-			libmapixx-attach 	\
-			libmapixx-exception	\
-			libmapixx-profiletest
-
-libmapixx-tests-clean:	libmapixx-test-clean		\
-			libmapixx-attach-clean		\
-			libmapixx-exception-clean	\
-			libmapixx-profiletest-clean
-
-libmapixx-test: bin/libmapixx-test
-
-libmapixx-test-clean:
-	rm -f bin/libmapixx-test
-	rm -f libmapi++/tests/*.o
-
-clean:: libmapixx-tests-clean
-
-bin/libmapixx-test:	libmapi++/tests/test.cpp	\
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking sample application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
-
-clean:: libmapixx-test-clean
-
-libmapixx-attach: bin/libmapixx-attach
-
-libmapixx-attach-clean:
-	rm -f bin/libmapixx-attach
-	rm -f libmapi++/tests/*.po
-	rm -f libmapi++/tests/*.gcno libmapi++/tests/*.gcda
-
-bin/libmapixx-attach: libmapi++/tests/attach_test.po	\
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking sample application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(LIBS)
-
-clean:: libmapixx-attach-clean
-
-libmapixx-exception: bin/libmapixx-exception
-
-bin/libmapixx-exception: libmapi++/tests/exception_test.cpp \
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking exception test application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(LIBS)
-
-libmapixx-exception-clean:
-	rm -f bin/libmapixx-exception
-	rm -f libmapi++/tests/*.o
-	rm -f libmapi++/tests/*.gcno libmapi++/tests/*.gcda
-
-clean:: libmapixx-exception-clean
-
-libmapixx-profiletest: bin/libmapixx-profiletest
-
-libmapixx-profiletest-clean:
-	rm -f bin/libmapixx-profiletest
-	rm -f libmapi++/tests/*.po
-	rm -f libmapi++/tests/*.gcno libmapi++/tests/*.gcda
-
-bin/libmapixx-profiletest: libmapi++/tests/profile_test.po	\
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking profile test application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(LIBS)
-
-clean:: libmapixx-profiletest-clean
-
-libmapixx-examples: libmapi++/examples/foldertree \
-		  libmapi++/examples/messages
-
-libmapixx-foldertree-clean:
-	rm -f libmapi++/examples/foldertree
-	rm -f libmapi++/examples/*.o
-	rm -f libmapi++/examples/*.gcno libmapi++/examples/*.gcda
-
-libmapixx-messages-clean:
-	rm -f libmapi++/examples/messages
-	rm -f libmapi++/examples/*.o
-	rm -f libmapi++/examples/*.gcno libmapi++/examples/*.gcda
-
-libmapi++/examples/foldertree: libmapi++/examples/foldertree.cpp	\
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking foldertree example application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(LIBS)
-
-clean:: libmapixx-foldertree-clean
-
-libmapi++/examples/messages: libmapi++/examples/messages.cpp	\
-		libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION) \
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking messages example application $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(LIBS)
-
-clean:: libmapixx-messages-clean
 
 #################################################################
 # libmapiadmin compilation rules
@@ -1074,14 +877,6 @@ bin/mapistore_test: 	mapiproxy/libmapistore/tests/mapistore_test.o		\
 	@echo "Linking $@"
 	@$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) -lpopt
 
-mapistore_tool: bin/mapistore_tool
-
-bin/mapistore_tool: 	testprogs/mapistore_tool.o		\
-			mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION)	\
-			mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) -lpopt
-
 mapistore_clean:
 	rm -f mapiproxy/libmapistore/tests/*.o
 	rm -f mapiproxy/libmapistore/tests/*.gcno
@@ -1089,8 +884,6 @@ mapistore_clean:
 	rm -f mapiproxy/libmapistore/backends/*.po
 	rm -f mapiproxy/libmapistore/backends/*.o
 	rm -f bin/mapistore_test
-	rm -f testprogs/mapistore_tool.o
-	rm -f bin/mapistore_tool
 
 clean:: mapistore_clean
 
@@ -1702,60 +1495,6 @@ bin/schemaIDGUID: utils/schemaIDGUID.o
 	@$(CC) $(CFLAGS) -o $@ $^ $(LIBS) $(LDFLAGS)
 
 ###################
-# check_fasttransfer test app.
-###################
-
-check_fasttransfer:		bin/check_fasttransfer
-
-check_fasttransfer-install:	check_fasttransfer
-	$(INSTALL) -d $(DESTDIR)$(bindir)
-	$(INSTALL) -m 0755 bin/check_fasttransfer $(DESTDIR)$(bindir)
-
-check_fasttransfer-uninstall:
-	rm -f $(DESTDIR)$(bindir)/check_fasttransfer
-
-check_fasttransfer-clean::
-	rm -f bin/check_fasttransfer
-	rm -f testprogs/check_fasttransfer.o
-	rm -f testprogs/check_fasttransfer.gcno
-	rm -f testprogs/check_fasttransfer.gcda
-
-clean:: check_fasttransfer-clean
-
-bin/check_fasttransfer:	testprogs/check_fasttransfer.o				\
-			libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)			\
-			mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION)	\
-			mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) -o $@ $^ $(LIBS) $(LDFLAGS) -lpopt $(MEMCACHED_LIBS)
-
-###################
-# test_asyncnotif test app.
-###################
-
-test_asyncnotif:		bin/test_asyncnotif
-
-test_asyncnotif-install:	test_asyncnotif
-	$(INSTALL) -d $(DESTDIR)$(bindir)
-	$(INSTALL) -m 0755 bin/test_asyncnotif $(DESTDIR)$(bindir)
-
-test_asyncnotif-uninstall:
-	rm -f $(DESTDIR)$(bindir)/test_asyncnotif
-
-test_asyncnotif-clean::
-	rm -f bin/test_asyncnotif
-	rm -f testprogs/test_asyncnotif.o
-	rm -f testprogs/test_asyncnotif.gcno
-	rm -f testprogs/test_asyncnotif.gcda
-
-clean:: test_asyncnotif-clean
-
-bin/test_asyncnotif:	testprogs/test_asyncnotif.o			\
-			libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) -o $@ $^ $(LIBS) $(LDFLAGS) -lpopt
-
-###################
 # python code
 ###################
 
@@ -1946,58 +1685,6 @@ clean-python:
 
 clean:: clean-python
 
-pyopenchange: 	$(pythonscriptdir)/openchange/mapi.$(SHLIBEXT)			\
-		$(pythonscriptdir)/openchange/mapistore.$(SHLIBEXT)
-#		$(pythonscriptdir)/openchange/ocpf.$(SHLIBEXT)			\
-
-$(pythonscriptdir)/openchange/mapi.$(SHLIBEXT):	pyopenchange/pymapi.c				\
-						pyopenchange/pymapi_properties.c		\
-						libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fno-strict-aliasing $(DSOOPT) $(LDFLAGS) -o $@ $^ $(PYTHON_LIBS) $(LIBS)
-
-# $(pythonscriptdir)/openchange/ocpf.$(SHLIBEXT):	pyopenchange/pyocpf.c				\
-# 						libocpf.$(SHLIBEXT).$(PACKAGE_VERSION)		\
-# 						libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-# 	@echo "Linking $@"
-# 	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) $(DSOOPT) $(LDFLAGS) -o $@ $^ $(PYTHON_LIBS) $(LIBS)
-
-$(pythonscriptdir)/openchange/mapistore.$(SHLIBEXT): 	pyopenchange/mapistore/pymapistore.c			\
-							pyopenchange/mapistore/context.c			\
-							pyopenchange/mapistore/folder.c				\
-							pyopenchange/mapistore/freebusy_properties.c		\
-							pyopenchange/mapistore/table.c				\
-							pyopenchange/mapistore/errors.c				\
-							mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION)	\
-							mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Compiling and linking $@"
-	@$(CC) $(PYTHON_CFLAGS) $(CFLAGS) -fno-strict-aliasing $(DSOOPT) $(LDFLAGS) -o $@ $^ $(PYTHON_LIBS) $(LIBS)
-
-
-pyopenchange/mapistore/errors.c: pyopenchange/mapistore/gen_errors.py mapiproxy/libmapistore/mapistore_errors.h
-	pyopenchange/mapistore/gen_errors.py mapiproxy/libmapistore/mapistore_errors.h $@
-
-pyopenchange-clean:
-	rm -f pyopenchange/*.o
-	rm -f pyopenchange/*.pyc
-	rm -f pyopenchange/mapistore/errors.c
-	rm -f $(pythonscriptdir)/openchange/mapi.$(SHLIBEXT)
-	rm -f $(pythonscriptdir)/openchange/mapistore.$(SHLIBEXT)
-
-clean:: pyopenchange-clean
-
-pyopenchange-install:
-	$(INSTALL) -d $(DESTDIR)$(PYCDIR)/openchange
-	$(INSTALL) -m 0755 $(pythonscriptdir)/openchange/mapi.$(SHLIBEXT) $(DESTDIR)$(PYCDIR)/openchange
-#	$(INSTALL) -m 0755 $(pythonscriptdir)/openchange/ocpf.$(SHLIBEXT) $(DESTDIR)$(PYCDIR)/openchange
-	$(INSTALL) -m 0755 $(pythonscriptdir)/openchange/mapistore.$(SHLIBEXT) $(DESTDIR)$(PYCDIR)/openchange
-
-pyopenchange-uninstall:
-	rm -f $(DESTDIR)$(PYCDIR)/openchange/mapi.$(SHLIBEXT)
-	rm -f $(DESTDIR)$(PYCDIR)/openchange/ocpf.$(SHLIBEXT)
-	rm -f $(DESTDIR)$(PYCDIR)/openchange/mapistore.$(SHLIBEXT)
-
-
 ###################
 # nagios plugin
 ###################
@@ -2053,7 +1740,6 @@ doxygen:
 	$(DOXYGEN) libmapi/Doxyfile
 	$(DOXYGEN) libmapiadmin/Doxyfile
 	$(DOXYGEN) libocpf/Doxyfile
-	$(DOXYGEN) libmapi++/Doxyfile
 	$(DOXYGEN) mapiproxy/Doxyfile
 	$(DOXYGEN) utils/mapitest/Doxyfile
 	$(DOXYGEN) mapiproxy/libmapistore/Doxyfile
@@ -2061,7 +1747,6 @@ doxygen:
 	cp -f doc/doxygen/pictures/* apidocs/html/overview
 	cp -f doc/doxygen/pictures/* apidocs/html/libmapi
 	cp -f doc/doxygen/pictures/* apidocs/html/libmapiadmin
-	cp -f doc/doxygen/pictures/* apidocs/html/libmapi++
 	cp -f doc/doxygen/pictures/* apidocs/html/libocpf
 	cp -f doc/doxygen/pictures/* apidocs/html/mapitest
 	cp -f doc/doxygen/pictures/* apidocs/html/mapiproxy
@@ -2103,61 +1788,6 @@ coverage-clean::
 	rm -f test.gcno
 
 clean:: coverage-clean
-
-####################################
-# Qt4 widgets
-####################################
-openchange_qt4:	qt-lib qt-demoapp
-
-qt-lib: libqtmapi
-
-qt-demoapp: qt/demo/demoapp.moc qt/demo/demoapp
-
-# No install yet - we need to finish this first
-
-qt-clean::
-	rm -f qt/demo/demoapp
-	rm -f qt/demo/*.o
-	rm -f qt/lib/*.o
-	rm -f qt/demo/*.moc
-	rm -f qt/lib/*.moc
-	rm -f libqtmapi*
-
-clean:: qt-clean
-
-qt/demo/demoapp.moc:	qt/demo/demoapp.h
-	@$(MOC) -i qt/demo/demoapp.h -o qt/demo/demoapp.moc
-
-qt/lib/foldermodel.moc:	qt/lib/foldermodel.h
-	@$(MOC) -i qt/lib/foldermodel.h -o qt/lib/foldermodel.moc
-
-qt/lib/messagesmodel.moc:	qt/lib/messagesmodel.h
-	@$(MOC) -i qt/lib/messagesmodel.h -o qt/lib/messagesmodel.moc
-
-libqtmapi: libmapi 					\
-	qt/lib/foldermodel.moc				\
-	qt/lib/messagesmodel.moc			\
-	libqtmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-
-LIBQTMAPI_SO_VERSION = 0
-
-libqtmapi.$(SHLIBEXT).$(PACKAGE_VERSION): 	\
-	qt/lib/foldermodel.o			\
-	qt/lib/messagesmodel.o
-	@echo "Linking $@"
-	@$(CXX) $(DSOOPT) $(CXX11FLAGS) $(CXXFLAGS) $(LDFLAGS) -Wl,-soname,libqtmapi.$(SHLIBEXT).$(LIBQTMAPI_SO_VERSION) -o $@ $^ $(LIBS)
-
-
-qt/demo/demoapp: qt/demo/demoapp.o 				\
-	qt/demo/main.o 					\
-	libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) 		\
-	libmapipp.$(SHLIBEXT).$(PACKAGE_VERSION)	\
-	libqtmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CXX) $(CXX11FLAGS) $(CXXFLAGS) -o $@ $^ $(QT4_LIBS) $(LDFLAGS) $(LIBS)
-	# we don't yet install this...
-	ln -sf libqtmapi.$(SHLIBEXT).$(PACKAGE_VERSION) libqtmapi.$(SHLIBEXT)
-	ln -sf libqtmapi.$(SHLIBEXT).$(PACKAGE_VERSION) libqtmapi.$(SHLIBEXT).$(LIBQTMAPI_SO_VERSION)
 
 # This should be the last line in the makefile since other distclean rules may
 # need config.mk

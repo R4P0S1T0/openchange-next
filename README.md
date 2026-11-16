@@ -79,7 +79,7 @@ Debian's Rust.
 ## Legacy code
 
 Components of the original OpenChange that the new direction does not use (PHP,
-Qt and C++ bindings, exchange2ical, the RPC/TCP-only modules, old packaging) were
+Qt and C++ bindings, the RPC/TCP-only modules, old packaging) were
 removed in November 2026. They remain available at the git tag `legacy-2026-11`.
 
 ## Licence

@@ -17,7 +17,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 LIBRARIES = tuple(name + '.so.0' for name in (
-    'libmapi', 'libmapipp', 'libocpf', 'libmapiadmin',
+    'libmapi', 'libocpf', 'libmapiadmin',
     'libmapiproxy', 'libmapiserver', 'libmapistore',
 ))
 MODULES = tuple(name + '.so' for name in (

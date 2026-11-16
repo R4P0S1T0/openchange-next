@@ -626,29 +626,6 @@ dnl Additional thread library detection is required here:
 dnl FreeBSD (pthreads), glib etc.
 
 dnl ###########################################################################
-dnl libmapi++ dependencies
-dnl ###########################################################################
-
-dnl ---------------------------------------------------------------------------
-dnl Check for g++
-dnl ---------------------------------------------------------------------------
-AC_CACHE_CHECK([C++ compiler availability], [ac_cv_libmapixx_gxx_works],
-	       [
-		AC_LANG_PUSH([C++])
-		AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int main() { return 0; }]])], 
-				  [ac_cv_libmapixx_gxx_works=yes],
-				  [ac_cv_libmapixx_gxx_works=no])
-		AC_LANG_POP([C++])
-		])
-
-if test x"$ac_cv_libmapixx_gxx_works" = "xyes"; then
-   AC_PROG_CXX 
-   libmapixx=1
-   OC_RULE_ADD(libmapixx, LIBS)
-fi
-
-
-dnl ###########################################################################
 dnl libocpf dependencies
 dnl ###########################################################################
 
@@ -763,8 +740,6 @@ if test x"$enable_libpopt" = x"yes"; then
 	ocnotify=1
 	openchangemapidump=1
 	schemaIDGUID=1
-	check_fasttransfer=1
-	test_asyncnotif=1
 fi
 AC_SUBST(MAPISTORE_TEST)
 OC_RULE_ADD(openchangeclient, TOOLS)
@@ -779,8 +754,6 @@ OC_RULE_ADD(mapiprofile, TOOLS)
 OC_RULE_ADD(openchangemapidump, TOOLS)
 OC_RULE_ADD(schemaIDGUID, TOOLS)
 
-OC_RULE_ADD(check_fasttransfer, TOOLS)
-OC_RULE_ADD(test_asyncnotif, TOOLS)
 
 
 dnl --------------------------------------------------------------------------
@@ -875,29 +848,10 @@ AC_ARG_WITH(modulesdir,
 AC_SUBST(modulesdir)
 
 dnl ##########################################################################
-dnl Python bindings dependencies
+dnl Python install directory
 dnl ##########################################################################
-AC_ARG_ENABLE(pyopenchange, AS_HELP_STRING([--enable-pyopenchange],
-			   [build Python bindings for libmapi]),
-			   enable_pyopenchange="$enableval",
-			   enable_pyopenchange=no)
 PYCDIR="$pyexecdir"
 AC_SUBST(PYCDIR)
-
-PYOPENCHANGEALL=
-PYOPENCHANGEINSTALL=
-PYOPENCHANGEUNINSTALL=
-
-if test x$enable_pyopenchange = xyes ; then
-	dnl Enable pyopenchange by default
-	PYOPENCHANGEALL="$PYOPENCHANGEALL pyopenchange"
-	PYOPENCHANGEINSTALL="$PYOPENCHANGEALLINSTALL pyopenchange-install"
-	PYOPENCHANGEUNINSTALL="$PYOPENCHANGEUNINSTALL pyopenchange-uninstall"
-fi
-
-AC_SUBST(PYOPENCHANGEALL)
-AC_SUBST(PYOPENCHANGEINSTALL)
-AC_SUBST(PYOPENCHANGEUNINSTALL)
 
 
 dnl ##########################################################################
@@ -925,35 +879,6 @@ if test x"$found_subunit" = x"yes"; then
 else
 	have_subunit="no"
 fi
-
-dnl ##########################################################################
-dnl Qt4 support
-dnl ##########################################################################
-AC_ARG_ENABLE(openchange-qt4,
-              AS_HELP_STRING([--enable-openchange-qt4],
-                             [Compile OpenChange Qt4 wrapper.]),
-              enable_openchange_qt4=$enableval,
-              enable_openchange_qt4="no")
-if test x$enable_openchange_qt4 = xyes; then
-  PKG_CHECK_MODULES(Qt4,
-                    QtCore >= 4.3.0 QtGui >= 4.3.0)
-  MOC=`$PKG_CONFIG --variable=moc_location QtCore`
-elif test x$enable_openchange_qt4 = xtry; then
-  PKG_CHECK_MODULES(Qt4,
-                    QtCore >= 4.3.0 QtGui >= 4.3.0,
-                    [enable_openchange_qt4="yes"
-                     MOC=`$PKG_CONFIG --variable=moc_location QtCore`],
-                    [enable_openchange_qt4="no"])
-fi
-
-AC_SUBST(Qt4_CFLAGS)
-AC_SUBST(Qt4_LIBS)
-AC_SUBST(MOC)
-
-if test "x$enable_openchange_qt4" = "xyes"; then
-   OPENCHANGE_QT4="openchange_qt4"
-fi
-AC_SUBST(OPENCHANGE_QT4)
 
 dnl ##########################################################################
 dnl MAPI/HTTP service (Rust, vendored crates)
@@ -997,8 +922,8 @@ dnl ***********************
 dnl Makefiles 
 dnl ***********************
 AC_CONFIG_FILES([config.mk libmapi.pc libmapiadmin.pc libocpf.pc mapiproxy/libmapiproxy.pc
-		 mapiproxy/libmapiserver.pc mapiproxy/libmapistore.pc libmapi++.pc
-		 Doxyfile libmapi++/Doxyfile libocpf/Doxyfile libmapiadmin/Doxyfile
+		 mapiproxy/libmapiserver.pc mapiproxy/libmapistore.pc
+		 Doxyfile libocpf/Doxyfile libmapiadmin/Doxyfile
 		 libmapi/Doxyfile mapiproxy/Doxyfile utils/mapitest/Doxyfile
 		 mapiproxy/libmapistore/Doxyfile])
 AC_OUTPUT
@@ -1011,7 +936,6 @@ dnl ##########################################################################
 OC_SETVAL(libmapi)
 OC_SETVAL(libmapiadmin)
 OC_SETVAL(libocpf)
-OC_SETVAL(libmapixx)
 
 OC_SETVAL(openchangeclient)
 OC_SETVAL(mapipropsdump)
@@ -1037,7 +961,6 @@ OpenChange Configuration (Please review)
 	   * OpenChange Libraries:
 	     - libmapi (C library):	$enable_libmapi
 		      Thread support:	$enable_pthread $enable_thread_lib
-	     - libmapi++ (C++ library):	$enable_libmapixx
 	     - libmapiadmin:		$enable_libmapiadmin
 	     - libocpf:			$enable_libocpf
 
@@ -1069,9 +992,6 @@ OpenChange Configuration (Please review)
 	     - coverage tests:		$use_cov
 
 	   * OpenChange Documentation:	$enable_doxygen
-
-	   * OpenChange Bindings:
-	     - Qt4:			$enable_openchange_qt4
 
 	   * Installation prefix:	$prefix
 
