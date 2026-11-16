@@ -42,6 +42,13 @@ daemon, the C core or the tests that pass today.
    status per milestone (M1–M5 done, M6 next), how to build and test, where the docs
    are, licence. The 2008 goals text goes away.
 
+## Accepted behaviour change
+
+The Samba-hosted `dcesrv_mapiproxy` (RPC/TCP, unsupported) no longer has an RFR
+server module: in its server mode, RfrGetNewDSA/RfrGetFQDNFromLegacyDN are no longer
+answered and it no longer tries to load the module. Proxy mode is unchanged. The
+MAPI/HTTP service never used it.
+
 ## Left to the builder
 
 Exact `Makefile`/`configure.ac` edits; which doc paragraphs referencing removed code to

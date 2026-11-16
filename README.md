@@ -58,7 +58,7 @@ Debian 13. Dependencies are listed in
 build also needs Samba 4.22.10's `pidl` on `PATH` (the workflow shows how).
 
 ```sh
-./autogen.sh && ./configure --with-samba=/usr
+./autogen.sh && ./configure --with-samba=/usr --enable-mapihttp   # without the flag the service is not built
 make -j"$(nproc)" all
 make check-emsmdb check-oc-emsmdb check-mapihttp check-imap-backend   # and the other check-* targets in the workflow
 python3 -m unittest discover -s python/openchange/tests

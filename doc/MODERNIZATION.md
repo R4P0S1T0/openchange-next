@@ -732,7 +732,6 @@ make check-ocpf-lexer
 make check-mapiadmin
 make check-mapiproxy-registries
 make check-mapiproxy-rpc
-make check-asyncemsmdb
 make check-nspi check-emsmdb
 make mapiproxy
 make check-mpm-pack
