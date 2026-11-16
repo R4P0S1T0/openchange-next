@@ -967,8 +967,6 @@ mapiproxy-servers-clean::
 	rm -f mapiproxy/servers/default/nspi/*.gcno mapiproxy/servers/default/nspi/*.gcda
 	rm -f mapiproxy/servers/default/emsmdb/*.o mapiproxy/servers/default/emsmdb/*.po
 	rm -f mapiproxy/servers/default/emsmdb/*.gcno mapiproxy/servers/default/emsmdb/*.gcda
-	rm -f mapiproxy/servers/default/rfr/*.o mapiproxy/servers/default/rfr/*.po
-	rm -f mapiproxy/servers/default/rfr/*.gcno mapiproxy/servers/default/rfr/*.gcda
 	rm -f mapiproxy/servers/*.so
 
 clean:: mapiproxy-servers-clean
