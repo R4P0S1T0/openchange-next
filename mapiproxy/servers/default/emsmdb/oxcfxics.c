@@ -1446,6 +1446,7 @@ static void oxcfxics_push_folderChange(struct emsmdbp_context *emsmdbp_ctx, stru
 				talloc_free(header_data_pointers);
 				continue;
 			}
+			OC_DEBUG(5, "hierarchy sync: folder 0x%.16"PRIx64" in 0x%.16"PRIx64"\n", eid, folder_object->object.folder->folderID);
 			emsmdbp_replid_to_guid(emsmdbp_ctx, owner, eid & 0xffff, &replica_guid);
 			RAWIDSET_push_guid_glob(sync_data->eid_set, &replica_guid, (eid >> 16) & 0x0000ffffffffffff);
 			sync_data->present_fids = talloc_realloc(sync_data, sync_data->present_fids, uint64_t, sync_data->present_count + 1);
