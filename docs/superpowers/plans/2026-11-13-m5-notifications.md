@@ -131,8 +131,8 @@
 
 ### Task 6: Lab acceptance, docs, cleanup
 
-- [ ] **Step 1:** Build without sanitizers (`labmake.sh all mapiproxy/servers/liboc_emsmdb.so bin/openchange-mapihttpd`), deploy, restart; reopen Outlook (default profile, our session only).
-- [ ] **Step 2:** Acceptance per spec (each must appear within about a minute, Outlook not restarted): new mail by SMTP; mail filed by a Sieve rule (`ana@` → Archive); read/unread and flag changed in SOGo; move and delete in SOGo; folder created, renamed, deleted in SOGo. Then kill the watcher's IMAP connection on the lab (`doveadm kick` of the master session for `teste`) and repeat one case (fallback poll).
-- [ ] **Step 3:** Record in `doc/MODERNIZATION.md` ("M5: notifications"): mechanism, timings, limits.
+- [x] **Step 1:** Build without sanitizers (`labmake.sh all mapiproxy/servers/liboc_emsmdb.so bin/openchange-mapihttpd`), deploy, restart; reopen Outlook (default profile, our session only).
+- [x] **Step 2:** Acceptance per spec (each must appear within about a minute, Outlook not restarted): new mail by SMTP; mail filed by a Sieve rule (`ana@` → Archive); read/unread and flag changed in SOGo; move and delete in SOGo; folder created, renamed, deleted in SOGo. Then kill the watcher's IMAP connection on the lab (`doveadm kick` of the master session for `teste`) and repeat one case (fallback poll).
+- [x] **Step 3:** Record in `doc/MODERNIZATION.md` ("M5: notifications"): mechanism, timings, limits.
 - [ ] **Step 4:** Cleanup: stop and remove the `grommunio` container (`machinectl poweroff grommunio`, remove `/srv/machines/grommunio`, the `/var/lib/machines` link, `/etc/systemd/nspawn/grommunio.nspawn`), `/etc/nginx/conf.d/m5-gromox-route.conf`, restore `proxy_pass http://127.0.0.1:8080;` and drop the `m5-route` log in the `mail` site (backup `/root/nginx-mail.pre-m5-gromox`), remove the `grommunio-test` site and CA, `ip addr del` of the veth address; in Outlook (our session) remove the `ref@` account from profile "Outlook" and delete profile "Referencia"; remove `/var/lib/openchange/spike-notify` if present.
 - [ ] **Step 5: Commit** `docs: record M5 acceptance`; then superpowers:finishing-a-development-branch.

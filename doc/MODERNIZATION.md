@@ -534,6 +534,57 @@ Known limits:
 - Scripts written before the id fix keep their small ids; on the lab the script was reset
   and Outlook's "keep the client rules" prompt re-sent them.
 
+## M5: Outlook sees mailbox changes without a restart (2026-11-16)
+
+Branch `m5` (spec `docs/superpowers/specs/2026-11-13-m5-notifications-design.md`, plan
+`docs/superpowers/plans/2026-11-13-m5-notifications.md`): a change made outside Outlook (SOGo,
+a phone, a Sieve rule, SMTP delivery) reaches an open cached-mode Outlook in seconds.
+
+- **Detection (Rust, `mapihttpd/src/imapwatch.rs`):** one IMAP connection per user with a live
+  session, as the Dovecot master user on loopback, started at Connect. `NOTIFY` (RFC 5465) STATUS
+  and MailboxName events, coalesced for 1 s; without NOTIFY, LIST-STATUS every 60 s. After a
+  dropped connection it reconnects (1 s to 60 s backoff) and reports what changed meanwhile.
+- **Delivery (C, `emsmdbp_notify.c`):** Outlook keeps a deep hierarchy table open on the
+  mailbox root. A changed folder goes out as RopNotify TableModified with the folder's row
+  (Outlook synchronizes the folder when its PidTagLocalCommitTimeMax is newer); the pending flag
+  wakes the session's NotificationWait.
+- **Folders added, renamed or deleted:** the row added or deleted alone is not enough, Outlook
+  leaves it to its next hierarchy synchronization. The parent folder (the IPM subtree for a
+  top-level mailbox) also goes out with a PidTagHierRev newer than any before, kept in the
+  session: that makes Outlook synchronize the hierarchy at once.
+- **Hierarchy synchronization reports deletions:** a whole-mailbox walk that met every folder
+  reports as deleted each folder the store indexed whose fmid and URI it did not meet
+  (`list_folders` on the indexing backends). This also removes folders deleted while no session
+  watched them, and folders Outlook learnt from a notification only. Not "in IdsetGiven but not
+  met": Outlook's IdsetGiven holds folders it created with its own reserved IDs that the store
+  never kept, and deleting those makes Outlook recreate them on every synchronization.
+- **A folder gone from the backend** that Outlook still synchronizes answers
+  `MAPI_E_NOT_FOUND` to RopSyncConfigure; it aborted the whole daemon before.
+
+Outlook acceptance (lab, Outlook M365 classic 16.0.19127 over MAPI/HTTP, account `teste`,
+2026-11-16, Outlook not restarted; server changes made with `doveadm`, which is what SOGo does
+over IMAP; each shown within 30 s):
+
+1. New mail by SMTP: in the Inbox.
+2. Mail from ana filed by the Outlook rule (Sieve) into Archive: Archive's count went 3 -> 4.
+3. Read and flag changed on the server: Archive back to 3 unread, Inbox message flagged.
+4. Message moved to Inbox/Clientes and another expunged: both left the Inbox list.
+5. Folders: subfolder and top-level folder created, renamed and deleted; one created 2 s after
+   Outlook reconnected; one deleted while the daemon was down (gone on reconnect).
+6. After `doveadm kick` of the watcher's IMAP connection: new mail still shown.
+
+Limits:
+
+- A folder deleted from the store keeps its index row, so it goes out as deleted on every
+  whole-mailbox synchronization (Outlook ignores IDs it does not hold).
+- The newer PidTagHierRev lives in the session only (otherwise it is the creation time of an
+  openchangedb folder, and absent for an IMAP one); a new session begins with a full hierarchy
+  synchronization anyway.
+- Folders Outlook creates itself (hidden, client IDs) that the store did not keep stay only in
+  Outlook; not investigated yet.
+- One watcher per user on the C worker thread; the cost per change is one folder property read
+  per open deep hierarchy table.
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
