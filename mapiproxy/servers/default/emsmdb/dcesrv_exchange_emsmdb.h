@@ -62,6 +62,7 @@ struct emsmdbp_context {
 	/* M5 (emsmdbp_notify.c): deep hierarchy tables Outlook keeps open, and the RopNotify replies for them */
 	struct emsmdbp_notify_table		*notify_tables;
 	struct emsmdbp_notify_entry		*notify_queue;
+	struct emsmdbp_hierrev			*hierrev;	/* folders whose subfolders changed in this session */
 	uint32_t				notify_room;	/* bytes the Execute in progress may still add; 0 = no bound */
 };
 
@@ -332,6 +333,7 @@ int		      emsmdbp_notify_folder_changed(struct emsmdbp_context *, uint64_t, enu
 int		      emsmdbp_notify_mailbox_changed(struct emsmdbp_context *, const char *, char, enum emsmdbp_folder_change);
 enum MAPISTATUS       emsmdbp_fid_for_mailbox(struct emsmdbp_context *, const char *, char, uint64_t *);
 bool		      emsmdbp_notify_pending(struct emsmdbp_context *);
+const struct FILETIME *emsmdbp_notify_hierrev(struct emsmdbp_context *, uint64_t);
 enum MAPISTATUS       emsmdbp_notify_append(struct emsmdbp_context *, struct mapi_response *, uint32_t *, uint16_t *, uint32_t);
 
 /* definitions from emsmdbp_provisioning.c */

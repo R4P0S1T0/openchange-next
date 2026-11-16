@@ -3242,10 +3242,10 @@ static int emsmdbp_object_get_properties_mapistore_root(TALLOC_CTX *mem_ctx, str
 				/* Public folder? Then, use logged user */
 				owner = emsmdbp_ctx->username;
 			}
-			if (properties->aulPropTag[i] == PidTagHierRev) {
-				properties->aulPropTag[i] = PidTagCreationTime;
-			}
-			retval = openchangedb_get_folder_property(data_pointers, emsmdbp_ctx->oc_ctx, owner, properties->aulPropTag[i], folder->folderID, data_pointers + i);
+			/* Read into a copy: properties may be a table's columns, which must keep PidTagHierRev. */
+			retval = openchangedb_get_folder_property(data_pointers, emsmdbp_ctx->oc_ctx, owner,
+								  properties->aulPropTag[i] == PidTagHierRev ? (enum MAPITAGS) PidTagCreationTime : properties->aulPropTag[i],
+								  folder->folderID, data_pointers + i);
 		}
 		retvals[i] = retval;
 	}
@@ -3389,6 +3389,20 @@ _PUBLIC_ void **emsmdbp_object_get_properties(TALLOC_CTX *mem_ctx, struct emsmdb
 			/* folder or messages handled by mapistore */
 			retval = emsmdbp_object_get_properties_mapistore(mem_ctx, emsmdbp_ctx, object, properties, data_pointers, retvals);
 			break;
+		}
+	}
+
+	/* A folder whose subfolders changed during the session: its newer PidTagHierRev is what makes
+	   cached-mode Outlook synchronize the hierarchy (emsmdbp_notify.c). */
+	if (retval == MAPISTORE_SUCCESS && object && object->type == EMSMDBP_OBJECT_FOLDER) {
+		const struct FILETIME	*hierrev = emsmdbp_notify_hierrev(emsmdbp_ctx, object->object.folder->folderID);
+		uint32_t		i;
+
+		for (i = 0; hierrev && i < properties->cValues; i++) {
+			if (properties->aulPropTag[i] == PidTagHierRev) {
+				data_pointers[i] = talloc_memdup(data_pointers, hierrev, sizeof (*hierrev));
+				retvals[i] = data_pointers[i] ? MAPI_E_SUCCESS : MAPI_E_NOT_ENOUGH_MEMORY;
+			}
 		}
 	}
 

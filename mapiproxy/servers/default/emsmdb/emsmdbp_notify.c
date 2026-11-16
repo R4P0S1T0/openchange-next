@@ -216,6 +216,58 @@ _PUBLIC_ bool emsmdbp_notify_pending(struct emsmdbp_context *ctx)
 	return ctx && ctx->notify_queue;
 }
 
+struct emsmdbp_hierrev {
+	struct emsmdbp_hierrev	*prev, *next;
+	uint64_t		fid;
+	struct FILETIME		time;
+};
+
+/**
+   \details The PidTagHierRev a folder got when its subfolders changed during the session
+
+   \param ctx the session's EMSMDB provider context
+   \param fid the folder
+
+   \return the time, or NULL when the folder's subfolders did not change
+ */
+_PUBLIC_ const struct FILETIME *emsmdbp_notify_hierrev(struct emsmdbp_context *ctx, uint64_t fid)
+{
+	struct emsmdbp_hierrev *h;
+
+	for (h = ctx ? ctx->hierrev : NULL; h; h = h->next) {
+		if (h->fid == fid) return &h->time;
+	}
+	return NULL;
+}
+
+/* A subfolder of parent_fid was added or deleted: cached-mode Outlook synchronizes the hierarchy when a
+   row of its deep hierarchy table shows a newer PidTagHierRev (a row added or deleted alone it leaves to
+   the next synchronization), so the parent gets one, strictly newer than any before, and its row goes
+   out. shortcut: the time lives in the session only; a new session starts with a full hierarchy
+   synchronization anyway. */
+static void emsmdbp_notify_hierarchy_changed(struct emsmdbp_context *ctx, uint64_t parent_fid)
+{
+	static NTTIME		last;
+	struct emsmdbp_hierrev	*h;
+	struct timeval		tv;
+	NTTIME			now;
+
+	gettimeofday(&tv, NULL);
+	now = timeval_to_nttime(&tv);
+	now = now > last ? now : last + 1;
+	last = now;
+	for (h = ctx->hierrev; h && h->fid != parent_fid; h = h->next);
+	if (!h) {
+		h = talloc_zero(ctx, struct emsmdbp_hierrev);
+		if (!h) return;
+		h->fid = parent_fid;
+		DLIST_ADD(ctx->hierrev, h);
+	}
+	h->time.dwLowDateTime = now & 0xffffffff;
+	h->time.dwHighDateTime = now >> 32;
+	emsmdbp_notify_folder_changed(ctx, parent_fid, EMSMDBP_FOLDER_MODIFIED);
+}
+
 /**
    \details Move queued replies into an Execute response, oldest first, while they fit
 
@@ -354,6 +406,19 @@ _PUBLIC_ int emsmdbp_notify_mailbox_changed(struct emsmdbp_context *ctx, const c
 	   more, or Outlook's next hierarchy synchronization would bring it back. */
 	if (kind == EMSMDBP_FOLDER_DELETED && !(delimiter && strchr(mailbox, delimiter))) {
 		emsmdbp_mailbox_provision(ctx, ctx->username);
+	}
+	if (kind != EMSMDBP_FOLDER_MODIFIED) {
+		const char	*last = delimiter ? strrchr(mailbox, delimiter) : NULL;
+		char		*parent = last ? talloc_strndup(NULL, mailbox, last - mailbox) : NULL;
+		uint64_t	parent_fid = 0;
+
+		/* A top-level mailbox's parent is the IPM subtree. */
+		if (last ? (parent && emsmdbp_fid_for_mailbox(ctx, parent, delimiter, &parent_fid) == MAPI_E_SUCCESS)
+			 : openchangedb_get_SystemFolderID(ctx->oc_ctx, ctx->username, EMSMDBP_TOP_INFORMATION_STORE,
+							   &parent_fid) == MAPI_E_SUCCESS) {
+			emsmdbp_notify_hierarchy_changed(ctx, parent_fid);
+		}
+		talloc_free(parent);
 	}
 	return queued;
 }

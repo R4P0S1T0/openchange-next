@@ -1243,7 +1243,9 @@ static int test_notify_new_top_level_mailbox(void)
     oc_emsmdb_session *session;
     const char *name, *prefix;
     struct EcDoRpc_MAPI_REPL note;
-    uint64_t fid = 0;
+    uint64_t fid = 0, ipm = 0;
+    const struct FILETIME *rev;
+    NTTIME added_rev;
     /* The fake needs the imap:// namespace to itself; an installed IMAP backend (a deployed lab) would
        open Nova instead. */
     if (mapistore_backend_registered("imap") == MAPISTORE_SUCCESS) {
@@ -1263,9 +1265,14 @@ static int test_notify_new_top_level_mailbox(void)
     nova_created = true;
     CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_ADDED) == 1);
     CHECK(openchangedb_get_fid(session->ctx->oc_ctx, "imap://alice%40example.invalid/Nova/", &fid) == MAPI_E_SUCCESS && fid);
-    CHECK(execute_notifies(session, 4096, &note) == 1);
+    /* The row, then its parent's (the IPM subtree): a newer PidTagHierRev is what makes Outlook sync. */
+    CHECK(openchangedb_get_SystemFolderID(session->ctx->oc_ctx, session->ctx->username, EMSMDBP_TOP_INFORMATION_STORE, &ipm) == MAPI_E_SUCCESS);
+    CHECK(execute_notifies(session, 4096, &note) == 2);
     CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_ADDED);
     CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.HierarchyTableChangeUnion.HierarchyRowAddedNotification.FID == fid);
+    CHECK((rev = emsmdbp_notify_hierrev(session->ctx, ipm)) != NULL);
+    added_rev = ((NTTIME) rev->dwHighDateTime << 32) | rev->dwLowDateTime;
+    CHECK(emsmdbp_notify_hierrev(session->ctx, fid) == NULL);
     /* Once provisioned it is a known folder: a change is a modified row. */
     CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_MODIFIED) == 1);
     CHECK(execute_notifies(session, 4096, &note) == 1);
@@ -1273,8 +1280,10 @@ static int test_notify_new_top_level_mailbox(void)
     /* Deleted on the server: the row goes, and so does the folder (else Outlook's next sync brings it back). */
     nova_created = false;
     CHECK(emsmdbp_notify_mailbox_changed(session->ctx, "Nova", '/', EMSMDBP_FOLDER_DELETED) == 1);
-    CHECK(execute_notifies(session, 4096, &note) == 1);
+    CHECK(execute_notifies(session, 4096, &note) == 2);
     CHECK(note.u.mapi_Notify.NotificationData.HierarchyTableChange.TableEvent == TABLE_ROW_DELETED);
+    CHECK((rev = emsmdbp_notify_hierrev(session->ctx, ipm)) != NULL);
+    CHECK((((NTTIME) rev->dwHighDateTime << 32) | rev->dwLowDateTime) > added_rev);
     CHECK(openchangedb_get_fid(session->ctx->oc_ctx, "imap://alice%40example.invalid/Nova/", &fid) != MAPI_E_SUCCESS);
     oc_emsmdb_disconnect(session);
     return 0;
