@@ -1,27 +1,21 @@
-# Development continuity — 2026-10-30
+# Development continuity — 2026-11-16
 
-## Paused by the maintainer — resume next week
+## Current state — 2026-11-16
 
-The maintainer explicitly paused work on 2026-10-30 after reaching the weekly
-usage limit. Resume only when the maintainer returns; do not start more work
-or trigger further CI during this pause.
-
-- Published `origin/main`: `29a07ea1a0acdcccb1ad3d4844a865e430e7045f`.
-- PR #2 is merged and closed; `m1-rust` remains at `de5387f6`.
-- All ten pre-merge push/PR checks passed. The merged result also passed
-  83 Rust tests without c-backend and 84 with it. The separate main-push CI
-  was not inspected before pausing; check its result when resuming.
-- Security updates are authorized and vendored: bytes 1.11.1, quick-xml 0.41.0,
-  Debian 13 / Rust 1.85 retained. Audit: zero vulnerabilities, two documented
-  informational warnings; no suppressions.
-- Do not redo Tasks 1–7. M1 lab acceptance ran on 2026-11-03 with Microsoft
-  365 Outlook (partial; see the MODERNIZATION.md section of that date). Still
-  open: Outlook 2016/2019. M2a (directory + successful Connect, branch `m2a`)
-  ran in the lab on 2026-11-03: Connect succeeds, RopLogon fails for lack of a
-  mailbox backend. Next: M2c (minimal store so the profile opens), then M2b
-  (NSPI over MAPI/HTTP).
-  Real Connect remains deliberately fail-closed until M2.
-- Preserve existing worktrees, ignored evidence and the untracked draft plan.
+- M1–M5 are done and merged on `main` (M5: cached mode with live changes,
+  accepted in the lab with Outlook on 2026-11-16). Details per milestone are in
+  [MODERNIZATION.md](MODERNIZATION.md).
+- Repository cleanup merged on 2026-11-16: legacy components outside the new
+  direction were removed; they remain at tag `legacy-2026-11`
+  ([design](../docs/superpowers/specs/2026-11-16-repo-cleanup-design.md)).
+- Next: M6, calendar and contacts stored in SOGo over CalDAV/CardDAV, free/busy
+  and meeting requests (see the roadmap). The read-only calendar plan in
+  `docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md` is its first slice.
+- Open findings: ghost OpenFolder requests for fids 0xa517…/0xa917… seen on
+  2026-11-16 (not stored anywhere on the server, not reproduced since); StageB
+  is indexed twice (0x0717a1 and 0x0717a2); a folder deleted with `doveadm
+  mailbox delete` did not reach an open Outlook within 75 s.
+- The sections below are the hand-off as of 2026-10-30 and are kept as history.
 
 ## Next step for the next agent
 
