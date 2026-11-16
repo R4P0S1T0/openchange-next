@@ -580,8 +580,12 @@ Limits:
 - The newer PidTagHierRev lives in the session only (otherwise it is the creation time of an
   openchangedb folder, and absent for an IMAP one); a new session begins with a full hierarchy
   synchronization anyway.
-- Folders Outlook creates itself (hidden, client IDs) that the store did not keep stay only in
-  Outlook; not investigated yet.
+- Folders Outlook uploads itself (RopSyncImportHierarchyChange) with no PidTagContainerClass were
+  answered with success but never stored; fixed (they are now kept natively in openchangedb).
+  Those lost before the fix stay only in the Outlook caches that made them; a new OST does not
+  bring them back (checked on the lab: the reset Outlook synced with no errors).
+- C code that logs with printf wrote to a block-buffered stdout under systemd, so those lines
+  reached the journal late and cut in 4 KiB pieces; stdout is now line-buffered.
 - One watcher per user on the C worker thread; the cost per change is one folder property read
   per open deep hierarchy table.
 

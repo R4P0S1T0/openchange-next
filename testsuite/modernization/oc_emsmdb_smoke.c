@@ -318,6 +318,62 @@ static int test_create_native_subfolder(void)
     return 0;
 }
 
+static void source_key(uint8_t *key, const struct GUID *replica, uint64_t fid)
+{
+    int i;
+    memcpy(key, replica, 16);
+    for (i = 0; i < 6; i++) key[16 + i] = (fid >> (16 + 8 * i)) & 0xff;
+}
+
+/* Cached Outlook uploads its own folders (RopSyncImportHierarchyChange); one without PidTagContainerClass
+   (e.g. "Quick Step Settings") must still be kept, natively. */
+static int test_import_hierarchy_change_without_class(void)
+{
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    struct emsmdbp_object *mailbox, *ipm;
+    struct mapi_handles *fh;
+    struct EcDoRpc_MAPI_REQ req;
+    struct EcDoRpc_MAPI_REPL repl;
+    struct mapi_SPropValue props[3];
+    uint8_t parent_key[22], key[22];
+    struct GUID replica;
+    uint16_t replid, size = 0;
+    uint32_t handles[2];
+    uint64_t fid, found = 0;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    mailbox = emsmdbp_object_mailbox_init(session, session->ctx, ORG_OU "alice-0001", true);
+    CHECK(mailbox != NULL);
+    CHECK(emsmdbp_object_open_folder(session, session->ctx, mailbox, first_fids[4], &ipm) == MAPISTORE_SUCCESS);
+    CHECK(mapi_handles_add(session->ctx->handles_ctx, 0, &fh) == MAPI_E_SUCCESS);
+    CHECK(mapi_handles_set_private_data(fh, ipm) == MAPI_E_SUCCESS);
+    handles[0] = fh->handle; handles[1] = 0xFFFFFFFF;
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_SyncOpenCollector; req.handle_idx = 0;
+    req.u.mapi_SyncOpenCollector.handle_idx = 1; req.u.mapi_SyncOpenCollector.IsContentsCollector = 0;
+    CHECK(EcDoRpc_RopSyncOpenCollector(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+
+    CHECK(openchangedb_get_MailboxReplica(session->ctx->oc_ctx, session->ctx->username, &replid, &replica) == MAPI_E_SUCCESS);
+    CHECK(mapistore_indexing_get_new_folderID(session->ctx->mstore_ctx, &fid) == MAPISTORE_SUCCESS);
+    source_key(parent_key, &replica, first_fids[4]);
+    source_key(key, &replica, fid);
+    props[0].ulPropTag = PidTagParentSourceKey; props[0].value.bin.cb = 22; props[0].value.bin.lpb = parent_key;
+    props[1].ulPropTag = PidTagSourceKey; props[1].value.bin.cb = 22; props[1].value.bin.lpb = key;
+    props[2].ulPropTag = PR_DISPLAY_NAME_UNICODE; props[2].value.lpszW = "Quick Step Settings";
+    handles[0] = handles[1];
+    memset(&req, 0, sizeof req); memset(&repl, 0, sizeof repl);
+    req.opnum = op_MAPI_SyncImportHierarchyChange; req.handle_idx = 0;
+    req.u.mapi_SyncImportHierarchyChange.HierarchyValues.cValues = 3;
+    req.u.mapi_SyncImportHierarchyChange.HierarchyValues.lpProps = props;
+    CHECK(EcDoRpc_RopSyncImportHierarchyChange(session, session->ctx, &req, &repl, handles, &size) == MAPI_E_SUCCESS);
+    CHECK(repl.error_code == MAPI_E_SUCCESS);
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Quick Step Settings", &found)
+        == MAPI_E_SUCCESS && found == fid);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 /* RopGetAddressTypes for an Outlook locale with no template of its own (en-GB) uses the en-US one. */
 static int address_types(uint32_t lcid, enum MAPISTATUS *status, uint16_t *count)
 {
@@ -1297,7 +1353,7 @@ int main(int argc, char **argv)
         test_directory_ldb_opens(argv[1]) ||
         test_connect_success() || test_connect_dn_case_insensitive() || test_connect_other_users_dn() ||
         test_connect_inactive() || test_connect_unknown_user() || test_connect_filter_metacharacters() ||
-        test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() ||
+        test_provision_native_mailbox() || test_provision_idempotent() || test_create_native_subfolder() || test_import_hierarchy_change_without_class() ||
         test_notify_row_modified() || test_notify_without_table() || test_notify_after_table_release() || test_notify_overflow_kept() ||
         test_address_types_locale_fallback() ||
         test_logon_private_mailbox() || test_logon_other_users_dn() ||

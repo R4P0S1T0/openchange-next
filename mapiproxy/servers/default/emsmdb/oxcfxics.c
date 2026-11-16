@@ -2590,8 +2590,9 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportHierarchyChange(TALLOC_CTX *mem_ct
 		aRow.lpProps[aRow.cValues].ulPropTag = PidTagChangeNumber;
 		aRow.lpProps[aRow.cValues].value.d = cn;
 		aRow.cValues++;
+		/* The upload carries all the folder's properties: with no container class, none will follow. */
 		retval = emsmdbp_object_create_folder(emsmdbp_ctx, parent_folder, NULL,
-						      folderID, &aRow, false, &folder_object);
+						      folderID, &aRow, true, &folder_object);
 		if (retval) {
 			mapi_repl->error_code = retval;
 			OC_DEBUG(5, "folder creation failed\n");

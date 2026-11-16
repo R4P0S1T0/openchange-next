@@ -48,6 +48,8 @@ uint32_t oc_emsmdb_init(const char *smb_conf_path)
 
 	if (oc_root != NULL) return MAPI_E_SUCCESS;
 	if (smb_conf_path == NULL || smb_conf_path[0] == '\0') return MAPI_E_INVALID_PARAMETER;
+	/* The C code logs with printf too; on a pipe (journald) stdout is block-buffered and lines arrive late and cut. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	root = talloc_named_const(NULL, 0, "oc_emsmdb");
 	if (root == NULL) return MAPI_E_NOT_ENOUGH_RESOURCES;
 	oc_lp_ctx = loadparm_init(root);
