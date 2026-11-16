@@ -2164,14 +2164,6 @@ qt/demo/demoapp: qt/demo/demoapp.o 				\
 distclean::
 	rm -f config.mk
 
-ocsmanager-install::
-	cd mapiproxy/services/ocsmanager && ./setup.py install --root="$(DESTDIR)/" --prefix=$(prefix)
-
-# TODO: detect pylons and paste in configure, and if they are available,
-# add ocsmanager-install to the install target.
-#
-# install:: ocsmanager-install
-
 .PHONY: check-property-blobs
 check-property-blobs: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/property-blobs-check
 	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/property-blobs-check
