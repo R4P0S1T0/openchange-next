@@ -529,7 +529,6 @@ mapiproxy: 		idl 					\
 			libmapiserver				\
 			libmapistore				\
 			mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) 	\
-			mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT)\
 			mapiproxy-modules			\
 			mapiproxy-servers
 
@@ -542,7 +541,6 @@ mapiproxy-install: 	mapiproxy				\
 			libmapistore-install
 	$(INSTALL) -d $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)
 	$(INSTALL) -m 0755 mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)
-	$(INSTALL) -m 0755 mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT) $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)
 
 mapiproxy-uninstall: 	mapiproxy-modules-uninstall		\
 			mapiproxy-servers-uninstall		\
@@ -550,7 +548,6 @@ mapiproxy-uninstall: 	mapiproxy-modules-uninstall		\
 			libmapiserver-uninstall			\
 			libmapistore-uninstall
 	rm -f $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)/dcesrv_mapiproxy.*
-	rm -f $(DESTDIR)$(DCERPC_SERVER_MODULESDIR)/dcesrv_asyncemsmdb.$(SHLIBEXT)
 	rm -f $(DESTDIR)$(libdir)/libmapiproxy.*
 	rm -f $(DESTDIR)$(includedir)/libmapiproxy.h
 
@@ -562,7 +559,6 @@ mapiproxy-clean:: 	mapiproxy-modules-clean			\
 	rm -f mapiproxy/*.o mapiproxy/*.po
 	rm -f mapiproxy/*.gcno mapiproxy/*.gcda
 	rm -f mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT)
-	rm -f mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT)
 
 clean:: mapiproxy-clean
 
@@ -582,20 +578,8 @@ mapiproxy/dcesrv_mapiproxy.po mapiproxy/dcesrv_mapiproxy_nspi.po mapiproxy/dcesr
 mapiproxy/dcesrv_mapiproxy.c: gen_ndr/ndr_exchange_s.c gen_ndr/ndr_exchange.c
 
 
-mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT):	mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.po	\
-						mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) \
-						libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) \
-						mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) \
-						mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $^ -L. $(LDFLAGS) $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) $(NANOMSG_LIBS)
-
-mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.po: mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/samba_compat.h
-
 $(patsubst %.c,%.po,$(wildcard mapiproxy/servers/default/emsmdb/*.c)): mapiproxy/servers/default/emsmdb/dcesrv_exchange_emsmdb.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/samba_compat.h
 $(patsubst %.c,%.po,$(wildcard mapiproxy/servers/default/nspi/*.c)): mapiproxy/servers/default/nspi/dcesrv_exchange_nsp.h mapiproxy/dcesrv_mapiproxy.h mapiproxy/samba_compat.h
-
-mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c: gen_ndr/ndr_asyncemsmdb_s.c gen_ndr/ndr_asyncemsmdb.c
 
 ###############
 # libmapiproxy
@@ -968,14 +952,12 @@ provision-uninstall: python-uninstall
 	rm -rf $(DESTDIR)$(datadir)/setup/openchangedb
 
 mapiproxy-servers:	mapiproxy/servers/exchange_nsp.$(SHLIBEXT)		\
-			mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)		\
-			mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT)
+			mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT)
 
 mapiproxy-servers-install: mapiproxy-servers provision-install
 	$(INSTALL) -d $(DESTDIR)$(modulesdir)/dcerpc_mapiproxy_server/
 	$(INSTALL) -m 0755 mapiproxy/servers/exchange_nsp.$(SHLIBEXT) $(DESTDIR)$(modulesdir)/dcerpc_mapiproxy_server/
 	$(INSTALL) -m 0755 mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT) $(DESTDIR)$(modulesdir)/dcerpc_mapiproxy_server/
-	$(INSTALL) -m 0755 mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT) $(DESTDIR)$(modulesdir)/dcerpc_mapiproxy_server/
 
 mapiproxy-servers-uninstall: provision-uninstall
 	rm -rf $(DESTDIR)$(modulesdir)/dcerpc_mapiproxy_server
@@ -1032,11 +1014,6 @@ mapiproxy/servers/exchange_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/
 mapiproxy/servers/liboc_emsmdb.$(SHLIBEXT):	mapiproxy/servers/default/emsmdb/oc_emsmdb.po $(EMSMDB_PROVIDER_OBJS) $(EMSMDB_PROVIDER_LIBS)
 	@echo "Linking $@"
 	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) -Wl,-soname,liboc_emsmdb.$(SHLIBEXT) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS)
-
-mapiproxy/servers/exchange_ds_rfr.$(SHLIBEXT):	mapiproxy/servers/default/rfr/dcesrv_exchange_ds_rfr.po \
-		mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
-	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $^ -L. $(LIBS) $(SAMBASERVER_LIBS) $(SAMDB_LIBS) -Lmapiproxy mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION)
 
 #################################################################
 # Tools compilation rules
@@ -1556,14 +1533,6 @@ check-mapiproxy-rpc: libmapi libmapiproxy libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSI
 bin/mapiproxy-rpc: testsuite/modernization/rpc_smoke.c mapiproxy/dcesrv_mapiproxy.h mapiproxy/dcesrv_mapiproxy_proto.h mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -Wl,--export-dynamic -o $@ $< $(LDFLAGS) mapiproxy/dcesrv_mapiproxy.$(SHLIBEXT) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS)
-
-.PHONY: check-asyncemsmdb
-check-asyncemsmdb: libmapi libmapiproxy libmapistore libmapiserver libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) mapiproxy/dcesrv_asyncemsmdb.$(SHLIBEXT) bin/asyncemsmdb
-	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/asyncemsmdb
-
-bin/asyncemsmdb: testsuite/modernization/asyncemsmdb_smoke.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.c mapiproxy/servers/default/asyncemsmdb/dcesrv_asyncemsmdb.h mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION)
-	mkdir -p bin
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -o $@ $< $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=getsockname -Wl,--wrap=close mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS) $(SAMBASERVER_LIBS) $(NANOMSG_LIBS)
 
 .PHONY: check-propsdump
 check-propsdump: libmapi libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION) bin/propsdump-check

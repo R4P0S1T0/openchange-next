@@ -30,17 +30,6 @@ substituted. It covers interface selection, bind/unbind, authentication state
 isolation, malformed requests, credential ownership, remote association IDs and
 connection retries; it does not validate network authentication or Outlook.
 
-The asynchronous RPC lifecycle can be checked separately:
-
-    make check-asyncemsmdb
-
-This builds the asynchronous module and compiles its callback code into a
-harness with real Samba state APIs and tevent. Storage/directory access,
-nanomsg, RPC replies and private NDR registration are substituted. It exercises
-ownership checks, setup failures, multiple contexts and handles, wait completion,
-cancellation, call destruction and resource cleanup. It does not test real
-notification delivery or an AD DC.
-
 Administration failure paths and the installed Samba AES encoder can be checked:
 
     make check-mapiadmin
