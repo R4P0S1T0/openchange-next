@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav"><D:response><D:href>/SOGo/dav/u/Contacts/personal/c1.vcf</D:href><D:propstat><D:prop><C:address-data>BEGIN:VCARD
+VERSION:3.0
+UID:c1
+FN:Person One Edited
+N:Person;One
+EMAIL:a@example.invalid
+TEL:+15550000001
+END:VCARD</C:address-data><D:getetag>&quot;gcs00000002&quot;</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response><D:response><D:href>/SOGo/dav/u/Contacts/personal/c9.vcf</D:href><D:status>HTTP/1.1 404 Not Found</D:status></D:response></D:multistatus>

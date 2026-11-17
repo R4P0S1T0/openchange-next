@@ -13,6 +13,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <curl/curl.h>
 
 #include "mapiproxy/libmapistore/mapistore.h"
 #include "mapiproxy/libmapistore/mapistore_errors.h"
@@ -20,6 +24,7 @@
 #include "dav_backend.h"
 #include "dav_vcard.h"
 #include "dav_map.h"
+#include "dav_http.h"
 #include "gen_ndr/ndr_property.h"
 
 #define CHECK(c) do { if (!(c)) { \
@@ -31,7 +36,7 @@ enum mapistore_error mapistore_init_backend(void);
 enum mapistore_error mapistore_backend_registered(const char *);
 
 static TALLOC_CTX *root;
-static const char *fixture, *vcf_dir;
+static const char *fixture, *vcf_dir, *carddav_fake;
 
 static int write_file(const char *path, size_t len, mode_t mode)
 {
@@ -556,21 +561,240 @@ static int test_photo_cap(void)
     return 0;
 }
 
+/* ---- CardDAV client against carddav_fake.py on 127.0.0.1 ---- */
+
+static pid_t fake_pid;
+static char fake_base[128];
+
+static void fake_stop(void)
+{
+    if (fake_pid > 0) {
+        kill(fake_pid, SIGTERM);
+        waitpid(fake_pid, NULL, 0);
+        fake_pid = 0;
+    }
+}
+
+static int fake_start(void)
+{
+    char *portfile = talloc_asprintf(root, "%s/fake.port", fixture);
+    char *state = talloc_asprintf(root, "%s/fake.state", fixture);
+    int i, port = 0;
+    FILE *f;
+
+    unlink(portfile);
+    fake_pid = fork();
+    if (fake_pid == 0) {
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        execl("/usr/bin/python3", "python3", "-I", carddav_fake, portfile, state, (char *)NULL);
+        _exit(127);
+    }
+    for (i = 0; i < 100 && !port; i++) {
+        usleep(50000);
+        if ((f = fopen(portfile, "r"))) {
+            if (fscanf(f, "%d", &port) != 1) port = 0;
+            fclose(f);
+        }
+    }
+    if (!port) return 1;
+    snprintf(fake_base, sizeof fake_base, "http://127.0.0.1:%d/dav/u/Contacts/", port);
+    return 0;
+}
+
+/* POST to a test-control endpoint of the fake. */
+static int ctl(const char *what)
+{
+    CURL *c = curl_easy_init();
+    char url[256];
+    long st = 0;
+
+    snprintf(url, sizeof url, "%.*s/_ctl/%s", (int)(strstr(fake_base, "/dav/") - fake_base), fake_base, what);
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, "");
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, fwrite);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, fopen("/dev/null", "w"));
+    curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &st);
+    curl_easy_cleanup(c);
+    return st == 200 ? 0 : 1;
+}
+
+#define BOOK "/dav/u/Contacts/personal/"
+#define VC(n) "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:" n "\r\nFN:" n "\r\nEND:VCARD\r\n"
+
+static struct dav_http *client(const char *pw)
+{
+    return dav_http_new(root, fake_base, "u", pw);
+}
+
+static int test_http_list_books(void)
+{
+    struct dav_http *h;
+    struct dav_book *b;
+    size_t n;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(!strcmp(b[0].href, BOOK) && !strcmp(b[0].segment, "personal"));
+    CHECK(!strcmp(b[0].displayname, "Personal") && b[0].sync_token);
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "Trab & Co") == MAPISTORE_SUCCESS);
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "x") == MAPISTORE_ERR_EXIST);
+    CHECK(dav_rename_book(h, "/dav/u/Contacts/work/", "Trabalho") == MAPISTORE_SUCCESS);
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_SUCCESS && n == 2 && !strcmp(b[1].displayname, "Trabalho"));
+    CHECK(dav_delete_book(h, "/dav/u/Contacts/work/") == MAPISTORE_SUCCESS);
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_SUCCESS && n == 1);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_sync_incremental(void)
+{
+    struct dav_http *h;
+    struct dav_change *ch;
+    char *etag_a, *etag_b, *tok, *tok2, *tok3, *body, *e2;
+    size_t n;
+    bool full;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), "text/vcard; charset=utf-8", NULL, true, &etag_a) == MAPISTORE_SUCCESS && etag_a);
+    etag_a = talloc_strdup(root, etag_a);
+    CHECK(dav_put(h, BOOK "b.vcf", VC("b"), "text/vcard; charset=utf-8", NULL, true, &etag_b) == MAPISTORE_SUCCESS);
+    CHECK(dav_sync(h, root, BOOK, NULL, &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
+    CHECK(n == 2 && full && tok && ch[0].etag && ch[1].etag);
+    CHECK(!ctl("edit?path=" BOOK "a.vcf"));
+    CHECK(dav_sync(h, root, BOOK, tok, &ch, &n, &tok2, &full) == MAPISTORE_SUCCESS);
+    CHECK(n == 1 && !full && !strcmp(ch[0].href, BOOK "a.vcf") && ch[0].etag && strcmp(ch[0].etag, etag_a));
+    CHECK(strcmp(tok, tok2));
+    CHECK(!ctl("delete?path=" BOOK "b.vcf"));
+    CHECK(dav_sync(h, root, BOOK, tok2, &ch, &n, &tok3, &full) == MAPISTORE_SUCCESS);
+    CHECK(n == 1 && !strcmp(ch[0].href, BOOK "b.vcf") && ch[0].etag == NULL);
+    /* GET and multiget */
+    CHECK(dav_get(h, root, BOOK "a.vcf", &body, &e2) == MAPISTORE_SUCCESS && strstr(body, "X-EDITED") && e2);
+    {
+        char *hrefs[2] = { BOOK "a.vcf", BOOK "zz.vcf" };
+        char **bodies, **etags;
+        CHECK(dav_multiget(h, root, BOOK, hrefs, 2, &bodies, &etags) == MAPISTORE_SUCCESS);
+        CHECK(bodies[0] && strstr(bodies[0], "UID:a") && etags[0] && !strcmp(etags[0], e2) && !bodies[1] && !etags[1]);
+    }
+    CHECK(dav_get(h, root, BOOK "b.vcf", &body, NULL) == MAPISTORE_ERR_NOT_FOUND);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_sync_invalid_token_full(void)
+{
+    struct dav_http *h;
+    struct dav_change *ch;
+    char *tok, *tok2;
+    size_t n;
+    bool full;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
+    CHECK(dav_sync(h, root, BOOK, NULL, &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
+    CHECK(!ctl("invalidate_token"));
+    CHECK(dav_sync(h, root, BOOK, tok, &ch, &n, &tok2, &full) == MAPISTORE_SUCCESS);
+    CHECK(full && n == 1 && ch[0].etag && tok2);
+    /* SOGo answers an unknown token with 207: no error, tombstones for what is gone */
+    CHECK(dav_sync(h, root, BOOK, "bogus", &ch, &n, &tok2, &full) == MAPISTORE_SUCCESS && !full);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_put_if_match_412(void)
+{
+    struct dav_http *h;
+    char *etag, *e2;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, &etag) == MAPISTORE_SUCCESS);
+    etag = talloc_strdup(root, etag);
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a2"), NULL, "\"nope\"", false, NULL) == MAPISTORE_ERR_CONFLICT);
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a2"), NULL, etag, false, &e2) == MAPISTORE_SUCCESS && e2 && strcmp(e2, etag));
+    e2 = talloc_strdup(root, e2);
+    CHECK(dav_delete(h, BOOK "a.vcf", etag) == MAPISTORE_ERR_CONFLICT);
+    CHECK(dav_delete(h, BOOK "a.vcf", e2) == MAPISTORE_SUCCESS);
+    CHECK(dav_delete(h, BOOK "a.vcf", NULL) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(dav_put(h, BOOK "a.vcf", "x", "text/x\r\nX: y", NULL, false, NULL) == MAPISTORE_ERR_INVALID_PARAMETER);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_put_if_none_match_exists(void)
+{
+    struct dav_http *h;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
+    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_ERR_CONFLICT);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_401_denied(void)
+{
+    struct dav_http *h;
+    struct dav_book *b;
+    size_t n;
+
+    CHECK(!fake_start());
+    h = client("wrong");
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_ERR_DENIED);
+    CHECK(!dav_http_new(root, "ftp://127.0.0.1/", "u", "p"));
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_http_timeout_conn_refused(void)
+{
+    struct dav_http *h;
+    struct dav_book *b;
+    size_t n;
+    time_t t0;
+
+    CHECK(!fake_start());
+    h = client("p");
+    CHECK(!ctl("fail?code=503"));
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_ERR_CONN_REFUSED);
+    CHECK(!ctl("fail?code=0") && !ctl("slow?secs=20"));
+    t0 = time(NULL);
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_ERR_CONN_REFUSED);
+    CHECK(time(NULL) - t0 <= 17);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <fixture dir> <vcf dir>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <fixture dir> <vcf dir> <carddav_fake.py>\n", argv[0]);
         return 2;
     }
     root = talloc_new(NULL);
     fixture = argv[1];
     vcf_dir = argv[2];
+    carddav_fake = argv[3];
     if (mkdir(fixture, 0700) && access(fixture, W_OK)) return 2;
     if (test_inert_when_unconfigured() || test_settings_key_file() || test_backend_registers()
         || test_vcard_roundtrip_untouched() || test_vcard_folding_utf8() || test_vcard_escape()
         || test_vcard_set_keeps_unknown() || test_vlist_parse()
         || test_vcard_trailing_data_rejected() || test_map_contact_full() || test_map_props_to_fields_roundtrip()
-        || test_field_set_no_line_injection() || test_map_list_members() || test_photo_cap()) return 1;
+        || test_field_set_no_line_injection() || test_map_list_members() || test_photo_cap()
+        || test_http_list_books() || test_http_sync_incremental() || test_http_sync_invalid_token_full()
+        || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_401_denied()
+        || test_http_timeout_conn_refused()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;

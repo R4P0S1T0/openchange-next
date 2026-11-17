@@ -465,6 +465,8 @@ _PUBLIC_ const char *mapistore_errstr(enum mapistore_error mapistore_err)
 		return "Not available";
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		return "Not implemented";
+	case MAPISTORE_ERR_CONFLICT:
+		return "Conflict: the object changed on the server";
 	}
 
 	return "Unknown error";
@@ -1906,6 +1908,9 @@ _PUBLIC_ enum MAPISTATUS mapistore_error_to_mapi(enum mapistore_error mapistore_
 		break;
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		mapi_err = MAPI_E_NOT_IMPLEMENTED;
+		break;
+	case MAPISTORE_ERR_CONFLICT:
+		mapi_err = MAPI_E_OBJECT_CHANGED;
 		break;
 	default:
 		OC_DEBUG (4, "unknown mapistore error: %.8x", mapistore_err);
