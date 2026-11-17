@@ -1,6 +1,6 @@
 # M6 slice 1 — Outlook contacts stored in SOGo over CardDAV (design)
 
-Date: 2026-11-17. Status: draft for maintainer approval.
+Date: 2026-11-17. Status: approved by the maintainer (2026-11-17).
 
 ## Intent
 
@@ -10,30 +10,43 @@ community. M6 moves Outlook's calendar and contacts into SOGo so the same items
 show in Outlook, SOGo webmail and phones (SOGo ActiveSync), with no separate
 OpenChange copy — the same principle as Outlook rules stored as Sieve.
 
+**The essence (maintainer, 2026-11-17):** the same data, the same everywhere,
+nothing lost — Outlook at the factory, the phone on the road, webmail from the
+other side of the world. **SOGo is the hub and every client is equal; Outlook
+is one more client, never the privileged one.** Every rule below is judged
+against that: no client wins because it is Outlook, nothing a client can show
+is hidden from Outlook, and nothing any client wrote is dropped.
+
 This first slice is **contacts, read and write, over CardDAV**. Chosen first
 (maintainer, 2026-11-17) because the data model is simpler than calendar and it
 proves the whole path calendar will reuse: user credentials into the C core, a
 DAV client, incremental sync into Outlook's cached mode, item ↔ MAPI id mapping
-and ETag conflicts.
+and merge without loss.
 
 ## Goals
 
-- Outlook's default **Contacts** folder is the user's SOGo address book
-  `Contacts/personal/`.
-- Outlook in **cached mode** (the lab profile) receives the address book through
-  ICS and receives later changes made in SOGo webmail or on a phone.
+- **Every SOGo address book of the user is an Outlook contacts folder**:
+  `personal` is Outlook's default Contacts folder; each other address book is a
+  contacts subfolder under it. Address books created, renamed or deleted in
+  Outlook are created, renamed or deleted in SOGo, and the reverse.
+- Contacts **and distribution lists** (SOGo lists ↔ Outlook `IPM.DistList`),
+  **with photos**.
+- Outlook in **cached mode** (the lab profile) receives everything through ICS
+  and receives later changes made in SOGo webmail or on a phone.
 - Create, modify and delete in Outlook reach SOGo; the reverse reaches Outlook.
-- Edits on both sides are merged field by field without showing the user an
-  error; no value is lost (see Conflicts).
+- Edits on several clients are merged field by field without showing the user
+  an error; no value is lost, and no client is privileged (see Conflicts).
 - Authentication with the user's own Basic credentials, held in memory only.
 
 ## Non-goals (this slice)
 
-- Calendar/CalDAV, free/busy, meeting requests (later M6 slices).
-- Other SOGo address books than `personal`, shared/subscribed address books.
-- Distribution lists (Outlook `IPM.DistList`, vCard groups): not offered.
-- Contact photos.
+- Calendar/CalDAV, free/busy, meeting requests (next M6 slices, same design
+  principles).
+- Address books other users shared with this user (SOGo ACL/subscriptions).
 - The GAL (already served by NSPI from PostfixAdmin, M2).
+- Publishing MAPI/HTTP on the internet so Outlook works outside the factory:
+  needed for the essence, but it is deployment (M7: nginx/HAProxy exposure,
+  hardening). Phone and webmail already work from anywhere.
 
 ## Anti-goals (failure even if it "works")
 
@@ -115,17 +128,32 @@ and ETag conflicts.
 ### Configuration
 
 `mapistore:dav_url` in the existing configuration (same loadparm path the
-2026-10-30 plan used), a URL template with `%u` = MAPI username, e.g.
-`https://lab.fitasonline.com.br/SOGo/dav/%u/Contacts/personal/`. Unset → backend
+2026-10-30 plan used), a URL template with `%u` = MAPI username, pointing at the user's address-book home, e.g.
+`https://lab.fitasonline.com.br/SOGo/dav/%u/Contacts/`. Unset → backend
 inert (`list_contexts` empty, success). CA verification on (system store).
 
 ### Folder binding
 
-`list_contexts` returns, without any network call, one entry
-`dav://contacts/` with `MAPISTORE_CONTACTS_ROLE`, `main_folder = true`,
-`IPF.Contact`. So SOGo being down cannot alter provisioning. Existing native
-Contacts folders in openchangedb (lab test data only) are replaced by the
-provisioning logic that already exists; no migration of old native contacts.
+- `list_contexts` lists the user's address books (PROPFIND Depth 1 on
+  `…/Contacts/`, keep `addressbook` collections): `personal` →
+  `dav://contacts/personal/` with `MAPISTORE_CONTACTS_ROLE`,
+  `main_folder = true`; every other book → a secondary `IPF.Contact` entry
+  `dav://contacts/<book>/` under it. `list_contexts` only gets the username, so
+  the credentials are kept per user in process memory from connect until the
+  user's last session ends (zeroed then), and provisioning runs after connect
+  has stored them (builder: verify the order in `emsmdbp_init`).
+- **SOGo down during provisioning:** return `MAPISTORE_ERR_CONN_REFUSED`, as the
+  IMAP backend does, so provisioning keeps the existing folders instead of
+  deleting them (`emsmdbp_provisioning.c:337`).
+- Folder hierarchy changes: Outlook creating a contacts folder under Contacts →
+  `MKCOL` (extended, `addressbook` resourcetype) with the display name; rename
+  → `PROPPATCH displayname`; delete → `DELETE` of the collection. Address books
+  created/renamed/deleted in SOGo reach Outlook through the hierarchy
+  notification the IMAP watcher already uses, detected by the poll below.
+  Deleting `personal` is refused (SOGo refuses it too).
+- Existing native Contacts folders in openchangedb (lab test data only) are
+  replaced by the existing provisioning logic; no migration of old native
+  contacts.
 
 ### Reading and sync
 
@@ -141,10 +169,12 @@ provisioning logic that already exists; no migration of old native contacts.
   for expunged UIDs. Fetch vCards in bulk with `addressbook-multiget`.
 - Sync token, href list and ETags live in session memory; a new session starts
   from a full listing (correct, just slower).
-- **SOGo-side changes while Outlook is open:** a per-session poll every 60 s with
-  `sync-collection`; any change raises the same contents-table notification the
-  IMAP watcher raises, so Outlook runs its incremental sync. Polling stops with
-  the session. (My call; webmail/phone edits reach Outlook within ~1 min.)
+- **Changes from other clients while Outlook is open:** a per-session poll
+  every 60 s: `sync-collection` on each address book plus a Depth 1 PROPFIND
+  of `…/Contacts/` for added/renamed/removed books; any change raises the
+  contents-table or hierarchy notification the IMAP watcher raises, so Outlook
+  runs its incremental sync. Polling stops with the session. (My call: SOGo has
+  no push for DAV clients; webmail/phone edits reach Outlook within ~1 min.)
 
 ### vCard ↔ MAPI mapping (minimum set)
 
@@ -158,7 +188,24 @@ provisioning logic that already exists; no migration of old native contacts.
 | NOTE | PidTagBody |
 | BDAY | PidTagBirthday |
 | URL | PidTagBusinessHomePage |
+| PHOTO (inline base64, JPEG/PNG) | contact picture attachment (`ContactPicture.jpg`, PidTagAttachmentContactPhoto, PidLidHasPicture) |
 | UID | kept, never changed; generated (UUID) on create |
+
+**Photos:** both directions; one fingerprint for the whole picture. A PHOTO by
+URI (not inline) is preserved but not shown in Outlook. Size cap for what
+Outlook uploads: builder's call, documented (SOGo/phones choke on huge
+PHOTOs).
+
+**Distribution lists:** SOGo stores a list as a `text/x-vlist` resource
+(`BEGIN:VLIST` with one `CARD` line per member: member UID reference, `EMAIL`,
+`FN`), not as a standard vCard 4 `KIND:group` — **builder verifies the exact
+format on the lab** by creating a list in webmail and fetching it. Mapping:
+VLIST `FN`/`NICKNAME`/`DESCRIPTION` ↔ PidLidDistributionListName / PidTagBody;
+members ↔ PidLidDistributionListMembers + OneOffMembers (+ Checksum): a member
+referencing a contact in the same address book becomes a wrapped entry ID of
+that contact; a member with only name+email becomes a one-off entry. Unknown
+VLIST lines are preserved like vCard ones. Member list is merged as a set
+(added on one side + removed on the other both apply).
 
 Everything else in the vCard is preserved untouched on write. Named properties
 resolve through `mapistore_namedprops_get_mapped_id` at context creation.
@@ -170,9 +217,12 @@ vCard 3.0 (what SOGo stores) is written back as 3.0.
   vCard 3.0, `PUT` to `<collection>/<uuid>.vcf` with `If-None-Match: *`.
 - Modify: GET-free when the cached vCard + ETag are fresh, else GET; patch the
   mapped properties into the parsed vCard, `PUT` with `If-Match: <etag>`.
-- Delete: `DELETE` with `If-Match`. If the item changed in SOGo since Outlook
-  saw it, the delete still wins (my call: deleting is an explicit user act);
-  412 → re-GET, re-DELETE with the new ETag.
+- Delete: `DELETE` with `If-Match`. **If the item changed on another client
+  since Outlook saw it (412), it is not deleted**: the delete is dropped and the
+  newer version comes back to Outlook on the next sync (nothing lost wins over
+  delete; maintainer, 2026-11-17). Symmetric case: Outlook modifies an item that
+  another client deleted (404) → the Outlook edit recreates it (PUT
+  `If-None-Match: *` at a new href with the same UID), for the same reason.
 - Outlook's own change keys/PCL preserved exactly as the IMAP backend does so a
   write does not bounce back as a new change.
 
@@ -199,17 +249,19 @@ mode).
   - Outlook value ≠ fingerprint → Outlook changed it;
   - SOGo value ≠ fingerprint → SOGo side changed it;
   - only one side changed → take that side; neither → keep;
-  - **both changed to different values → Outlook wins** (last writer), and the
-    SOGo value is appended to the contact's NOTE as one line
-    `[openchange-next AAAA-MM-DD] <field>: <old value>` so nothing is lost
-    (my call over server-log-only: the user can see and recover it; the
-    maintainer may switch it to log-only).
+  - **both changed to different values → the most recent edit wins, whichever
+    client made it** (maintainer, 2026-11-17: no privileged client). Outlook's
+    edit time is its PidTagLastModificationTime; the other side's is the vCard
+    `REV` when present, else the time the poll first saw that ETag. The losing
+    value is appended to the contact's NOTE as one neutral line
+    `[AAAA-MM-DD conflito] <field>: <value>` so nothing is lost and every client
+    shows it (no product name in user data).
   PUT the merged vCard with `If-Match`; on 412 (changed again meanwhile) redo
   the merge, at most 3 times, then fall back to the MAPI conflict result.
   Outlook then receives the merged item on the next sync.
-- No fingerprint for an item (first sync after install, store lost): SOGo's
-  current version is taken as the base, i.e. Outlook's differing fields win —
-  the same rule as "both changed".
+- No fingerprint for an item (first sync after install, store lost): every
+  differing field is treated as "both changed" — most recent wins, the other
+  value goes to the NOTE.
 - Unmapped vCard properties are never compared or touched (anti-goal 1).
 - Fingerprint rows are deleted with the item; a full listing prunes rows of
   hrefs that no longer exist.
@@ -231,13 +283,19 @@ mode).
   fingerprint / repeated 412); NOTE line on both-changed; fingerprints pruned
   on delete; inert when unconfigured; password zeroed.
 - Lab acceptance with the Outlook on the TSplus (.167), cached mode:
-  1. existing SOGo contacts appear in Outlook;
+  1. existing SOGo contacts, lists, photos and every address book appear in
+     Outlook; a book created in webmail appears as a subfolder, and one created
+     in Outlook appears in webmail;
+  1b. a list created in webmail is usable in Outlook (send to it) and a list
+     created in Outlook shows its members in webmail and on the phone;
   2. Outlook create/edit/delete → visible in SOGo webmail;
   3. webmail create/edit/delete → in Outlook within ~1 min without restart;
   4. phone-added field (custom X- or extra TEL) survives an Outlook edit;
   5. Outlook offline: change the e-mail in Outlook and the phone in webmail on
      the same contact → both kept, no conflict shown; change the same field on
-     both sides → Outlook's value wins and webmail's value is in the NOTE;
+     both sides → the later edit wins (try it both ways round) and the other
+     value is in the NOTE; delete in Outlook offline + edit in webmail → the
+     contact survives;
   6. SOGo stopped → mail still works, Contacts errors cleanly;
   7. TOTP: enroll a lab account in TOTP and check DAV with the plain password;
      record the result (if refused, document it as a known limitation for this
