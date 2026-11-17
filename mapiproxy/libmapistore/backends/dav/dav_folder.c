@@ -30,6 +30,21 @@
 /* Process-wide, so fingerprints outlive sessions (in memory when the indexing is not MySQL). */
 static struct dav_fpstore *fpstore;
 
+/* R14: reads reuse a context's last sync and book listing for sync_window seconds. A poll that sees a change,
+   or a book written here, bumps generation and so ends every reuse at once. */
+static int sync_window = 10;
+static unsigned generation;
+
+void dav_backend_set_sync_window(int seconds)
+{
+	sync_window = seconds;
+}
+
+static bool fresh(time_t at, unsigned gen)
+{
+	return at && gen == generation && time(NULL) - at < sync_window;
+}
+
 uint64_t *dav_i8(TALLOC_CTX *mem_ctx, uint64_t v)
 {
 	uint64_t *p = talloc(mem_ctx, uint64_t);
@@ -218,11 +233,23 @@ static enum mapistore_error context_book(struct dav_context *ctx, const char *se
 	return fmid_for_uri(ctx, ctx->uri, &ctx->root->fid) == MAPISTORE_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
 }
 
-/* Another book of the same user and session, as its root folder. */
-static struct dav_folder *book_folder(TALLOC_CTX *mem_ctx, const struct dav_context *like, const char *segment)
-{
-	struct dav_context *ctx = talloc_zero(mem_ctx, struct dav_context);
+static bool is_personal(const struct dav_context *ctx);
 
+/* Another book of the same user and session, as its root folder. Through personal (kept) the book's context is
+   personal's, reused by later opens; mem_ctx holds a reference, so the folder outlives personal if need be. */
+static struct dav_folder *book_folder(TALLOC_CTX *mem_ctx, struct dav_context *like, const char *segment, bool kept)
+{
+	struct dav_context	*ctx, **grown;
+	char			*uri = talloc_asprintf(mem_ctx, DAV_CONTACTS_URI "%s/", segment);
+	size_t			i;
+
+	kept = kept && is_personal(like);
+	for (i = 0; uri && kept && i < like->nchildren && strcmp(like->children[i]->uri, uri) != 0; i++);
+	talloc_free(uri);
+	if (kept && i < like->nchildren) {
+		return talloc_reference(mem_ctx, like->children[i]) ? like->children[i]->root : NULL;
+	}
+	ctx = talloc_zero(kept ? (TALLOC_CTX *) like : mem_ctx, struct dav_context);
 	if (!ctx) return NULL;
 	ctx->username = talloc_strdup(ctx, like->username);
 	ctx->ictx = like->ictx;
@@ -234,6 +261,16 @@ static struct dav_folder *book_folder(TALLOC_CTX *mem_ctx, const struct dav_cont
 	if (!ctx->username || !ctx->home || context_book(ctx, segment) != MAPISTORE_SUCCESS) {
 		talloc_free(ctx);
 		return NULL;
+	}
+	if (kept) {
+		grown = talloc_realloc(like, like->children, struct dav_context *, like->nchildren + 1);
+		if (!grown || !talloc_reference(mem_ctx, ctx)) {
+			if (grown) like->children = grown;
+			talloc_free(ctx);
+			return NULL;
+		}
+		like->children = grown;
+		like->children[like->nchildren++] = ctx;
 	}
 	return ctx->root;
 }
@@ -488,7 +525,7 @@ static enum mapistore_error prune_gone(struct dav_context *ctx, TALLOC_CTX *tmp)
    a full listing also removes what it does not list. */
 enum mapistore_error dav_context_sync(struct dav_context *ctx)
 {
-	TALLOC_CTX		*tmp = talloc_new(NULL);
+	TALLOC_CTX		*tmp;
 	struct dav_http		*h;
 	struct dav_change	*ch;
 	size_t			n, i, k;
@@ -496,7 +533,8 @@ enum mapistore_error dav_context_sync(struct dav_context *ctx)
 	bool			full;
 	enum mapistore_error	ret;
 
-	if (!tmp) return MAPISTORE_ERR_NO_MEMORY;
+	if (fresh(ctx->synced_at, ctx->synced_gen)) return MAPISTORE_SUCCESS;
+	if (!(tmp = talloc_new(NULL))) return MAPISTORE_ERR_NO_MEMORY;
 	h = dav_context_http(ctx, tmp);
 	ret = h ? dav_sync(h, tmp, ctx->book_href, ctx->token, &ch, &n, &token, &full) : MAPISTORE_ERR_CONN_REFUSED;
 	if (ret != MAPISTORE_SUCCESS) {
@@ -521,9 +559,41 @@ enum mapistore_error dav_context_sync(struct dav_context *ctx)
 	if (ret == MAPISTORE_SUCCESS) {
 		talloc_free(ctx->token);
 		ctx->token = token ? talloc_strdup(ctx, token) : NULL;
+		ctx->synced_at = time(NULL);
+		ctx->synced_gen = generation;
 	}
 	talloc_free(tmp);
 	return ret;
+}
+
+enum mapistore_error dav_context_resync(struct dav_context *ctx)
+{
+	ctx->synced_at = 0;
+	return dav_context_sync(ctx);
+}
+
+/* The user's books as ctx last listed them (within the sync window), or listed now. */
+static enum mapistore_error context_books(struct dav_context *ctx, struct dav_book **books, size_t *n)
+{
+	struct dav_http		*h;
+	struct dav_book		*list;
+	size_t			nb;
+	enum mapistore_error	ret;
+
+	if (!fresh(ctx->books_at, ctx->books_gen)) {
+		h = dav_context_http(ctx, NULL);
+		ret = h ? dav_list_books(h, ctx, &list, &nb) : MAPISTORE_ERR_CONN_REFUSED;
+		talloc_free(h);
+		if (ret != MAPISTORE_SUCCESS) return ret;
+		talloc_free(ctx->books);
+		ctx->books = list;
+		ctx->nbooks = nb;
+		ctx->books_at = time(NULL);
+		ctx->books_gen = generation;
+	}
+	*books = ctx->books;
+	*n = ctx->nbooks;
+	return MAPISTORE_SUCCESS;
 }
 
 enum mapistore_error dav_context_fetch(struct dav_context *ctx)
@@ -689,7 +759,6 @@ static enum mapistore_error child_books(TALLOC_CTX *mem_ctx, struct dav_folder *
 {
 	struct dav_book		*books;
 	struct dav_folder	*f, **list;
-	struct dav_http		*h;
 	TALLOC_CTX		*tmp;
 	enum mapistore_error	ret;
 	size_t			nb, i;
@@ -699,15 +768,18 @@ static enum mapistore_error child_books(TALLOC_CTX *mem_ctx, struct dav_folder *
 	*n = 0;
 	if (!is_personal(p->ctx)) return MAPISTORE_SUCCESS;
 	tmp = talloc_new(NULL);
-	h = tmp ? dav_context_http(p->ctx, tmp) : NULL;
-	ret = !tmp ? MAPISTORE_ERR_NO_MEMORY : !h ? MAPISTORE_ERR_CONN_REFUSED : dav_list_books(h, tmp, &books, &nb);
+	ret = !tmp ? MAPISTORE_ERR_NO_MEMORY : context_books(p->ctx, &books, &nb);
 	list = ret == MAPISTORE_SUCCESS ? talloc_array(mem_ctx, struct dav_folder *, nb + 1) : NULL;
 	if (ret == MAPISTORE_SUCCESS && !list) ret = MAPISTORE_ERR_NO_MEMORY;
 	for (i = 0; ret == MAPISTORE_SUCCESS && i < nb; i++) {
 		norm = dav_href_norm(tmp, books[i].href);
 		if (!norm || strcmp(norm, p->ctx->book_norm) == 0) continue;
-		if (!(f = book_folder(list, p->ctx, books[i].segment)) ||
-		    !(f->ctx->displayname = talloc_strdup(f->ctx, books[i].displayname ? books[i].displayname : books[i].segment))) {
+		if (!(f = book_folder(list, p->ctx, books[i].segment, true))) {
+			ret = MAPISTORE_ERR_NO_MEMORY;
+			break;
+		}
+		talloc_free(f->ctx->displayname);
+		if (!(f->ctx->displayname = talloc_strdup(f->ctx, books[i].displayname ? books[i].displayname : books[i].segment))) {
 			ret = MAPISTORE_ERR_NO_MEMORY;
 			break;
 		}
@@ -741,7 +813,7 @@ static enum mapistore_error open_folder(void *parent, TALLOC_CTX *mem_ctx, uint6
 		return MAPISTORE_ERR_NOT_FOUND;
 	}
 	seg = talloc_strndup(mem_ctx, uri + len, strlen(uri + len) - 1);
-	f = seg ? book_folder(mem_ctx, p->ctx, seg) : NULL;
+	f = seg ? book_folder(mem_ctx, p->ctx, seg, true) : NULL;
 	if (!f) {
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
@@ -780,7 +852,7 @@ static enum mapistore_error create_folder(void *parent, TALLOC_CTX *mem_ctx, uin
 	}
 	/* first, so the book's root takes the folder ID Outlook was given */
 	ret = ictx->add_fmid(ictx, p->ctx->username, fid, uri);
-	f = ret == MAPISTORE_SUCCESS ? book_folder(mem_ctx, p->ctx, seg) : NULL;
+	f = ret == MAPISTORE_SUCCESS ? book_folder(mem_ctx, p->ctx, seg, false) : NULL;
 	h = f ? dav_context_http(f->ctx, mem_ctx) : NULL;
 	ret = ret != MAPISTORE_SUCCESS ? ret : !f ? MAPISTORE_ERR_NO_MEMORY : !h ? MAPISTORE_ERR_CONN_REFUSED
 	      : dav_mkcol_book(h, f->ctx->book_href, name);
@@ -792,6 +864,7 @@ static enum mapistore_error create_folder(void *parent, TALLOC_CTX *mem_ctx, uin
 	}
 	f->ctx->displayname = talloc_strdup(f->ctx, name);
 	f->parent_fid = p->fid;
+	generation++;
 	*childp = f;
 	return MAPISTORE_SUCCESS;
 }
@@ -812,6 +885,7 @@ enum mapistore_error dav_folder_set_properties(struct dav_folder *f, struct SRow
 	if (ret == MAPISTORE_SUCCESS) {
 		talloc_free(f->ctx->displayname);
 		f->ctx->displayname = talloc_strdup(f->ctx, name);
+		generation++;
 	}
 	return ret;
 }
@@ -832,6 +906,7 @@ static enum mapistore_error delete_folder(void *folder)
 	h = dav_context_http(f->ctx, NULL);
 	ret = h ? dav_delete_book(h, f->ctx->book_href) : MAPISTORE_ERR_CONN_REFUSED;
 	talloc_free(h);
+	generation++;
 	return ret == MAPISTORE_ERR_NOT_FOUND ? MAPISTORE_SUCCESS : ret;
 }
 
@@ -853,7 +928,7 @@ static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t f
 	}
 	ctx = f->ctx;
 	if (!(it = dav_item_by_mid(ctx, mid))) {
-		ret = dav_context_sync(ctx);
+		ret = dav_context_resync(ctx);
 		if (ret != MAPISTORE_SUCCESS) return ret;
 		if (!(it = dav_item_by_mid(ctx, mid))) return MAPISTORE_SUCCESS;	/* already gone */
 	}
@@ -873,14 +948,14 @@ static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t f
 		/* a fresh change number on the next read, whatever Outlook was shown */
 		uri = dav_item_uri(tmp, ctx, norm);
 		dav_change_value(tmp, ctx, uri, talloc_asprintf(tmp, "%s kept", etag), PidTagChangeNumber);
-		dav_context_sync(ctx);
+		dav_context_resync(ctx);
 		ret = MAPISTORE_SUCCESS;
 	} else if (ret == MAPISTORE_SUCCESS || ret == MAPISTORE_ERR_NOT_FOUND) {
 		/* a tombstone: every other client of the user learns the deletion too */
 		if (dav_fp_tombstone(ctx->fp, ctx->username, norm) != MAPISTORE_SUCCESS) {
 			OC_DEBUG(1, "DAV backend: tombstone of %s not kept\n", norm);
 		}
-		dav_context_sync(ctx);
+		dav_context_resync(ctx);
 		ret = MAPISTORE_SUCCESS;
 	}
 	talloc_free(tmp);
@@ -1046,23 +1121,27 @@ static void set(struct mapistore_property_data *d, void *value)
 	d->error = value ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NOT_FOUND;
 }
 
+/* The book's name as last listed: a rename elsewhere shows once the listing is renewed; when the server cannot
+   be asked, the name known so far (a missing name would change the folder's state). */
 static char *book_displayname(struct dav_context *ctx)
 {
 	TALLOC_CTX	*tmp;
 	struct dav_book	*books;
-	struct dav_http	*h;
 	size_t		n, i;
-	char		*norm;
+	char		*norm, *name;
 
-	if (ctx->displayname || !(tmp = talloc_new(NULL))) {
+	if (!(tmp = talloc_new(NULL))) {
 		return ctx->displayname;
 	}
-	h = dav_context_http(ctx, tmp);
-	if (h && dav_list_books(h, tmp, &books, &n) == MAPISTORE_SUCCESS) {
+	if (context_books(ctx, &books, &n) == MAPISTORE_SUCCESS) {
 		for (i = 0; i < n; i++) {
 			norm = dav_href_norm(tmp, books[i].href);
 			if (norm && strcmp(norm, ctx->book_norm) == 0) {
-				ctx->displayname = talloc_strdup(ctx, books[i].displayname ? books[i].displayname : books[i].segment);
+				name = books[i].displayname ? books[i].displayname : books[i].segment;
+				if (!ctx->displayname || strcmp(ctx->displayname, name) != 0) {
+					talloc_free(ctx->displayname);
+					ctx->displayname = talloc_strdup(ctx, name);
+				}
 				break;
 			}
 		}
@@ -1328,8 +1407,136 @@ static enum mapistore_error table_get_row(void *object, TALLOC_CTX *mem_ctx, enu
 	return MAPISTORE_SUCCESS;
 }
 
+/* R13: what one session last saw of each book, so every session of a user hears of every change. Owned by the
+   session's connection info: it goes when the session does. */
+struct dav_poll_book {
+	char	*norm, *uri, *name;
+	char	*state;		/* the sync token, or every href and ETag when the server keeps no token */
+};
+
+struct dav_poll {
+	struct dav_poll				*prev, *next;
+	const struct mapistore_connection_info	*owner;
+	struct dav_poll_book			*books;
+	size_t					nbooks;
+	bool					primed;
+};
+
+static struct dav_poll *polls;
+
+static int dav_poll_destructor(struct dav_poll *p)
+{
+	DLIST_REMOVE(polls, p);
+	return 0;
+}
+
+static char *book_state(TALLOC_CTX *mem_ctx, struct dav_http *h, const struct dav_book *b)
+{
+	struct dav_change	*ch;
+	size_t			n, i;
+	char			*token, *s;
+	bool			full;
+
+	if (b->sync_token) return talloc_asprintf(mem_ctx, "token %s", b->sync_token);
+	/* shortcut: the server's listing order is taken as stable; sort the lines if a server reorders them */
+	if (dav_sync(h, mem_ctx, b->href, NULL, &ch, &n, &token, &full) != MAPISTORE_SUCCESS) return NULL;
+	if (token) return talloc_asprintf(mem_ctx, "token %s", token);
+	for (s = talloc_strdup(mem_ctx, "etags"), i = 0; s && i < n; i++) {
+		s = talloc_asprintf_append_buffer(s, " %s %s", ch[i].href, ch[i].etag ? ch[i].etag : "-");
+	}
+	return s;
+}
+
+static bool change_add(TALLOC_CTX *mem_ctx, struct mapistore_change **list, size_t *n, const char *uri,
+		       enum mapistore_change_kind kind)
+{
+	struct mapistore_change *grown = talloc_realloc(mem_ctx, *list, struct mapistore_change, *n + 1);
+
+	if (!grown) return false;
+	*list = grown;
+	grown[*n].kind = kind;
+	return (grown[(*n)++].uri = talloc_strdup(grown, uri)) != NULL;
+}
+
+/* One PROPFIND of the books (names and sync tokens), a full listing only for a book without a token. Added and
+   deleted books are reported on personal, the folder holding them. */
+static enum mapistore_error dav_poll_changes(struct mapistore_connection_info *conn_info, TALLOC_CTX *mem_ctx,
+					     struct mapistore_change **listp, size_t *np)
+{
+	static const char	personal[] = DAV_CONTACTS_URI "personal/";
+	struct dav_poll		*p;
+	struct dav_poll_book	*now, *old;
+	struct dav_book		*books;
+	struct dav_http		*h;
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+	size_t			nb, i, j;
+	bool			ok = true;
+
+	*listp = NULL;
+	*np = 0;
+	if (!dav_backend_settings()) return MAPISTORE_SUCCESS;
+	if (!conn_info || !conn_info->username) return MAPISTORE_ERR_INVALID_PARAMETER;
+	for (p = polls; p && p->owner != conn_info; p = p->next);
+	if (!p) {
+		if (!(p = talloc_zero(conn_info, struct dav_poll))) return MAPISTORE_ERR_NO_MEMORY;
+		p->owner = conn_info;
+		DLIST_ADD(polls, p);
+		talloc_set_destructor(p, dav_poll_destructor);
+	}
+	if (!(tmp = talloc_new(NULL))) return MAPISTORE_ERR_NO_MEMORY;
+	h = user_http(tmp, conn_info->username, home_url(tmp, conn_info->username));
+	ret = h ? dav_list_books(h, tmp, &books, &nb) : MAPISTORE_ERR_CONN_REFUSED;
+	now = ret == MAPISTORE_SUCCESS ? talloc_zero_array(p, struct dav_poll_book, nb + 1) : NULL;
+	if (ret == MAPISTORE_SUCCESS && !now) ret = MAPISTORE_ERR_NO_MEMORY;
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < nb; i++) {
+		now[i].norm = dav_href_norm(now, books[i].href);
+		now[i].uri = talloc_asprintf(now, DAV_CONTACTS_URI "%s/", books[i].segment);
+		now[i].name = talloc_strdup(now, books[i].displayname ? books[i].displayname : books[i].segment);
+		if (!now[i].norm || !now[i].uri || !now[i].name) ret = MAPISTORE_ERR_NO_MEMORY;
+		for (j = 0; ret == MAPISTORE_SUCCESS && j < p->nbooks && strcmp(p->books[j].norm, now[i].norm) != 0; j++);
+		old = ret == MAPISTORE_SUCCESS && j < p->nbooks ? &p->books[j] : NULL;
+		now[i].state = book_state(now, h, &books[i]);
+		/* unreadable now: as last seen, so nothing is reported for it */
+		if (!now[i].state && old && old->state) now[i].state = talloc_strdup(now, old->state);
+		if (!p->primed || ret != MAPISTORE_SUCCESS) continue;
+		if (!old) {
+			ok = ok && change_add(mem_ctx, listp, np, personal, MAPISTORE_CHANGE_FOLDER_ADDED);
+			continue;
+		}
+		if (strcmp(old->name, now[i].name) != 0) {
+			ok = ok && change_add(mem_ctx, listp, np, now[i].uri, MAPISTORE_CHANGE_FOLDER_RENAMED);
+		}
+		if (now[i].state && old->state && strcmp(old->state, now[i].state) != 0) {
+			ok = ok && change_add(mem_ctx, listp, np, now[i].uri, MAPISTORE_CHANGE_CONTENTS);
+		}
+	}
+	for (j = 0; ret == MAPISTORE_SUCCESS && p->primed && j < p->nbooks; j++) {
+		for (i = 0; i < nb && strcmp(p->books[j].norm, now[i].norm) != 0; i++);
+		if (i == nb) ok = ok && change_add(mem_ctx, listp, np, personal, MAPISTORE_CHANGE_FOLDER_DELETED);
+	}
+	if (ret == MAPISTORE_SUCCESS && !ok) ret = MAPISTORE_ERR_NO_MEMORY;
+	talloc_free(tmp);
+	if (ret != MAPISTORE_SUCCESS) {
+		/* the state stays as it was: the next poll reports these changes */
+		talloc_free(now);
+		talloc_free(*listp);
+		*listp = NULL;
+		*np = 0;
+		return ret;
+	}
+	talloc_free(p->books);
+	p->books = now;
+	p->nbooks = nb;
+	p->primed = true;
+	/* reads stop reusing what they listed before */
+	if (*np) generation++;
+	return MAPISTORE_SUCCESS;
+}
+
 void dav_folder_fill(struct mapistore_backend *backend)
 {
+	backend->backend.poll_changes = dav_poll_changes;
 	backend->backend.list_contexts = dav_list_contexts;
 	backend->backend.create_context = dav_create_context;
 	backend->context.get_path = get_path;

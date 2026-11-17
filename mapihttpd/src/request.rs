@@ -24,6 +24,8 @@ pub struct Server<A: Authenticator, B: Backend> {
     pub notification_wait: Duration,
     /// The IMAP watchers that wake NotificationWait (M5).
     pub watch: crate::imapwatch::WatchManager,
+    /// The per-session polls of other clients' changes that wake NotificationWait (M6).
+    pub poll: crate::davpoll::PollManager,
 }
 
 /// Who `check_headers` let through.
@@ -314,6 +316,7 @@ pub(crate) mod tests {
             backend: FakeBackend::default(),
             notification_wait: Duration::from_secs(300),
             watch: crate::imapwatch::WatchManager::disabled(),
+            poll: crate::davpoll::PollManager::disabled(),
         }
     }
 

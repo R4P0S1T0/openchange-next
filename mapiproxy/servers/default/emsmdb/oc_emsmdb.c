@@ -160,6 +160,13 @@ uint32_t oc_emsmdb_folder_changed(oc_emsmdb_session *session, const char *mailbo
 	return MAPI_E_SUCCESS;
 }
 
+uint32_t oc_emsmdb_poll_changes(oc_emsmdb_session *session, uint32_t *pending)
+{
+	if (session == NULL || pending == NULL) return MAPI_E_INVALID_PARAMETER;
+	*pending = emsmdbp_notify_poll_changes(session->ctx) > 0 && emsmdbp_notify_pending(session->ctx) ? 1 : 0;
+	return MAPI_E_SUCCESS;
+}
+
 /* The IMAP backend's rules (imap_conn.c, in the dlopen()ed module): only a loopback Dovecot gets the
    master password, read from a 0600 regular file holding one line. */
 static bool oc_emsmdb_loopback(const char *host)

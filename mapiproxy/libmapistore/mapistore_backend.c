@@ -367,6 +367,33 @@ enum mapistore_error mapistore_backend_forget_credentials(const char *username)
 	return retval;
 }
 
+/* Every backend's changes for the session, in backend order; a failing backend is skipped (its changes wait for
+   the next poll) so the others are still reported. */
+enum mapistore_error mapistore_backend_poll_changes(struct mapistore_connection_info *conn_info, TALLOC_CTX *mem_ctx,
+						    struct mapistore_change **listp, size_t *np)
+{
+	struct mapistore_change	*list = NULL, *part;
+	size_t			n = 0, k;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!conn_info || !listp || !np, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		part = NULL;
+		k = 0;
+		if (backends[i].backend->backend.poll_changes(conn_info, mem_ctx, &part, &k) != MAPISTORE_SUCCESS || !k) {
+			continue;
+		}
+		list = talloc_realloc(mem_ctx, list, struct mapistore_change, n + k);
+		MAPISTORE_RETVAL_IF(!list, MAPISTORE_ERR_NO_MEMORY, NULL);
+		memcpy(list + n, part, k * sizeof *part);
+		for (; k > 0; k--, n++) (void) talloc_steal(list, list[n].uri);
+		talloc_free(part);
+	}
+	*listp = list;
+	*np = n;
+	return MAPISTORE_SUCCESS;
+}
+
 /**
    \details Create backend context
 

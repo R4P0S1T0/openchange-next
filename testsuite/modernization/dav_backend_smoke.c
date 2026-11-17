@@ -991,6 +991,7 @@ static int backend_up(void)
     test_settings.fp_key = test_key;
     test_settings.fp_key_len = sizeof test_key;
     dav_backend_set_settings(&test_settings);
+    dav_backend_set_sync_window(0);	/* each read sees the fake's latest state */
     memset(&B, 0, sizeof B);
     CHECK(mapistore_backend_init_defaults(&B) == MAPISTORE_SUCCESS);
     dav_backend_fill(&B);
@@ -2055,6 +2056,79 @@ static int test_second_save_same_handle(void)
     return 0;
 }
 
+/* Task 8: a session's poll reports what changed since that session's last poll (its first only learns the
+   state), so every session of the user hears of a change. */
+static int poll_has(struct mapistore_connection_info *s, size_t want, const char *uri, int kind)
+{
+    struct mapistore_change *ch;
+    size_t n, i;
+    bool found = !uri;
+    CHECK(B.backend.poll_changes(s, root, &ch, &n) == MAPISTORE_SUCCESS);
+    for (i = 0; i < n; i++) if (uri && !strcmp(ch[i].uri, uri) && (int)ch[i].kind == kind) found = true;
+    if (n != want || !found) { fprintf(stderr, "poll: %zu changes, want %zu with %s/%d\n", n, want, uri ? uri : "-", kind); return 1; }
+    return 0;
+}
+
+static int test_poll_reports_contents_and_books(void)
+{
+    struct mapistore_connection_info *s1 = talloc_zero(root, struct mapistore_connection_info);
+    struct mapistore_connection_info *s2 = talloc_zero(root, struct mapistore_connection_info);
+    struct dav_http *h;
+
+    CHECK(!backend_up());
+    s1->username = talloc_strdup(s1, "u");
+    s2->username = talloc_strdup(s2, "u");
+    if (put("pa.vcf", VC("pa"))) return 1;
+    if (poll_has(s1, 0, NULL, 0) || poll_has(s2, 0, NULL, 0) || poll_has(s1, 0, NULL, 0)) return 1;
+    /* webmail edits a card and creates a book */
+    CHECK(!ctl("edit?path=" BOOK "pa.vcf"));
+    h = client("p");
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "Trabalho") == MAPISTORE_SUCCESS);
+    if (poll_has(s1, 2, "dav://contacts/personal/", MAPISTORE_CHANGE_CONTENTS) ||
+        poll_has(s2, 2, "dav://contacts/personal/", MAPISTORE_CHANGE_FOLDER_ADDED) || poll_has(s1, 0, NULL, 0)) return 1;
+    /* a card in the new book, a rename, then the book goes */
+    CHECK(dav_put(h, root, "/dav/u/Contacts/work/w.vcf", VC("w"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
+    if (poll_has(s1, 1, "dav://contacts/work/", MAPISTORE_CHANGE_CONTENTS)) return 1;
+    CHECK(dav_rename_book(h, "/dav/u/Contacts/work/", "Trabalho 2") == MAPISTORE_SUCCESS);
+    if (poll_has(s1, 1, "dav://contacts/work/", MAPISTORE_CHANGE_FOLDER_RENAMED)) return 1;
+    CHECK(dav_delete_book(h, "/dav/u/Contacts/work/") == MAPISTORE_SUCCESS);
+    if (poll_has(s1, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_FOLDER_DELETED)) return 1;
+    /* s2 missed nothing: the card, the rename and the deletion fold into the book's deletion */
+    if (poll_has(s2, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_FOLDER_DELETED)) return 1;
+    talloc_free(h);
+    /* a session's poll state goes with it */
+    talloc_free(s1);
+    talloc_free(s2);
+    backend_down();
+    return 0;
+}
+
+/* R14: reads reuse a context's last sync for a while; a poll that saw a change ends that at once. */
+static int test_sync_throttled_until_poll(void)
+{
+    struct mapistore_connection_info *s = talloc_zero(root, struct mapistore_connection_info);
+    struct dav_folder *f;
+    uint64_t mid, cn0, cn;
+    uint32_t n;
+
+    CHECK(!backend_up());
+    s->username = talloc_strdup(s, "u");
+    dav_backend_set_sync_window(10);
+    if (put("th.vcf", VC("th"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (poll_has(s, 0, NULL, 0) || row_of(f, "th", &mid, &cn0, NULL)) return 1;
+    CHECK(!ctl("edit?path=" BOOK "th.vcf") && put("th2.vcf", VC("th2")) == 0);
+    if (row_of(f, "th", &mid, &cn, &n)) return 1;
+    CHECK(cn == cn0 && n == 1);	/* within the window: the last listing */
+    if (poll_has(s, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_CONTENTS)) return 1;
+    if (row_of(f, "th", &mid, &cn, &n)) return 1;
+    CHECK(cn != cn0 && n == 2);
+    dav_backend_set_sync_window(0);
+    talloc_free(s);
+    backend_down();
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -2084,7 +2158,8 @@ int main(int argc, char **argv)
         || test_save_concurrent_edit_merged() || test_save_412_three_times_conflict()
         || test_save_after_remote_delete_recreates() || test_delete_after_remote_edit_survives()
         || test_folder_create_rename_delete() || test_delete_personal_denied() || test_stale_client_never_reverts()
-        || test_books_are_subfolders() || test_second_save_same_handle()) { fake_stop(); return 1; }
+        || test_books_are_subfolders() || test_second_save_same_handle()
+        || test_poll_reports_contents_and_books() || test_sync_throttled_until_poll()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;

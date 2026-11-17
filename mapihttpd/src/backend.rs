@@ -85,6 +85,9 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = bool> + Send;
     /// None when the IMAP backend is not configured.
     fn watch_params(&self) -> impl Future<Output = Option<WatchParams>> + Send;
+    /// Asks the mapistore backends what other clients changed since the session's last poll; true when
+    /// the session now has notifications queued for its next Execute.
+    fn poll_changes(&self, id: SessionId) -> impl Future<Output = bool> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +106,7 @@ pub enum Call {
         delimiter: u8,
         kind: FolderChange,
     },
+    PollChanges(SessionId),
 }
 
 /// Records every call; answers from the scripted queues, failing once they are empty.
@@ -113,6 +117,8 @@ pub struct FakeBackend {
     pub executes: Mutex<VecDeque<Result<Vec<u8>, u32>>>,
     /// What watch_params answers.
     pub watch: Mutex<Option<WatchParams>>,
+    /// What poll_changes answers, in order; false once empty.
+    pub polls: Mutex<VecDeque<bool>>,
 }
 
 impl FakeBackend {
@@ -169,6 +175,12 @@ impl Backend for FakeBackend {
     async fn watch_params(&self) -> Option<WatchParams> {
         self.watch.lock().unwrap().clone()
     }
+
+    async fn poll_changes(&self, id: SessionId) -> bool {
+        self.record(Call::PollChanges(id));
+        let next = self.polls.lock().unwrap().pop_front();
+        next.unwrap_or(false)
+    }
 }
 
 /// Stands in for EMSMDB in builds without the C library: every Connect fails closed.
@@ -193,6 +205,10 @@ impl Backend for NoBackend {
 
     async fn watch_params(&self) -> Option<WatchParams> {
         None
+    }
+
+    async fn poll_changes(&self, _: SessionId) -> bool {
+        false
     }
 }
 
@@ -228,6 +244,7 @@ pub mod c {
             reply: oneshot::Sender<bool>,
         },
         WatchParams(oneshot::Sender<Option<WatchParams>>),
+        PollChanges(SessionId, oneshot::Sender<bool>),
     }
 
     /// One OS thread makes every C call and owns every C session handle.
@@ -328,6 +345,10 @@ pub mod c {
                 Job::WatchParams(reply) => {
                     let _ = reply.send(ffi::watch_params());
                 }
+                Job::PollChanges(id, reply) => {
+                    let pending = sessions.get_mut(&id).is_some_and(|s| s.poll_changes());
+                    let _ = reply.send(pending);
+                }
             }
         }
     }
@@ -381,6 +402,12 @@ pub mod c {
 
         async fn watch_params(&self) -> Option<WatchParams> {
             self.ask(Job::WatchParams).await.flatten()
+        }
+
+        async fn poll_changes(&self, id: SessionId) -> bool {
+            self.ask(|reply| Job::PollChanges(id, reply))
+                .await
+                .unwrap_or(false)
         }
     }
 
@@ -474,6 +501,7 @@ mod tests {
                     .await
             );
             assert!(fake.watch_params().await.is_none());
+            assert!(!fake.poll_changes(7).await);
         });
         let exec = Call::Execute {
             id: 7,
@@ -494,7 +522,8 @@ mod tests {
                     mailbox: "INBOX".into(),
                     delimiter: b'/',
                     kind: FolderChange::Added
-                }
+                },
+                Call::PollChanges(7)
             ]
         );
     }

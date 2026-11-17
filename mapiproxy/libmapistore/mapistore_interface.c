@@ -494,6 +494,16 @@ _PUBLIC_ enum mapistore_error mapistore_forget_credentials(struct mapistore_cont
 	return mapistore_backend_forget_credentials(username);
 }
 
+/* The session's changes from other clients (see backend.poll_changes); username must be the session's. */
+_PUBLIC_ enum mapistore_error mapistore_poll_changes(struct mapistore_context *mstore_ctx, const char *username, TALLOC_CTX *mem_ctx,
+						     struct mapistore_change **listp, size_t *np)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx || !mstore_ctx->conn_info, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !mstore_ctx->conn_info->username || strcmp(username, mstore_ctx->conn_info->username) != 0,
+			    MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	return mapistore_backend_poll_changes(mstore_ctx->conn_info, mem_ctx, listp, np);
+}
+
 _PUBLIC_ enum mapistore_error mapistore_create_root_folder(const char *username, enum mapistore_context_role ctx_role, uint64_t fid, const char *name, TALLOC_CTX *mem_ctx, char **mapistore_urip)
 {
 	/* Sanity checks */

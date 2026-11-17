@@ -179,7 +179,7 @@ static enum mapistore_error open_message(void *folder, TALLOC_CTX *mem_ctx, uint
 	}
 	ctx = f->ctx;
 	if (!(it = dav_item_by_mid(ctx, mid))) {
-		ret = dav_context_sync(ctx);
+		ret = dav_context_resync(ctx);
 		if (ret != MAPISTORE_SUCCESS) return ret;
 		if (!(it = dav_item_by_mid(ctx, mid))) return MAPISTORE_ERR_NOT_FOUND;
 	}
@@ -741,7 +741,7 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 	norm = dav_href_norm(tmp, path);
 	if (!etag || !norm) {
 		OC_DEBUG(1, "DAV backend: mid 0x%"PRIx64" saved without an ETag; the next sync shows it\n", m->mid);
-		dav_context_sync(ctx);
+		dav_context_resync(ctx);
 		talloc_free(tmp);
 		return MAPISTORE_SUCCESS;
 	}

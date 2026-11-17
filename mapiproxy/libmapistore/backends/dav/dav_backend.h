@@ -38,6 +38,8 @@ enum mapistore_error mapistore_init_backend(void);
 
 /* Replaces the settings (tests; NULL = not configured). */
 void dav_backend_set_settings(struct dav_settings *);
+/* How long reads reuse a context's last sync and book listing, in seconds (default 10; tests: 0). */
+void dav_backend_set_sync_window(int);
 
 /* First field of every backend object, so get_properties can dispatch. */
 enum dav_object_type {
@@ -76,6 +78,13 @@ struct dav_context {
 	size_t			ndeleted;
 	unsigned		deletions;	/* ever added to deleted: the state of the deletions' change */
 	struct dav_folder	*root;
+	/* R14: reads reuse these for the sync window, until a poll sees a change (see dav_folder.c) */
+	time_t			synced_at, books_at;
+	unsigned		synced_gen, books_gen;
+	struct dav_book		*books;		/* the user's books, as last listed */
+	size_t			nbooks;
+	struct dav_context	**children;	/* personal: the other books' contexts, kept between opens */
+	size_t			nchildren;
 };
 
 struct dav_folder {
@@ -121,8 +130,10 @@ struct dav_table {
 void dav_folder_fill(struct mapistore_backend *);
 /* The session's HTTP client, with the password as it is now; NULL without credentials. */
 struct dav_http *dav_context_http(struct dav_context *, TALLOC_CTX *);
-/* Brings the item list up to date (sync-collection). */
+/* Brings the item list up to date (sync-collection); a read within the sync window reuses the last one. */
 enum mapistore_error dav_context_sync(struct dav_context *);
+/* The same, now: after a write, or when an item the client names is missing. */
+enum mapistore_error dav_context_resync(struct dav_context *);
 struct dav_item *dav_item_by_mid(struct dav_context *, uint64_t mid);
 /* Fetches the cards not cached yet (addressbook-multiget). */
 enum mapistore_error dav_context_fetch(struct dav_context *);

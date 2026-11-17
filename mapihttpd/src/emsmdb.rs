@@ -167,6 +167,14 @@ pub async fn connect<A: Authenticator, B: Backend>(
     let mut rep = with_body(req, body);
     rep.set_cookie = Some(srv.sessions.create(&user, cred_hash, c.id, Instant::now()));
     srv.watch.session_started(&user);
+    if let Some((_, signal)) = srv
+        .sessions
+        .sessions_of(&user)
+        .into_iter()
+        .find(|(id, _)| *id == c.id)
+    {
+        srv.poll.session_started(c.id, signal);
+    }
     rep.expiration_ms = srv.sessions.idle_ms();
     rep
 }
@@ -221,6 +229,7 @@ pub async fn disconnect<A: Authenticator, B: Backend>(
     }
     let user = session.user();
     if let Some(id) = session.remove() {
+        srv.poll.session_ended(id);
         srv.backend.disconnect(id).await;
     }
     if let Some(user) = user {
@@ -257,6 +266,7 @@ pub async fn sweep<A: Authenticator, B: Backend>(srv: &Server<A, B>, now: Instan
     // NSPI sessions hold no backend state.
     srv.nspi.sessions.expire(now);
     for id in srv.sessions.expire(now) {
+        srv.poll.session_ended(id);
         srv.backend.disconnect(id).await;
     }
 }

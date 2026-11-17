@@ -245,7 +245,7 @@ _PUBLIC_ const struct FILETIME *emsmdbp_notify_hierrev(struct emsmdbp_context *c
    the next synchronization), so the parent gets one, strictly newer than any before, and its row goes
    out. shortcut: the time lives in the session only; a new session starts with a full hierarchy
    synchronization anyway. */
-static void emsmdbp_notify_hierarchy_changed(struct emsmdbp_context *ctx, uint64_t parent_fid)
+static int emsmdbp_notify_hierarchy_changed(struct emsmdbp_context *ctx, uint64_t parent_fid)
 {
 	static NTTIME		last;
 	struct emsmdbp_hierrev	*h;
@@ -259,13 +259,13 @@ static void emsmdbp_notify_hierarchy_changed(struct emsmdbp_context *ctx, uint64
 	for (h = ctx->hierrev; h && h->fid != parent_fid; h = h->next);
 	if (!h) {
 		h = talloc_zero(ctx, struct emsmdbp_hierrev);
-		if (!h) return;
+		if (!h) return 0;
 		h->fid = parent_fid;
 		DLIST_ADD(ctx->hierrev, h);
 	}
 	h->time.dwLowDateTime = now & 0xffffffff;
 	h->time.dwHighDateTime = now >> 32;
-	emsmdbp_notify_folder_changed(ctx, parent_fid, EMSMDBP_FOLDER_MODIFIED);
+	return emsmdbp_notify_folder_changed(ctx, parent_fid, EMSMDBP_FOLDER_MODIFIED);
 }
 
 /**
@@ -420,5 +420,40 @@ _PUBLIC_ int emsmdbp_notify_mailbox_changed(struct emsmdbp_context *ctx, const c
 		}
 		talloc_free(parent);
 	}
+	return queued;
+}
+
+/**
+   \details Other clients changed folders of mapistore backends (mapistore_poll_changes): queue their rows
+
+   A folder whose contents changed sends its row (a newer PidTagLocalCommitTimeMax makes Outlook sync it); a
+   folder that gained or lost a subfolder gets a newer PidTagHierRev, as in emsmdbp_notify_mailbox_changed.
+   Changes of folders Outlook does not know are skipped.
+
+   \param ctx the session's EMSMDB provider context
+
+   \return the number of replies queued
+ */
+_PUBLIC_ int emsmdbp_notify_poll_changes(struct emsmdbp_context *ctx)
+{
+	TALLOC_CTX		*tmp;
+	struct mapistore_change	*changes;
+	size_t			n, i;
+	uint64_t		fid;
+	int			queued = 0;
+
+	if (!ctx || !ctx->notify_tables || !ctx->username) return 0;	/* nobody to tell: no need to ask */
+	tmp = talloc_new(NULL);
+	if (!tmp) return 0;
+	if (mapistore_poll_changes(ctx->mstore_ctx, ctx->username, tmp, &changes, &n) != MAPISTORE_SUCCESS) n = 0;
+	for (i = 0; i < n; i++) {
+		if (emsmdbp_get_fid_from_uri(ctx, changes[i].uri, &fid) != MAPI_E_SUCCESS) continue;
+		if (changes[i].kind == MAPISTORE_CHANGE_FOLDER_ADDED || changes[i].kind == MAPISTORE_CHANGE_FOLDER_DELETED) {
+			queued += emsmdbp_notify_hierarchy_changed(ctx, fid);
+		} else {
+			queued += emsmdbp_notify_folder_changed(ctx, fid, EMSMDBP_FOLDER_MODIFIED);
+		}
+	}
+	talloc_free(tmp);
 	return queued;
 }

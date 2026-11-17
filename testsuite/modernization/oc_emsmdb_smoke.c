@@ -1404,6 +1404,67 @@ static int test_notify_new_top_level_mailbox(void)
     return 0;
 }
 
+/* M6 FFI: a backend's poll names changed folders by URI; each becomes a row Outlook's deep table hears of. */
+static const char *poll_contents_uri, *poll_parent_uri;
+static char poll_user[64];
+static enum mapistore_error fake_poll(struct mapistore_connection_info *ci, TALLOC_CTX *mem,
+                                      struct mapistore_change **list, size_t *n)
+{
+    struct mapistore_change *c = talloc_zero_array(mem, struct mapistore_change, 3);
+    snprintf(poll_user, sizeof poll_user, "%s", ci && ci->username ? ci->username : "");
+    *list = c;
+    *n = 0;
+    if (!poll_contents_uri) return MAPISTORE_SUCCESS;
+    c[0].uri = talloc_strdup(c, poll_contents_uri);
+    c[0].kind = MAPISTORE_CHANGE_CONTENTS;
+    c[1].uri = talloc_strdup(c, poll_parent_uri);
+    c[1].kind = MAPISTORE_CHANGE_FOLDER_ADDED;
+    c[2].uri = talloc_strdup(c, "pollfake://nowhere/");
+    c[2].kind = MAPISTORE_CHANGE_CONTENTS;
+    *n = 3;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_ffi_poll_changes(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    uint64_t quick = 0;
+    uint32_t pending = 7;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "pollfake"; fake.backend.description = "test"; fake.backend.namespace = "pollfake://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = no_contexts;
+    fake.backend.poll_changes = fake_poll;
+    fake.backend.create_context = fai_create_context; fake.context.get_root_folder = fai_root_folder;
+    fake.properties.get_properties = unread_props;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(oc_emsmdb_poll_changes(NULL, &pending) == MAPI_E_INVALID_PARAMETER);
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(oc_emsmdb_poll_changes(session, NULL) == MAPI_E_INVALID_PARAMETER);
+    /* no deep hierarchy table: nobody to tell */
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
+    CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
+    CHECK(strcmp(poll_user, "alice@example.invalid") == 0);
+    /* two folders of the IPM subtree, now the fake backend's */
+    CHECK(openchangedb_get_fid_by_name(session->ctx->oc_ctx, session->ctx->username, first_fids[4], "Quick Step Settings", &quick)
+          == MAPI_E_SUCCESS);
+    CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, sync_issues, "pollfake://contents/") == MAPI_E_SUCCESS);
+    CHECK(openchangedb_set_mapistoreURI(session->ctx->oc_ctx, session->ctx->username, quick, "pollfake://parent/") == MAPI_E_SUCCESS);
+    poll_contents_uri = "pollfake://contents/";
+    poll_parent_uri = "pollfake://parent/";
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 1);
+    /* the changed folder's row, and the parent's with a newer PidTagHierRev; the unknown URI is skipped */
+    CHECK(execute_notifies(session, 4096, NULL) == 2);
+    CHECK(emsmdbp_notify_hierrev(session->ctx, quick) != NULL && emsmdbp_notify_hierrev(session->ctx, sync_issues) == NULL);
+    poll_contents_uri = NULL;
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
+    oc_emsmdb_disconnect(session);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: %s smb.conf\n", argv[0]); return 2; }
@@ -1419,7 +1480,7 @@ int main(int argc, char **argv)
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
         test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
-        test_connect_fails_closed() || test_connect_passes_credentials() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_notify_new_top_level_mailbox() ||
+        test_connect_fails_closed() || test_connect_passes_credentials() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_ffi_poll_changes() || test_notify_new_top_level_mailbox() ||
         test_ffi_watch_params(argv[1])) return 1;  /* last: it leaves mapistore:imap_* options set */
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

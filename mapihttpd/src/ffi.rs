@@ -55,6 +55,10 @@ mod linked {
             kind: u32,
             pending: *mut u32,
         ) -> u32;
+        pub(super) fn oc_emsmdb_poll_changes(
+            session: *mut OcEmsmdbSession,
+            pending: *mut u32,
+        ) -> u32;
         pub(super) fn oc_emsmdb_imap_watch_params(
             host: *mut *mut c_char,
             port: *mut u16,
@@ -212,6 +216,14 @@ mod linked {
             };
             status == 0 && pending == 1
         }
+
+        /// Queues the notifications for what other clients changed; true when this call queued some.
+        pub fn poll_changes(&mut self) -> bool {
+            let mut pending = 0u32;
+            // SAFETY: the handle is live (owned by self); pending points at a live local.
+            let status = unsafe { oc_emsmdb_poll_changes(self.ptr.as_ptr(), &mut pending) };
+            status == 0 && pending == 1
+        }
     }
 }
 
@@ -309,6 +321,10 @@ mod tests {
         };
         assert_eq!((status, len), (EC_RPC_FAILED, 0));
         assert_eq!(out, [0xEE; 16]);
+        let mut pending = 7u32;
+        // SAFETY: a NULL session is rejected before pending is written; pending is a live local.
+        let status = unsafe { linked::oc_emsmdb_poll_changes(std::ptr::null_mut(), &mut pending) };
+        assert_eq!((status, pending), (0x8007_0057, 7));
         // SAFETY: disconnecting NULL is a no-op.
         unsafe { linked::oc_emsmdb_disconnect(std::ptr::null_mut()) };
 
