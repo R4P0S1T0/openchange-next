@@ -35,6 +35,8 @@ char *dav_card_render(TALLOC_CTX *, const struct dav_card *);
 const char *dav_card_kind(const struct dav_card *);
 struct dav_line *dav_card_find(const struct dav_card *, const char *name, const char *type_param, unsigned index);
 void dav_card_set(struct dav_card *, const char *name, const char *type_param, unsigned index, const char *value);
+/* TYPE=a,b or bare a;b parameters, case-insensitive */
+bool dav_line_has_type(const struct dav_line *, const char *type);
 char *dav_text_unescape(TALLOC_CTX *, const char *);
 char *dav_text_escape(TALLOC_CTX *, const char *);
 

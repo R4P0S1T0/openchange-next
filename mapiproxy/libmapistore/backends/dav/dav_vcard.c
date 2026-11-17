@@ -192,7 +192,7 @@ char *dav_card_render(TALLOC_CTX *mem, const struct dav_card *c)
 	return out;
 }
 
-static bool has_type(const struct dav_line *l, const char *type)
+bool dav_line_has_type(const struct dav_line *l, const char *type)
 {
 	size_t i, tl = strlen(type);
 
@@ -216,7 +216,7 @@ struct dav_line *dav_card_find(const struct dav_card *c, const char *name, const
 	for (i = 0; i < c->nlines; i++) {
 		struct dav_line *l = &c->lines[i];
 		if (strcasecmp(l->name, name) != 0) continue;
-		if (type && !has_type(l, type)) continue;
+		if (type && !dav_line_has_type(l, type)) continue;
 		if (index-- == 0) return l;
 	}
 	return NULL;
