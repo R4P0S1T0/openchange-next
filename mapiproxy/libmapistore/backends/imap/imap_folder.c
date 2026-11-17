@@ -1056,7 +1056,7 @@ _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, 
 {
 	const struct Binary_r *ock = NULL, *opcl = NULL;
 	bool own = (tag == PidTagChangeKey || tag == PidTagPredecessorChangeList) &&
-		   mapistore_change_client_keys(NULL, NULL, cn, &ock, &opcl) == MAPISTORE_SUCCESS;
+		   mapistore_change_client_keys(ctx->username, NULL, cn, &ock, &opcl) == MAPISTORE_SUCCESS;
 
 	switch (tag) {
 	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);

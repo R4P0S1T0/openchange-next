@@ -143,25 +143,29 @@ _PUBLIC_ enum mapistore_error mapistore_change_record_client(const char *usernam
 	return c->ck && c->pcl ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
 }
 
-/* The keys Outlook uploaded for change number cn; with a NULL uri any object that holds cn. */
+/* The keys Outlook uploaded for change number cn; with a NULL uri any object of the user that
+   holds cn (change numbers come from per-user counters: another user's cn is not this one). */
 _PUBLIC_ enum mapistore_error mapistore_change_client_keys(const char *username, const char *uri, uint64_t cn,
 							   const struct Binary_r **ck, const struct Binary_r **pcl)
 {
 	const struct change	*c;
-	char			*key = uri ? talloc_asprintf(NULL, "%s\n%s", username, uri) : NULL;
+	char			*key = talloc_asprintf(NULL, "%s\n%s", username, uri ? uri : "");
+	size_t			len;
 
-	if (uri && !key) {
-		return MAPISTORE_ERR_NO_MEMORY;
-	}
-	c = key ? change_find(key) : changes;
-	if (key) {
+	if (!username || !key) {
 		talloc_free(key);
+		return username ? MAPISTORE_ERR_NO_MEMORY : MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (uri) {
+		c = change_find(key);
 		if (c && !(c->cn == cn && c->ck)) {
 			c = NULL;
 		}
 	} else {
-		for (; c && !(c->cn == cn && c->ck); c = c->next);
+		len = strlen(key);
+		for (c = changes; c && !(c->cn == cn && c->ck && strncmp(c->key, key, len) == 0); c = c->next);
 	}
+	talloc_free(key);
 	if (!c) {
 		return MAPISTORE_ERR_NOT_FOUND;
 	}

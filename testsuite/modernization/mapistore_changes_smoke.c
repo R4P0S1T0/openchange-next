@@ -55,6 +55,12 @@ int main(void)
     CHECK(mapistore_change_number(u, uri, "s4", fake_source, &counter, &c, &when) == MAPISTORE_SUCCESS && c == b);
     CHECK(mapistore_change_number(u, uri, "s5", fake_source, &counter, &c, &when) == MAPISTORE_SUCCESS && c != b);
     CHECK(mapistore_change_client_keys(u, uri, c, &gck, &gpcl) != MAPISTORE_SUCCESS);
+    /* without a URI, only the given user's own changes match: change numbers are per-user counters */
+    CHECK(mapistore_change_record_client("bob", "dav://y/1", fake_source, &counter, &ck, &pcl) == MAPISTORE_SUCCESS);
+    CHECK(mapistore_change_number("bob", "dav://y/1", "t1", fake_source, &counter, &other, &when) == MAPISTORE_SUCCESS);
+    CHECK(mapistore_change_client_keys("bob", NULL, other, &gck, &gpcl) == MAPISTORE_SUCCESS);
+    CHECK(mapistore_change_client_keys("alice", NULL, other, &gck, &gpcl) != MAPISTORE_SUCCESS);
+    CHECK(mapistore_change_client_keys("bo", NULL, other, &gck, &gpcl) != MAPISTORE_SUCCESS);
     puts("mapistore changes smoke: ok");
     return 0;
 }
