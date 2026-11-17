@@ -456,6 +456,12 @@ enum mapistore_error mapistore_notification_deliver_delete(struct mapistore_cont
 
 enum mapistore_error mapistore_notification_payload_newmail(TALLOC_CTX *, char *, char *, char *, char, uint8_t **, size_t *);
 
+/* mapistore_changes.c: per-item change numbers; source allocates a fresh cn */
+typedef enum mapistore_error (*mapistore_cn_source)(void *, uint64_t *);
+enum mapistore_error mapistore_change_number(const char *, const char *, const char *, mapistore_cn_source, void *, uint64_t *, time_t *);
+enum mapistore_error mapistore_change_record_client(const char *, const char *, mapistore_cn_source, void *, const struct Binary_r *, const struct Binary_r *);
+enum mapistore_error mapistore_change_client_keys(const char *, const char *, uint64_t, const struct Binary_r **, const struct Binary_r **);
+
 __END_DECLS
 
 #endif	/* ! __MAPISTORE_H */

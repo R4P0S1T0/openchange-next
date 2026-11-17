@@ -847,6 +847,14 @@ bin/dav-backend-test: testsuite/modernization/dav_backend_smoke.c $(MAPISTORE_DA
 	mkdir -p bin
 	$(CC) $(CFLAGS) $(DAV_CFLAGS) -Imapiproxy/libmapistore/backends/dav -o $@ $< $(MAPISTORE_DAV_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS)
 
+bin/mapistore-changes-test: testsuite/modernization/mapistore_changes_smoke.c mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(LIBS)
+
+.PHONY: check-mapistore-changes
+check-mapistore-changes: libmapistore bin/mapistore-changes-test
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/mapistore-changes-test
+
 .PHONY: check-dav-backend
 check-dav-backend: libmapistore $(MAPISTORE_DAV_SO) bin/dav-backend-test
 	rm -rf bin/dav-backend-fixture
@@ -858,6 +866,7 @@ mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION):  mapiproxy/libmapistore/m
 							mapiproxy/libmapistore/mapistore_backend_defaults.po		\
 							mapiproxy/libmapistore/mapistore_tdb_wrap.po			\
 							mapiproxy/libmapistore/mapistore_indexing.po			\
+							mapiproxy/libmapistore/mapistore_changes.po			\
 							mapiproxy/libmapistore/mapistore_replica_mapping.po		\
 							mapiproxy/libmapistore/mapistore_namedprops.po			\
 							mapiproxy/libmapistore/gen_ndr/ndr_mapistore_notification.po	\
