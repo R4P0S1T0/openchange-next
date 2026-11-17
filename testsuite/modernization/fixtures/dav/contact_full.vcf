@@ -1,0 +1,29 @@
+BEGIN:VCARD
+VERSION:3.0
+UID:fixture-contact-1
+PRODID:-//Apple Inc.//iOS 17//EN
+N:Exemplo;Conceição Ângela;;Dra.
+FN:Dra. Conceição Ângela Exemplo
+NICKNAME:Ceiça
+ORG:Empresa Exemplo Ltda;Diretoria
+TITLE:Diretora
+EMAIL;TYPE=INTERNET,WORK,pref:conceicao@exemplo.test
+EMAIL;TYPE=INTERNET,HOME:conceicao.casa@exemplo.test
+EMAIL;TYPE=INTERNET,OTHER:outra@exemplo.test
+TEL;TYPE=CELL,VOICE,pref:+55 11 90000-0001
+TEL;TYPE=WORK,VOICE:+55 11 3000-0002
+TEL;TYPE=HOME,VOICE:+55 11 3000-0003
+TEL;TYPE=FAX,WORK:+55 11 3000-0004
+ITEM1.TEL:+55 11 3000-0005
+ITEM1.X-ABLABEL:Ramal Custom
+ADR;TYPE=WORK,pref:;;Rua das Palmeiras\, 100;São Paulo;SP;01000-000;Brasil
+ADR;TYPE=HOME:;;Avenida Açaí 200\nFundos;Curitiba;PR;80000-000;Brasil
+BDAY:1985-03-27
+NOTE:Linha um\nLinha dois com acentuação: ção\, ã\; fim.\nLinha tres
+URL;TYPE=WORK:https://exemplo.test/
+X-PHONE-CUSTOM;X-FOO=bar:valor desconhecido
+X-ABUID:11111111-2222-3333-4444-555555555555:ABPerson
+CATEGORIES:Clientes,VIP
+PHOTO;TYPE=PNG;ENCODING=b:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD
+ UlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==
+END:VCARD
