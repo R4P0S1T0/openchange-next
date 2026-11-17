@@ -199,15 +199,53 @@ void *dav_change_value(TALLOC_CTX *mem_ctx, struct dav_context *ctx, const char 
 	return mapistore_change_value(mem_ctx, ctx->username, uri, &ctx->replica_guid, cn, when, tag);
 }
 
+/* The book named segment in ctx (user, home and indexing set): its URI, server path and root folder. */
+static enum mapistore_error context_book(struct dav_context *ctx, const char *segment)
+{
+	const char *path = strchr(strstr(ctx->home, "://") ? strstr(ctx->home, "://") + 3 : ctx->home, '/');
+
+	ctx->uri = talloc_asprintf(ctx, DAV_CONTACTS_URI "%s/", segment);
+	ctx->book_href = talloc_asprintf(ctx, "%s%s%s/", path ? path : "/", path && path[strlen(path) - 1] == '/' ? "" : "/",
+					 escape_segment(ctx, segment, true));
+	ctx->book_norm = ctx->book_href ? dav_href_norm(ctx, ctx->book_href) : NULL;
+	ctx->root = talloc_zero(ctx, struct dav_folder);
+	if (!ctx->uri || !ctx->book_norm || !ctx->root) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	ctx->root->type = DAV_OBJ_FOLDER;
+	ctx->root->ctx = ctx;
+	return fmid_for_uri(ctx, ctx->uri, &ctx->root->fid) == MAPISTORE_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+}
+
+/* Another book of the same user and session, as its root folder. */
+static struct dav_folder *book_folder(TALLOC_CTX *mem_ctx, const struct dav_context *like, const char *segment)
+{
+	struct dav_context *ctx = talloc_zero(mem_ctx, struct dav_context);
+
+	if (!ctx) return NULL;
+	ctx->username = talloc_strdup(ctx, like->username);
+	ctx->ictx = like->ictx;
+	ctx->replica_guid = like->replica_guid;
+	ctx->mailbox_guid = like->mailbox_guid;
+	ctx->tags = like->tags;
+	ctx->fp = like->fp;
+	ctx->home = talloc_strdup(ctx, like->home);
+	if (!ctx->username || !ctx->home || context_book(ctx, segment) != MAPISTORE_SUCCESS) {
+		talloc_free(ctx);
+		return NULL;
+	}
+	return ctx->root;
+}
+
 /* The context's user is the session's own: a URI only chooses one of that user's books. */
 static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapistore_connection_info *conn_info,
 					       struct indexing_context *ictx, const char *uri, void **backend_object)
 {
 	struct dav_context	*ctx;
-	struct dav_folder	*root;
-	const char		*seg, *path;
+	const char		*seg;
 	char			*name;
 	size_t			len;
+	enum mapistore_error	ret;
 
 	*backend_object = NULL;
 	if (!dav_backend_settings()) {
@@ -241,7 +279,6 @@ static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapis
 	}
 	ctx->username = talloc_strdup(ctx, conn_info->username);
 	ctx->ictx = ictx;
-	ctx->uri = talloc_strdup(ctx, uri);
 	ctx->replica_guid = conn_info->replica_guid;
 	if (conn_info->oc_ctx) {
 		uint16_t repl_id;
@@ -258,23 +295,16 @@ static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapis
 	}
 	ctx->fp = fpstore;
 	ctx->home = home_url(ctx, ctx->username);
-	path = ctx->home ? strchr(strstr(ctx->home, "://") ? strstr(ctx->home, "://") + 3 : ctx->home, '/') : NULL;
-	ctx->book_href = talloc_asprintf(ctx, "%s%s%s/", path ? path : "/", path && path[strlen(path) - 1] == '/' ? "" : "/",
-					 escape_segment(ctx, name, true));
-	ctx->book_norm = ctx->book_href ? dav_href_norm(ctx, ctx->book_href) : NULL;
-	root = talloc_zero(ctx, struct dav_folder);
-	if (!ctx->username || !ctx->uri || !ctx->home || !ctx->book_norm || !root) {
+	if (!ctx->username || !ctx->home) {
 		talloc_free(ctx);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
-	root->type = DAV_OBJ_FOLDER;
-	root->ctx = ctx;
-	if (fmid_for_uri(ctx, ctx->uri, &root->fid) != MAPISTORE_SUCCESS) {
+	ret = context_book(ctx, name);
+	if (ret != MAPISTORE_SUCCESS) {
 		talloc_free(ctx);
-		return MAPISTORE_ERR_DATABASE_OPS;
+		return ret;
 	}
-	ctx->root = root;
-	*backend_object = root;
+	*backend_object = ctx->root;
 	return MAPISTORE_SUCCESS;
 }
 
@@ -357,10 +387,9 @@ static void item_drop_card(struct dav_context *ctx, struct dav_item *it)
 	}
 }
 
-static bool item_remove(struct dav_context *ctx, size_t i)
+static void item_free(struct dav_context *ctx, size_t i)
 {
 	struct dav_item *it = &ctx->items[i];
-	bool ok = deleted_add(ctx, it->mid);
 
 	item_drop_card(ctx, it);
 	talloc_free(it->href);
@@ -368,6 +397,13 @@ static bool item_remove(struct dav_context *ctx, size_t i)
 	talloc_free(it->etag);
 	memmove(it, it + 1, (ctx->nitems - i - 1) * sizeof *it);
 	ctx->nitems--;
+}
+
+static bool item_remove(struct dav_context *ctx, size_t i)
+{
+	bool ok = deleted_add(ctx, ctx->items[i].mid);
+
+	item_free(ctx, i);
 	return ok;
 }
 
@@ -527,9 +563,283 @@ enum mapistore_error dav_context_fetch(struct dav_context *ctx)
 	return ret;
 }
 
+time_t dav_etag_time(struct dav_context *ctx, const char *norm, const char *etag)
+{
+	char		*uri = dav_item_uri(NULL, ctx, norm);
+	uint64_t	cn;
+	time_t		when;
+
+	if (!uri || !etag || mapistore_change_number(ctx->username, uri, etag, cn_source, ctx, &cn, &when) != MAPISTORE_SUCCESS) {
+		when = time(NULL);
+	}
+	talloc_free(uri);
+	return when;
+}
+
+enum mapistore_error dav_item_put(struct dav_context *ctx, uint64_t mid, const char *href, const char *etag, struct dav_card *card)
+{
+	struct indexing_context	*ictx = ctx->ictx;
+	TALLOC_CTX		*tmp = talloc_new(NULL);
+	char			*norm = tmp ? dav_href_norm(tmp, href) : NULL, *uri = norm ? dav_item_uri(tmp, ctx, norm) : NULL, *old;
+	struct dav_item		*it;
+	enum mapistore_error	ret;
+	bool			soft;
+	size_t			i;
+
+	if (!uri) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	/* a card recreated at a new href: the old one leaves the list without being reported deleted */
+	for (i = ctx->nitems; i > 0; i--) {
+		if (ctx->items[i - 1].mid == mid && strcmp(ctx->items[i - 1].norm, norm) != 0) item_free(ctx, i - 1);
+	}
+	if (ictx->get_uri(ictx, ctx->username, tmp, mid, &old, &soft) != MAPISTORE_SUCCESS) {
+		ret = ictx->add_fmid(ictx, ctx->username, mid, uri);
+	} else {
+		ret = strcmp(old, uri) == 0 ? MAPISTORE_SUCCESS : ictx->update_fmid(ictx, ctx->username, mid, uri);
+	}
+	if (ret == MAPISTORE_SUCCESS) ret = item_upsert(ctx, href, norm, etag);
+	if (ret == MAPISTORE_SUCCESS && (it = item_find(ctx, norm, NULL))) {
+		item_drop_card(ctx, it);
+		it->card = talloc_steal(ctx, card);
+		deleted_remove(ctx, mid);
+	}
+	talloc_free(tmp);
+	return ret;
+}
+
+static enum mapistore_error cn_given(void *p, uint64_t *cn)
+{
+	*cn = *(uint64_t *) p;
+	return MAPISTORE_SUCCESS;
+}
+
+/* pcl with xid (a SizedXid) as its entry for xid's replica. */
+static struct Binary_r *pcl_with(TALLOC_CTX *mem_ctx, const struct Binary_r *pcl, const struct Binary_r *xid)
+{
+	struct Binary_r	*b = talloc_zero(mem_ctx, struct Binary_r);
+	uint32_t	i = 0, n;
+
+	if (!b || !xid || xid->cb != 23 || !(b->lpb = talloc_array(b, uint8_t, pcl->cb + xid->cb))) {
+		return NULL;
+	}
+	while (i < pcl->cb && (n = pcl->lpb[i]) >= 17 && i + 1 + n <= pcl->cb) {
+		if (memcmp(pcl->lpb + i + 1, xid->lpb + 1, 16) != 0) {
+			memcpy(b->lpb + b->cb, pcl->lpb + i, 1 + n);
+			b->cb += 1 + n;
+		}
+		i += 1 + n;
+	}
+	memcpy(b->lpb + b->cb, xid->lpb, xid->cb);
+	b->cb += xid->cb;
+	return b;
+}
+
+void dav_change_record(struct dav_context *ctx, const char *uri, const char *etag, const struct Binary_r *ck,
+		       const struct Binary_r *pcl, bool merged)
+{
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+	uint64_t		cn;
+	time_t			when;
+
+	if (!uri || !etag || !ck || !pcl || !(tmp = talloc_new(NULL))) {
+		return;	/* no keys from Outlook (online save): the new ETag is a server change */
+	}
+	if (!merged) {
+		ret = mapistore_change_record_client(ctx->username, uri, cn_source, ctx, ck, pcl);
+	} else if ((ret = cn_source(ctx, &cn)) == MAPISTORE_SUCCESS) {
+		/* a server change that follows Outlook's: Outlook takes it without a conflict */
+		ret = mapistore_change_record_client(ctx->username, uri, cn_given, &cn,
+			mapistore_change_value(tmp, ctx->username, uri, &ctx->replica_guid, cn, 0, PidTagChangeKey),
+			pcl_with(tmp, pcl, mapistore_change_value(tmp, ctx->username, uri, &ctx->replica_guid, cn, 0,
+								  PidTagPredecessorChangeList)));
+	}
+	/* the version just stored is that change */
+	if (ret != MAPISTORE_SUCCESS ||
+	    mapistore_change_number(ctx->username, uri, etag, cn_source, ctx, &cn, &when) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "DAV backend: change keys of %s not kept\n", uri);
+	}
+	talloc_free(tmp);
+}
+
+static char *book_displayname(struct dav_context *);
+
+static bool is_personal(const struct dav_context *ctx)
+{
+	return strcmp(ctx->uri, DAV_CONTACTS_URI "personal/") == 0;
+}
+
+static const char *row_string(struct SRow *row, enum MAPITAGS unicode_tag, enum MAPITAGS string8_tag)
+{
+	uint32_t i;
+
+	for (i = 0; row && i < row->cValues; i++) {
+		if ((enum MAPITAGS) row->lpProps[i].ulPropTag == unicode_tag) return row->lpProps[i].value.lpszW;
+		if ((enum MAPITAGS) row->lpProps[i].ulPropTag == string8_tag) return row->lpProps[i].value.lpszA;
+	}
+	return NULL;
+}
+
+/* Books Outlook created under Contacts (create_folder) open through it. */
 static enum mapistore_error open_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, void **child)
 {
-	return MAPISTORE_ERR_NOT_FOUND;	/* an address book has no subfolders */
+	struct dav_folder	*p = parent, *f;
+	size_t			len = strlen(DAV_CONTACTS_URI);
+	char			*uri, *seg;
+	bool			soft;
+
+	if (!p || p->type != DAV_OBJ_FOLDER || !child) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (!is_personal(p->ctx) || p->ctx->ictx->get_uri(p->ctx->ictx, p->ctx->username, mem_ctx, fid, &uri, &soft) != MAPISTORE_SUCCESS ||
+	    strncmp(uri, DAV_CONTACTS_URI, len) != 0 || strlen(uri + len) < 2 || strchr(uri + len, '/') != uri + strlen(uri) - 1 ||
+	    strcmp(uri, p->ctx->uri) == 0) {
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	seg = talloc_strndup(mem_ctx, uri + len, strlen(uri + len) - 1);
+	f = seg ? book_folder(mem_ctx, p->ctx, seg) : NULL;
+	if (!f) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	*child = f;
+	return MAPISTORE_SUCCESS;
+}
+
+/* A contacts folder Outlook creates under Contacts is a new address book (books are flat). */
+static enum mapistore_error create_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, struct SRow *row, void **childp)
+{
+	struct dav_folder	*p = parent, *f;
+	struct indexing_context	*ictx;
+	struct dav_http		*h;
+	const char		*name, *klass;
+	struct GUID		g = GUID_random();
+	char			*seg, *uri;
+	enum mapistore_error	ret;
+
+	if (!p || p->type != DAV_OBJ_FOLDER || !childp || !fid) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	klass = row_string(row, PidTagContainerClass, PR_CONTAINER_CLASS);
+	if (!is_personal(p->ctx) || (klass && strcmp(klass, "IPF.Contact") != 0)) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	name = row_string(row, PidTagDisplayName, PR_DISPLAY_NAME);
+	if (!name || !*name) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	ictx = p->ctx->ictx;
+	seg = GUID_string(mem_ctx, &g);
+	uri = seg ? talloc_asprintf(mem_ctx, DAV_CONTACTS_URI "%s/", seg) : NULL;
+	if (!uri) {
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	/* first, so the book's root takes the folder ID Outlook was given */
+	ret = ictx->add_fmid(ictx, p->ctx->username, fid, uri);
+	f = ret == MAPISTORE_SUCCESS ? book_folder(mem_ctx, p->ctx, seg) : NULL;
+	h = f ? dav_context_http(f->ctx, mem_ctx) : NULL;
+	ret = ret != MAPISTORE_SUCCESS ? ret : !f ? MAPISTORE_ERR_NO_MEMORY : !h ? MAPISTORE_ERR_CONN_REFUSED
+	      : dav_mkcol_book(h, f->ctx->book_href, name);
+	talloc_free(h);
+	if (ret != MAPISTORE_SUCCESS) {
+		if (f && ictx->del_fmid) ictx->del_fmid(ictx, p->ctx->username, fid, MAPISTORE_PERMANENT_DELETE);
+		if (f) talloc_free(f->ctx);
+		return ret;
+	}
+	f->ctx->displayname = talloc_strdup(f->ctx, name);
+	*childp = f;
+	return MAPISTORE_SUCCESS;
+}
+
+/* A new PidTagDisplayName renames the book; other folder properties are not kept. */
+enum mapistore_error dav_folder_set_properties(struct dav_folder *f, struct SRow *row)
+{
+	const char		*name = row_string(row, PidTagDisplayName, PR_DISPLAY_NAME);
+	struct dav_http		*h;
+	enum mapistore_error	ret;
+
+	if (!name || !*name || (book_displayname(f->ctx) && strcmp(name, f->ctx->displayname) == 0)) {
+		return MAPISTORE_SUCCESS;
+	}
+	h = dav_context_http(f->ctx, NULL);
+	ret = h ? dav_rename_book(h, f->ctx->book_href, name) : MAPISTORE_ERR_CONN_REFUSED;
+	talloc_free(h);
+	if (ret == MAPISTORE_SUCCESS) {
+		talloc_free(f->ctx->displayname);
+		f->ctx->displayname = talloc_strdup(f->ctx, name);
+	}
+	return ret;
+}
+
+/* personal is the user's default book: SOGo refuses to delete it, and so do we. */
+static enum mapistore_error delete_folder(void *folder)
+{
+	struct dav_folder	*f = folder;
+	struct dav_http		*h;
+	enum mapistore_error	ret;
+
+	if (!f || f->type != DAV_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	if (is_personal(f->ctx)) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	h = dav_context_http(f->ctx, NULL);
+	ret = h ? dav_delete_book(h, f->ctx->book_href) : MAPISTORE_ERR_CONN_REFUSED;
+	talloc_free(h);
+	return ret == MAPISTORE_ERR_NOT_FOUND ? MAPISTORE_SUCCESS : ret;
+}
+
+/* Outlook deletes the version it last agreed on (If-Match): a card changed on another client since is
+   kept, and its newer version reaches Outlook again on the next sync (nothing lost wins over delete). */
+static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
+{
+	struct dav_folder	*f = folder;
+	struct dav_context	*ctx;
+	struct dav_item		*it;
+	struct dav_http		*h;
+	TALLOC_CTX		*tmp;
+	uint64_t		fp[DAV_F_COUNT];
+	char			*etag = NULL, *norm, *uri;
+	enum mapistore_error	ret;
+
+	if (!f || f->type != DAV_OBJ_FOLDER) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	ctx = f->ctx;
+	if (!(it = dav_item_by_mid(ctx, mid))) {
+		ret = dav_context_sync(ctx);
+		if (ret != MAPISTORE_SUCCESS) return ret;
+		if (!(it = dav_item_by_mid(ctx, mid))) return MAPISTORE_SUCCESS;	/* already gone */
+	}
+	tmp = talloc_new(NULL);
+	norm = tmp ? talloc_strdup(tmp, it->norm) : NULL;
+	if (!norm) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	if (dav_fp_get(ctx->fp, tmp, ctx->username, norm, fp, &etag) != MAPISTORE_SUCCESS) {
+		etag = talloc_strdup(tmp, it->etag);
+	}
+	h = dav_context_http(ctx, tmp);
+	ret = h ? dav_delete(h, it->href, etag) : MAPISTORE_ERR_CONN_REFUSED;
+	if (ret == MAPISTORE_ERR_CONFLICT) {
+		OC_DEBUG(3, "DAV backend: %s changed elsewhere; Outlook's delete dropped\n", norm);
+		/* a fresh change number on the next read, whatever Outlook was shown */
+		uri = dav_item_uri(tmp, ctx, norm);
+		dav_change_value(tmp, ctx, uri, talloc_asprintf(tmp, "%s kept", etag), PidTagChangeNumber);
+		dav_context_sync(ctx);
+		ret = MAPISTORE_SUCCESS;
+	} else if (ret == MAPISTORE_SUCCESS || ret == MAPISTORE_ERR_NOT_FOUND) {
+		if (dav_fp_delete(ctx->fp, ctx->username, norm) != MAPISTORE_SUCCESS) {
+			OC_DEBUG(1, "DAV backend: fingerprints of %s not deleted\n", norm);
+		}
+		dav_context_sync(ctx);
+		ret = MAPISTORE_SUCCESS;
+	}
+	talloc_free(tmp);
+	return ret;
 }
 
 static enum mapistore_error get_child_count(void *object, enum mapistore_table_type type, uint32_t *count)
@@ -907,6 +1217,9 @@ void dav_folder_fill(struct mapistore_backend *backend)
 	backend->context.get_path = get_path;
 	backend->context.get_root_folder = get_root_folder;
 	backend->folder.open_folder = open_folder;
+	backend->folder.create_folder = create_folder;
+	backend->folder.delete = delete_folder;
+	backend->folder.delete_message = delete_message;
 	backend->folder.open_table = open_table;
 	backend->folder.get_child_count = get_child_count;
 	backend->folder.get_deleted_fmids = get_deleted_fmids;

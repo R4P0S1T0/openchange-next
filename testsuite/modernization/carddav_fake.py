@@ -4,7 +4,9 @@
 Usage: carddav_fake.py <port-file> <state-dir>
 Serves http://127.0.0.1:<port>/dav/u/Contacts/ with Basic auth u/p, one book "personal".
 The port goes to <port-file> once listening; <state-dir>/requests.log gets "METHOD path status".
-Test controls (no auth): POST /_ctl/edit?path=P, /_ctl/delete?path=P (act as another client),
+Test controls (no auth): POST /_ctl/edit?path=P[&set=LINE], /_ctl/delete?path=P (act as another client;
+set replaces the lines with LINE's name and parameters, or adds LINE),
+/_ctl/conflict?n=N (the next N PUTs with If-Match answer 412, as if another client wrote first),
 /_ctl/fail?code=N (every request answers N; 0 clears), /_ctl/slow?secs=S (delay every request),
 /_ctl/serve?file=F (PROPFIND and REPORT answer 207 with the file F until serve?file= is empty),
 /_ctl/invalidate_token (the next sync with a token gets 403 valid-sync-token; real SOGo
@@ -23,7 +25,7 @@ from xml.sax.saxutils import escape
 HOME = "/dav/u/Contacts/"
 AUTH = "Basic dTpw"  # u:p
 lock = threading.Lock()
-S = {"fail": 0, "slow": 0.0, "invalidate": False, "serve": "", "version": 0}
+S = {"fail": 0, "slow": 0.0, "invalidate": False, "serve": "", "version": 0, "conflict": 0}
 books = {"personal": {"name": "Personal", "items": {}, "counter": 1794920000, "changes": []}}
 
 
@@ -119,12 +121,17 @@ class H(BaseHTTPRequestHandler):
                 if op == "edit":
                     S["version"] += 1
                     body = book["items"][name][0]
+                    line = q.get("set", ["X-EDITED:%d" % S["version"]])[0]
+                    head = line.split(":", 1)[0] + ":"
+                    body = "".join(l for l in body.splitlines(True) if not l.startswith(head))
                     i = body.rfind("END:V")
-                    body = body[:i] + "X-EDITED:%d\r\n" % S["version"] + body[i:] if i >= 0 else body + "X-EDITED:1\r\n"
+                    body = body[:i] + line + "\r\n" + body[i:] if i >= 0 else body + line + "\r\n"
                     book["items"][name] = (body, '"gcs%08d"' % S["version"])
                 else:
                     del book["items"][name]
                 bump(book, name, op == "delete")
+            elif op == "conflict":
+                S["conflict"] = int(q["n"][0])
             elif op == "fail":
                 S["fail"] = int(q["code"][0])
             elif op == "slow":
@@ -181,6 +188,9 @@ class H(BaseHTTPRequestHandler):
         if m == "PUT":
             im, inm = self.headers.get("If-Match"), self.headers.get("If-None-Match")
             if (inm == "*" and item) or (im and (not item or im != item[1])):
+                return self.send(412)
+            if im and S["conflict"]:
+                S["conflict"] -= 1
                 return self.send(412)
             S["version"] += 1
             etag = '"gcs%08d"' % S["version"]

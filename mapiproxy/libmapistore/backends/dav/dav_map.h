@@ -63,6 +63,11 @@ void dav_field_set(struct dav_card *, enum dav_field, const char *value);
 void dav_list_set_members(struct dav_card *, const struct dav_member_resolver *r,
 			  const struct dav_member *, size_t count);
 
+/* Parameter NAME of a line, quotes removed; NULL when absent. */
+char *dav_line_param(TALLOC_CTX *, const struct dav_line *, const char *name);
+/* CARD lines without EMAIL or FN take them from the member of m that names them. */
+void dav_list_complete(struct dav_card *, const struct dav_member *m, size_t count);
+
 enum mapistore_error dav_card_get_prop(TALLOC_CTX *, const struct dav_card *, const struct dav_named_tags *,
 				       const struct dav_member_resolver *, enum MAPITAGS, void **value);
 /* props may hold PidTagAttachDataBinary = the contact picture attachment's bytes.

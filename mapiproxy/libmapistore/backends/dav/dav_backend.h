@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 
 #include "mapiproxy/libmapistore/mapistore.h"
 #include "dav_map.h"
@@ -87,13 +88,21 @@ struct dav_message {
 	uint32_t		type;		/* DAV_OBJ_MESSAGE */
 	struct dav_folder	*folder;
 	uint64_t		mid;
-	char			*href, *etag;
-	struct dav_card		*card;
+	char			*href, *etag;	/* href: normalized; both NULL for a message not saved yet */
+	char			*path;		/* the card's server path, as the server spells it */
+	struct dav_card		*card;		/* the version opened; NULL for a new message */
+	/* Outlook's write */
+	struct SRow		*props;
+	struct Binary_r		*client_ck, *client_pcl;
+	uint64_t		*prior;		/* fingerprints agreed before this open (an ICS upload's base); NULL: none */
+	bool			full;		/* purged: the upload carries the whole message, absent = removed */
+	struct dav_attachment	*photo;		/* the contact picture Outlook attached */
 };
 
 struct dav_attachment {
 	uint32_t		type;		/* DAV_OBJ_ATTACHMENT: the contact picture */
 	struct dav_message	*message;
+	struct Binary_r		*data;		/* written by Outlook */
 };
 
 struct dav_table {
@@ -119,6 +128,14 @@ enum mapistore_error dav_context_fetch(struct dav_context *);
 char *dav_item_uri(TALLOC_CTX *, struct dav_context *, const char *norm);
 /* A change property of the object at uri, renewed whenever state (an ETag) changes. */
 void *dav_change_value(TALLOC_CTX *, struct dav_context *, const char *uri, const char *state, enum MAPITAGS);
+/* When the card at norm reached this version: the first time this process saw its ETag. */
+time_t dav_etag_time(struct dav_context *, const char *norm, const char *etag);
+/* After a PUT of the card of mid at href: the item list and the indexing follow (a new href takes the MID). */
+enum mapistore_error dav_item_put(struct dav_context *, uint64_t mid, const char *href, const char *etag, struct dav_card *);
+/* The state at uri is Outlook's change (its keys), or a merge of it (a server change whose PCL includes it). */
+void dav_change_record(struct dav_context *, const char *uri, const char *etag, const struct Binary_r *ck,
+		       const struct Binary_r *pcl, bool merged);
+enum mapistore_error dav_folder_set_properties(struct dav_folder *, struct SRow *);
 uint64_t *dav_i8(TALLOC_CTX *, uint64_t);
 uint32_t *dav_long(TALLOC_CTX *, uint32_t);
 uint8_t *dav_bool(TALLOC_CTX *, bool);
@@ -134,6 +151,16 @@ enum mapistore_error dav_message_properties(struct dav_message *, TALLOC_CTX *, 
 					    struct mapistore_property_data *);
 enum mapistore_error dav_attachment_properties(struct dav_message *, TALLOC_CTX *, uint16_t, enum MAPITAGS *,
 					       struct mapistore_property_data *);
+
+/* dav_merge.c */
+bool dav_field_applies(const struct dav_card *, enum dav_field);
+/* A members field (keys) with each mailto: key that names a CARD line of c (by EMAIL) as that line's key. */
+char *dav_members_normalize(TALLOC_CTX *, const struct dav_card *c, const char *keys);
+/* Outlook's values into the server's card (see dav_merge.c); base NULL: no fingerprint. today: YYYY-MM-DD. */
+enum mapistore_error dav_merge(TALLOC_CTX *, struct dav_card *server, const char *outlook[DAV_F_COUNT],
+			       const bool outlook_present[DAV_F_COUNT], const uint64_t base[DAV_F_COUNT],
+			       time_t outlook_time, time_t server_time, const uint8_t *key, size_t key_len,
+			       const char *today);
 
 /* dav_cred.c: per-user password, reference counted by sessions. The result of get is valid only until the
    next dav_cred_set or dav_cred_forget of that user: fetch it for each HTTP client, never keep it. */

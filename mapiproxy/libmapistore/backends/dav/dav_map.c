@@ -399,6 +399,42 @@ _PUBLIC_ void dav_list_set_members(struct dav_card *c, const struct dav_member_r
 	talloc_free(tmp);
 }
 
+_PUBLIC_ char *dav_line_param(TALLOC_CTX *mem, const struct dav_line *l, const char *name)
+{
+	return param_value(mem, l, name);
+}
+
+_PUBLIC_ void dav_list_complete(struct dav_card *c, const struct dav_member *m, size_t count)
+{
+	TALLOC_CTX *tmp = talloc_new(NULL);
+	size_t i, j;
+	char *k;
+
+	for (i = 0; tmp && i < c->nlines; i++) {
+		struct dav_line *l = &c->lines[i];
+		bool email, fn;
+
+		if (strcasecmp(l->name, "CARD") != 0 || !(k = member_key(tmp, l))) continue;
+		email = param_value(tmp, l, "EMAIL") != NULL;
+		fn = param_value(tmp, l, "FN") != NULL;
+		for (j = 0; j < count && !(email && fn); j++) {
+			char **p, *e, *n;
+
+			if (!m[j].key || !member_matches(tmp, l, k, m[j].key)) continue;
+			e = !email && m[j].email ? make_param(tmp, "EMAIL", m[j].email) : NULL;
+			n = !fn && m[j].name ? make_param(tmp, "FN", m[j].name) : NULL;
+			p = talloc_realloc(c, l->params, char *, l->nparams + 2);
+			if (!p) break;
+			l->params = p;
+			if (e) p[l->nparams++] = talloc_steal(p, e);
+			if (n) p[l->nparams++] = talloc_steal(p, n);
+			email = fn = true;
+			l->touched = true;
+		}
+	}
+	talloc_free(tmp);
+}
+
 static void set_members_from_keys(struct dav_card *c, const char *value)
 {
 	TALLOC_CTX *tmp = talloc_new(NULL);
