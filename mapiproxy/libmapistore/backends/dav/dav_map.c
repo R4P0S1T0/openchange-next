@@ -283,6 +283,27 @@ static char *member_key(TALLOC_CTX *mem, const struct dav_line *l)
 	return email && *email ? talloc_asprintf(mem, "mailto:%s", lower(mem, email)) : NULL;
 }
 
+/* Whether Outlook sees this member (its contact resolves, or it has an address); *eid set when it resolves. */
+static bool member_visible(TALLOC_CTX *mem, const struct dav_line *l, const char *key,
+			   const struct dav_member_resolver *r, struct Binary_r **eid)
+{
+	char *email = param_value(mem, l, "EMAIL");
+
+	*eid = NULL;
+	if (strncmp(key, "mailto:", 7) != 0 && r && r->entryid_for_uid) *eid = r->entryid_for_uid(r->ctx, mem, key);
+	return *eid || (email && *email);
+}
+
+/* An Outlook member key names this line: same key, or mailto: of the line's EMAIL (shown as a one-off). */
+static bool member_matches(TALLOC_CTX *mem, const struct dav_line *l, const char *line_key, const char *key)
+{
+	char *email;
+
+	if (strcmp(line_key, key) == 0) return true;
+	if (strncmp(key, "mailto:", 7) != 0 || !(email = param_value(mem, l, "EMAIL"))) return false;
+	return strcmp(lower(mem, email), key + 7) == 0;
+}
+
 static char *keys_field(TALLOC_CTX *mem, char **keys, size_t n)
 {
 	qsort(keys, n, sizeof(*keys), cmp_str);
@@ -338,19 +359,23 @@ _PUBLIC_ char *dav_field_get(TALLOC_CTX *mem, const struct dav_card *c, enum dav
 	}
 }
 
-_PUBLIC_ void dav_list_set_members(struct dav_card *c, const struct dav_member *m, size_t count)
+_PUBLIC_ void dav_list_set_members(struct dav_card *c, const struct dav_member_resolver *r,
+				   const struct dav_member *m, size_t count)
 {
 	TALLOC_CTX *tmp = talloc_new(NULL);
+	struct Binary_r *eid;
 	size_t i, j;
 	char *k;
 
 	if (!tmp) return;
-	/* drop the members Outlook no longer has (back to front: drop_line shifts) */
+	/* drop the members Outlook no longer has (back to front: drop_line shifts); a member Outlook
+	   was never shown (no contact, no address) is not Outlook's to remove */
 	for (i = c->nlines; i-- > 0; ) {
 		if (strcasecmp(c->lines[i].name, "CARD") != 0) continue;
 		k = member_key(tmp, &c->lines[i]);
-		for (j = 0; k && j < count; j++) if (m[j].key && strcmp(m[j].key, k) == 0) break;
-		if (!k || j == count) drop_line(c, &c->lines[i]);
+		if (!k || !member_visible(tmp, &c->lines[i], k, r, &eid)) continue;
+		for (j = 0; j < count; j++) if (m[j].key && member_matches(tmp, &c->lines[i], k, m[j].key)) break;
+		if (j == count) drop_line(c, &c->lines[i]);
 	}
 	for (j = 0; j < count; j++) {
 		const char *params[2];
@@ -363,7 +388,7 @@ _PUBLIC_ void dav_list_set_members(struct dav_card *c, const struct dav_member *
 		for (i = 0; i < c->nlines; i++) {
 			if (strcasecmp(c->lines[i].name, "CARD") != 0) continue;
 			k = member_key(tmp, &c->lines[i]);
-			if (k && strcmp(k, m[j].key) == 0) break;
+			if (k && member_matches(tmp, &c->lines[i], k, m[j].key)) break;
 		}
 		if (i < c->nlines) continue;	/* already a member: its line stays as it is */
 		if (email && *email) params[np++] = make_param(tmp, "EMAIL", email);
@@ -389,7 +414,7 @@ static void set_members_from_keys(struct dav_card *c, const char *value)
 		m[k].key = key;
 		k++;
 	}
-	if (m) dav_list_set_members(c, m, k);
+	if (m) dav_list_set_members(c, NULL, m, k);
 	talloc_free(tmp);
 }
 
@@ -553,13 +578,12 @@ static bool list_entries(TALLOC_CTX *mem, const struct dav_card *c, const struct
 	for (i = 0; i < c->nlines; i++) {
 		const struct dav_line *l = &c->lines[i];
 		char *key, *email, *name;
-		struct Binary_r *eid = NULL, *mb, *ob;
+		struct Binary_r *eid, *mb, *ob;
 
 		if (strcasecmp(l->name, "CARD") != 0 || !(key = member_key(mem, l))) continue;
+		if (!member_visible(mem, l, key, r, &eid)) continue;	/* nothing Outlook could send to */
 		email = param_value(mem, l, "EMAIL");
 		name = param_value(mem, l, "FN");
-		if (strncmp(key, "mailto:", 7) != 0 && r && r->entryid_for_uid) eid = r->entryid_for_uid(r->ctx, mem, key);
-		if (!eid && (!email || !*email)) continue;	/* nothing Outlook could send to */
 		ob = one_off(o->lpbin, name, email);
 		mb = eid ? wrapped(m->lpbin, eid) : one_off(m->lpbin, name, email);
 		if (!ob || !mb) return false;

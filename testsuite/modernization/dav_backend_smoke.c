@@ -422,11 +422,29 @@ static int test_field_set_no_line_injection(void)
     CHECK(out && (c = dav_card_parse(root, out, strlen(out))));
     CHECK(dav_card_find(c, "TEL", NULL, 4) == NULL); /* only the 4 mapped TEL lines */
     for (f = 0; f < (int)c->nlines; f++) CHECK(strcasecmp(c->lines[f].name, "TEL") || !strstr(c->lines[f].value, "evil") || strstr(c->lines[f].value, "\\n"));
-    dav_list_set_members(l, &m, 1);
+    dav_list_set_members(l, NULL, &m, 1);
     dav_field_set(l, DAV_F_LIST_MEMBERS, "uid1\r\nTEL:evil");
     out = dav_card_render(root, l);
     CHECK(out && (l = dav_card_parse(root, out, strlen(out))));
     CHECK(dav_card_find(l, "TEL", NULL, 0) == NULL);
+    return 0;
+}
+
+/* MS-OXOCNTC 4.x example list: PidLidDistributionListMembers (a one-off and a wrapped contact EntryID)
+   with PidLidDistributionListChecksum 0xD4B0223A (algorithm of 3.1.5.11: polynomial 0xEDB88320, seed 0). */
+static int dist_list_crc_vector(void)
+{
+    static const char *hex =
+        "00000000812b1fa4bea310199d6e00dd010f540200000180540068006f006d00610073002000480061006d0062006f00720067"
+        "00000053004d005400500000007500730065007200310040006500780061006d0070006c0065002e0063006f006d000000"
+        "00000000c091add3519dcf11a4a900aa0047faa4c300000000c242428260001647ada95c0777b74be20700612a7bab49f64e"
+        "4b9c52dbfb5a53aa1c000000f04ea60000612a7bab49f64e4b9c52dbfb5a53aa1c000000f0d5b00000";
+    uint8_t buf[256];
+    size_t i, n = strlen(hex) / 2;
+    unsigned x;
+    CHECK(n == 191);
+    for (i = 0; i < n; i++) { CHECK(sscanf(hex + 2 * i, "%2x", &x) == 1); buf[i] = x; }
+    CHECK(calculateCRC(buf, 0, n) == 0xD4B0223A);
     return 0;
 }
 
@@ -472,6 +490,7 @@ static int test_map_list_members(void)
     for (i = 0, total = 0; i < 3; i++) { memcpy(cat + total, m->lpbin[i].lpb, m->lpbin[i].cb); total += m->lpbin[i].cb; }
     CHECK(dav_card_get_prop(root, c, &fake_tags, &r, fake_tags.dl_checksum, &v) == MAPISTORE_SUCCESS);
     CHECK(*(uint32_t *)v == calculateCRC(cat, 0, total));
+    CHECK(dist_list_crc_vector() == 0);
     /* MAPI -> members: the free address comes back as mailto: (Task 7 makes its stub card) */
     CHECK(dav_props_members(root, card_row(c, &r), &fake_tags, &r, &mem, &n) && n == 3);
     CHECK(!strcmp(mem[0].key, M5) && !strcmp(mem[0].email, "conceicao@exemplo.test"));
@@ -479,19 +498,37 @@ static int test_map_list_members(void)
     dav_props_to_fields(root, card_row(c, &r), &fake_tags, &r, NULL, fields, present);
     CHECK(present[DAV_F_LIST_MEMBERS] && !strcmp(fields[DAV_F_LIST_MEMBERS], M5 "\n" M7 "\nmailto:livre@exemplo.test"));
     CHECK(present[DAV_F_LIST_NAME] && !strcmp(fields[DAV_F_LIST_NAME], "Lista Exemplo"));
-    dav_list_set_members(c, mem, n);
+    /* the mailto: member Outlook sends back is SOGo's -9 line (same EMAIL): kept verbatim, nothing added */
+    in = slurp("list.vlf", &len);
+    dav_list_set_members(c, &r, mem, n);
+    CHECK(!strcmp(dav_card_render(root, c), in));
+    /* a new free address from Outlook becomes a CARD line with an empty value (Task 7 makes the stub);
+       a member Outlook removed goes */
+    mem[1].key = "mailto:nova@exemplo.test";
+    mem[1].email = "nova@exemplo.test";
+    mem[1].name = "Nova";
+    dav_list_set_members(c, &r, mem, n);
     out = dav_card_render(root, c);
-    CHECK(strstr(out, "CARD;EMAIL=livre@exemplo.test;FN=Livre Exemplo:\r\n") && !strstr(out, "-9-"));
-    CHECK(strstr(out, "CARD;EMAIL=conceicao@exemplo.test;FN=Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo:16F4F4-6\r\n AFC4800-5"));
+    CHECK(strstr(out, "CARD;EMAIL=nova@exemplo.test;FN=Nova:\r\n") && !strstr(out, "-7-") && strstr(out, "-9-")
+          && strstr(out, "-5-"));
+    /* a member Outlook was never shown (no contact, no EMAIL) survives an Outlook write */
+    in = talloc_asprintf(root, "BEGIN:VLIST\r\nCARD:unseen-uid.vcf\r\nCARD;EMAIL=a@b.test:gone.vcf\r\nFN:L\r\nEND:VLIST\r\n");
+    c = dav_card_parse(root, in, strlen(in));
+    CHECK(c);
+    CHECK(dav_card_get_prop(root, c, &fake_tags, &r, fake_tags.dl_members, &v) == MAPISTORE_SUCCESS
+          && ((struct BinaryArray_r *)v)->cValues == 1);
+    dav_list_set_members(c, &r, mem, 0);
+    out = dav_card_render(root, c);
+    CHECK(strstr(out, "CARD:unseen-uid.vcf\r\n") && !strstr(out, "gone"));
     /* every member known: Outlook's list gives back exactly SOGo's member lines */
     r.ctx = &three;
     c = load_card("list.vlf");
     in = slurp("list.vlf", &len);
     CHECK(dav_props_members(root, card_row(c, &r), &fake_tags, &r, &mem, &n) && n == 3);
-    dav_list_set_members(c, mem, n);
+    dav_list_set_members(c, &r, mem, n);
     CHECK(!strcmp(dav_card_render(root, c), in));
     e = dav_card_parse(root, "BEGIN:VLIST\r\nEND:VLIST\r\n", 24);
-    dav_list_set_members(e, mem, n);
+    dav_list_set_members(e, &r, mem, n);
     for (i = 0; i < 3; i++) {
         struct dav_line *a = dav_card_find(c, "CARD", NULL, i), *b = dav_card_find(e, "CARD", NULL, i);
         CHECK(a && b && !strcmp(a->value, b->value) && a->nparams == 2 && b->nparams == 2

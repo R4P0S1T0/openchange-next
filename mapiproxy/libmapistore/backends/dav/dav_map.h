@@ -58,7 +58,10 @@ enum mapistore_error dav_named_tags_resolve(struct namedprops_context *, struct 
 char *dav_field_get(TALLOC_CTX *, const struct dav_card *, enum dav_field);
 /* value NULL removes; untrusted input is escaped/neutralized, never a line break. */
 void dav_field_set(struct dav_card *, enum dav_field, const char *value);
-void dav_list_set_members(struct dav_card *, const struct dav_member *, size_t count);
+/* Set merge: a mailto: key keeps a line with that EMAIL; lines Outlook was never shown (r cannot
+   resolve them and they have no EMAIL; r may be NULL) are kept. */
+void dav_list_set_members(struct dav_card *, const struct dav_member_resolver *r,
+			  const struct dav_member *, size_t count);
 
 enum mapistore_error dav_card_get_prop(TALLOC_CTX *, const struct dav_card *, const struct dav_named_tags *,
 				       const struct dav_member_resolver *, enum MAPITAGS, void **value);
