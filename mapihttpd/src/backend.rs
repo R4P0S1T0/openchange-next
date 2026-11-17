@@ -267,6 +267,18 @@ pub mod c {
         }
     }
 
+    /// A session whose Connect caller went away (client hung up) never reaches the session table,
+    /// so nothing would disconnect it: drop it here, which forgets the user's password.
+    fn reply_connect<S>(
+        sessions: &mut HashMap<SessionId, S>,
+        reply: oneshot::Sender<Result<Connected, u32>>,
+        result: Result<Connected, u32>,
+    ) {
+        if let Err(Ok(c)) = reply.send(result) {
+            sessions.remove(&c.id);
+        }
+    }
+
     fn worker(rx: mpsc::Receiver<Job>) {
         let mut sessions: HashMap<SessionId, ffi::Session> = HashMap::new();
         let mut next: SessionId = 0;
@@ -282,7 +294,7 @@ pub mod c {
                             dn_prefix,
                         }
                     });
-                    let _ = reply.send(result);
+                    reply_connect(&mut sessions, reply, result);
                 }
                 Job::Execute {
                     id,
@@ -369,6 +381,49 @@ pub mod c {
 
         async fn watch_params(&self) -> Option<WatchParams> {
             self.ask(Job::WatchParams).await.flatten()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        /// Counts drops, standing in for ffi::Session (whose drop runs oc_emsmdb_disconnect).
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn connected(id: SessionId) -> Result<Connected, u32> {
+            Ok(Connected {
+                id,
+                display_name: String::new(),
+                dn_prefix: String::new(),
+            })
+        }
+
+        #[test]
+        fn test_connect_caller_gone_disconnects() {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut sessions = HashMap::new();
+            sessions.insert(1, Counted(drops.clone()));
+            sessions.insert(2, Counted(drops.clone()));
+
+            let (tx, rx) = oneshot::channel();
+            reply_connect(&mut sessions, tx, connected(1));
+            assert!(rx.blocking_recv().unwrap().is_ok());
+            assert!(sessions.contains_key(&1));
+
+            // The client hung up while Connect was in flight: nobody will ever disconnect id 2.
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            reply_connect(&mut sessions, tx, connected(2));
+            assert!(!sessions.contains_key(&2));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
         }
     }
 }
