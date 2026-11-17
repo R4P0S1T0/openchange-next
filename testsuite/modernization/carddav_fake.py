@@ -118,7 +118,10 @@ class H(BaseHTTPRequestHandler):
                     return self.send(404)
                 if op == "edit":
                     S["version"] += 1
-                    book["items"][name] = (book["items"][name][0] + "X-EDITED:1\r\n", '"gcs%08d"' % S["version"])
+                    body = book["items"][name][0]
+                    i = body.rfind("END:V")
+                    body = body[:i] + "X-EDITED:%d\r\n" % S["version"] + body[i:] if i >= 0 else body + "X-EDITED:1\r\n"
+                    book["items"][name] = (body, '"gcs%08d"' % S["version"])
                 else:
                     del book["items"][name]
                 bump(book, name, op == "delete")

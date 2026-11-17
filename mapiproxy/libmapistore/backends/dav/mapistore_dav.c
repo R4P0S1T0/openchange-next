@@ -97,27 +97,18 @@ static enum mapistore_error dav_init(void)
 	return MAPISTORE_SUCCESS;
 }
 
-/* An empty list is a success: a failure would abort the list of every other backend. */
-static enum mapistore_error dav_list_contexts(const char *user, struct indexing_context *ictx,
-					      TALLOC_CTX *mem_ctx, struct mapistore_contexts_list **list)
+void dav_backend_set_settings(struct dav_settings *s)
 {
-	*list = NULL;
-	return MAPISTORE_SUCCESS;
-}
-
-static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapistore_connection_info *conn,
-					       struct indexing_context *ictx, const char *uri, void **ctx)
-{
-	return MAPISTORE_ERR_NOT_AVAILABLE;
+	settings = s;
 }
 
 void dav_backend_fill(struct mapistore_backend *backend)
 {
 	backend->backend.init = dav_init;
-	backend->backend.list_contexts = dav_list_contexts;
-	backend->backend.create_context = dav_create_context;
 	backend->backend.set_credentials = dav_cred_set;
 	backend->backend.forget_credentials = dav_cred_forget;
+	dav_folder_fill(backend);
+	dav_message_fill(backend);
 }
 
 _PUBLIC_ enum mapistore_error mapistore_init_backend(void)

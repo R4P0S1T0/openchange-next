@@ -817,15 +817,15 @@ fi
 AC_SUBST(LIBETPAN_CFLAGS)
 AC_SUBST(LIBETPAN_LIBS)
 
-dnl Optional CardDAV contacts backend (M6): off by default, needs libcurl and expat.
+dnl Optional CardDAV contacts backend (M6): off by default, needs libcurl, expat and GnuTLS (fingerprint HMAC).
 AC_ARG_ENABLE(mapistore-dav,
               AS_HELP_STRING([--enable-mapistore-dav],
-                             [Build the CardDAV contacts mapistore backend (needs libcurl and expat)]),
+                             [Build the CardDAV contacts mapistore backend (needs libcurl, expat and GnuTLS)]),
               enable_mapistore_dav=$enableval,
               enable_mapistore_dav="no")
 if test x"$enable_mapistore_dav" = x"yes"; then
-   PKG_CHECK_MODULES([DAV], [libcurl expat], [],
-                     [AC_MSG_ERROR([--enable-mapistore-dav needs libcurl and expat (libcurl4-openssl-dev, libexpat1-dev)])])
+   PKG_CHECK_MODULES([DAV], [libcurl expat gnutls], [],
+                     [AC_MSG_ERROR([--enable-mapistore-dav needs libcurl, expat and GnuTLS (libcurl4-openssl-dev, libexpat1-dev, libgnutls28-dev)])])
    OC_MAPISTORE="$OC_MAPISTORE mapistore_dav"
    OC_MAPISTORE_CLEAN="$OC_MAPISTORE_CLEAN mapistore_dav-clean"
    OC_MAPISTORE_INSTALL="$OC_MAPISTORE_INSTALL mapistore_dav-install"

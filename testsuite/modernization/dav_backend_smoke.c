@@ -25,6 +25,8 @@
 #include "dav_vcard.h"
 #include "dav_map.h"
 #include "dav_http.h"
+#include "dav_fpstore.h"
+#include "mapiproxy/libmapistore/backends/namedprops_backend.h"
 #include "gen_ndr/ndr_property.h"
 
 #define CHECK(c) do { if (!(c)) { \
@@ -900,6 +902,431 @@ static int test_http_timeout_conn_refused(void)
     return 0;
 }
 
+/* ---- the backend through the mapistore API, against the fake ---- */
+
+/* In-memory mapistore indexing: fmid <-> URI, as the TDB/MySQL backends keep it. */
+struct fake_index { uint64_t fmid[512]; char *uri[512]; size_t n; uint64_t next; };
+static struct fake_index fidx = { .next = 0x100 };
+
+static enum mapistore_error fi_get_fmid(struct indexing_context *c, const char *u, const char *uri, bool partial,
+                                        uint64_t *fmid, bool *soft)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (strcmp(fidx.uri[i], uri) == 0) { *fmid = fidx.fmid[i]; *soft = false; return MAPISTORE_SUCCESS; }
+    }
+    return MAPISTORE_ERR_NOT_FOUND;
+}
+static enum mapistore_error fi_get_uri(struct indexing_context *c, const char *u, TALLOC_CTX *mem, uint64_t fmid,
+                                       char **uri, bool *soft)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.fmid[i] == fmid) { *uri = talloc_strdup(mem, fidx.uri[i]); *soft = false; return MAPISTORE_SUCCESS; }
+    }
+    return MAPISTORE_ERR_NOT_FOUND;
+}
+static enum mapistore_error fi_add_fmid(struct indexing_context *c, const char *u, uint64_t fmid, const char *uri)
+{
+    if (fidx.n == 512) return MAPISTORE_ERR_NO_MEMORY;
+    fidx.fmid[fidx.n] = fmid;
+    fidx.uri[fidx.n++] = talloc_strdup(root, uri);
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error fi_allocate(struct indexing_context *c, const char *u, uint64_t *fmid)
+{
+    *fmid = fidx.next++;
+    return MAPISTORE_SUCCESS;
+}
+static struct indexing_context ictx = { .add_fmid = fi_add_fmid, .get_uri = fi_get_uri, .get_fmid = fi_get_fmid,
+                                        .allocate_fmid = fi_allocate };
+
+/* Named properties: the mapped ID of a PSETID_Address LID is the LID itself. */
+static enum mapistore_error np_get_mapped_id(struct namedprops_context *np, struct MAPINAMEID nameid, uint16_t *id)
+{
+    *id = nameid.kind.lid;
+    return MAPISTORE_SUCCESS;
+}
+static struct namedprops_context fake_np = { .get_mapped_id = np_get_mapped_id };
+static struct mapistore_context fake_mstore = { .nprops_ctx = &fake_np };
+static struct mapistore_connection_info dav_conn = { .username = "u", .mstore_ctx = &fake_mstore,
+    .replica_guid = { .time_low = 0x11223344, .time_mid = 0x5566, .time_hi_and_version = 0x7788 } };
+static struct mapistore_backend B;
+static struct dav_settings test_settings;
+static uint8_t test_key[32] = "0123456789abcdef0123456789abcdef";
+
+#define EMAIL1 ((0x8083u << 16) | PT_UNICODE)
+#define HAS_PICTURE ((0x8015u << 16) | PT_BOOLEAN)
+#define DL_MEMBERS ((0x8055u << 16) | PT_MV_BINARY)
+
+/* The fake running, the backend configured for it and the user's password known. */
+static int backend_up(void)
+{
+    CHECK(!fake_start());
+    test_settings.url_template = talloc_asprintf(root, "%.*s/dav/%%u/Contacts/",
+                                                 (int)(strstr(fake_base, "/dav/") - fake_base), fake_base);
+    test_settings.fp_key = test_key;
+    test_settings.fp_key_len = sizeof test_key;
+    dav_backend_set_settings(&test_settings);
+    memset(&B, 0, sizeof B);
+    CHECK(mapistore_backend_init_defaults(&B) == MAPISTORE_SUCCESS);
+    dav_backend_fill(&B);
+    CHECK(dav_cred_set("u", "p") == MAPISTORE_SUCCESS);
+    return 0;
+}
+
+static void backend_down(void)
+{
+    dav_cred_forget("u");
+    dav_backend_set_settings(NULL);
+    fake_stop();
+}
+
+static int put(const char *name, const char *body)
+{
+    struct dav_http *h = client("p");
+    char *href = talloc_asprintf(root, BOOK "%s", name);
+    CHECK(dav_put(h, root, href, body, NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
+    talloc_free(h);
+    return 0;
+}
+
+static int put_fixture(const char *name, const char *fixture_name)
+{
+    size_t len;
+    char *body = slurp(fixture_name, &len);
+    CHECK(body);
+    return put(name, body);
+}
+
+static struct dav_folder *book(const char *segment)
+{
+    void *folder = NULL;
+    char *uri = talloc_asprintf(root, "dav://contacts/%s/", segment);
+    return B.backend.create_context(root, &dav_conn, &ictx, uri, &folder) == MAPISTORE_SUCCESS ? folder : NULL;
+}
+
+/* MID and change number of the row named name (0 when absent); the row count in *count. */
+static int row_of(struct dav_folder *f, const char *name, uint64_t *mid, uint64_t *cn, uint32_t *count)
+{
+    enum MAPITAGS cols[] = { PidTagDisplayName, PidTagMid, PidTagChangeNumber, PidTagMessageClass };
+    struct mapistore_property_data *d;
+    void *t;
+    uint32_t n, i;
+    *mid = *cn = 0;
+    CHECK(B.folder.open_table(f, root, MAPISTORE_MESSAGE_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS);
+    CHECK(B.table.set_columns(t, 4, cols) == MAPISTORE_SUCCESS);
+    for (i = 0; i < n; i++) {
+        CHECK(B.table.get_row(t, root, MAPISTORE_PREFILTERED_QUERY, i, &d) == MAPISTORE_SUCCESS);
+        CHECK(d[1].error == MAPISTORE_SUCCESS && d[2].error == MAPISTORE_SUCCESS);
+        if (d[0].error == MAPISTORE_SUCCESS && !strcmp(d[0].data, name)) {
+            *mid = *(uint64_t *)d[1].data;
+            *cn = *(uint64_t *)d[2].data;
+        }
+    }
+    if (count) *count = n;
+    return 0;
+}
+
+static bool has_id(const struct UI8Array_r *ids, uint64_t id)
+{
+    uint32_t i;
+    for (i = 0; i < ids->cValues; i++) if (ids->lpui8[i] == id) return true;
+    return false;
+}
+
+static int test_list_contexts_books(void)
+{
+    struct mapistore_contexts_list *l = NULL, *e;
+    struct dav_http *h;
+    int seen = 0;
+
+    CHECK(!backend_up());
+    h = client("p");
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "Trabalho") == MAPISTORE_SUCCESS);
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/fam/", "Fam\xc3\xadlia") == MAPISTORE_SUCCESS);
+    CHECK(B.backend.list_contexts("u", &ictx, root, &l) == MAPISTORE_SUCCESS);
+    for (e = l; e; e = e->next) {
+        CHECK(e->role == MAPISTORE_CONTACTS_ROLE);
+        if (!strcmp(e->url, "dav://contacts/personal/")) { CHECK(e->main_folder && !strcmp(e->name, "Personal")); seen |= 1; }
+        if (!strcmp(e->url, "dav://contacts/work/")) { CHECK(!e->main_folder && !strcmp(e->name, "Trabalho")); seen |= 2; }
+        if (!strcmp(e->url, "dav://contacts/fam/")) { CHECK(!e->main_folder && !strcmp(e->name, "Fam\xc3\xadlia")); seen |= 4; }
+    }
+    CHECK(seen == 7 && l->next && l->next->next && !l->next->next->next);
+    /* a user whose password the backend does not hold: an error, never an empty list */
+    CHECK(B.backend.list_contexts("nobody", &ictx, root, &l) == MAPISTORE_ERR_CONN_REFUSED && l == NULL);
+    talloc_free(h);
+    backend_down();
+    return 0;
+}
+
+/* Review Focus 2: SOGo down or refusing the password at logon keeps the contacts folders. */
+static int test_list_contexts_sogo_down_keeps(void)
+{
+    struct mapistore_contexts_list *l = NULL;
+    struct dav_folder *f;
+    void *t;
+    uint32_t n;
+
+    CHECK(!backend_up());
+    CHECK(!ctl("fail?code=503"));
+    CHECK(B.backend.list_contexts("u", &ictx, root, &l) == MAPISTORE_ERR_CONN_REFUSED && l == NULL);
+    CHECK(!ctl("fail?code=0"));
+    dav_cred_forget("u");
+    CHECK(dav_cred_set("u", "changed") == MAPISTORE_SUCCESS);
+    CHECK(B.backend.list_contexts("u", &ictx, root, &l) == MAPISTORE_ERR_CONN_REFUSED && l == NULL);
+    dav_cred_forget("u");
+    CHECK(dav_cred_set("u", "p") == MAPISTORE_SUCCESS);
+    CHECK((f = book("personal")) != NULL);
+    fake_stop();
+    CHECK(B.backend.list_contexts("u", &ictx, root, &l) == MAPISTORE_ERR_CONN_REFUSED && l == NULL);
+    /* the folder answers with an error, not with an empty book */
+    CHECK(B.folder.open_table(f, root, MAPISTORE_MESSAGE_TABLE, 1, &t, &n) == MAPISTORE_ERR_CONN_REFUSED);
+    backend_down();
+    return 0;
+}
+
+static int test_contents_table_contacts_and_lists(void)
+{
+    struct dav_folder *f;
+    enum MAPITAGS ftags[] = { PidTagDisplayName, PidTagContainerClass, PidTagContentCount };
+    struct mapistore_property_data fd[3];
+    uint64_t mid_c, mid_l, cn;
+    uint32_t n;
+
+    CHECK(!backend_up());
+    if (put_fixture(M5 ".vcf", "contact_full.vcf") || put_fixture("16F4F4-6AFC4800-3-3CFB6140.vcf", "list.vlf")) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo", &mid_c, &cn, &n)) return 1;
+    CHECK(n == 2 && mid_c && cn);
+    if (row_of(f, "Lista Exemplo", &mid_l, &cn, NULL)) return 1;
+    CHECK(mid_l && mid_l != mid_c);
+    {
+        enum MAPITAGS cols[] = { PidTagMessageClass, PidTagMid };
+        struct mapistore_property_data *d;
+        void *t;
+        uint32_t i, contacts = 0, lists = 0;
+        CHECK(B.folder.open_table(f, root, MAPISTORE_MESSAGE_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS);
+        CHECK(B.table.set_columns(t, 2, cols) == MAPISTORE_SUCCESS);
+        for (i = 0; i < n; i++) {
+            CHECK(B.table.get_row(t, root, MAPISTORE_PREFILTERED_QUERY, i, &d) == MAPISTORE_SUCCESS);
+            contacts += !strcmp(d[0].data, "IPM.Contact") && *(uint64_t *)d[1].data == mid_c;
+            lists += !strcmp(d[0].data, "IPM.DistList") && *(uint64_t *)d[1].data == mid_l;
+        }
+        CHECK(contacts == 1 && lists == 1);
+    }
+    CHECK(B.folder.get_child_count(f, MAPISTORE_MESSAGE_TABLE, &n) == MAPISTORE_SUCCESS && n == 2);
+    CHECK(B.folder.get_child_count(f, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 0);
+    CHECK(B.properties.get_properties(f, root, 3, ftags, fd) == MAPISTORE_SUCCESS);
+    CHECK(fd[0].error == 0 && !strcmp(fd[0].data, "Personal"));
+    CHECK(fd[1].error == 0 && !strcmp(fd[1].data, "IPF.Contact"));
+    CHECK(fd[2].error == 0 && *(uint32_t *)fd[2].data == 2);
+    backend_down();
+    return 0;
+}
+
+static int test_open_contact_props_and_photo(void)
+{
+    enum MAPITAGS tags[] = { PidTagDisplayName, EMAIL1, HAS_PICTURE, PidTagHasAttachments, PidTagMessageFlags,
+                             PidTagAttachDataBinary, PidTagMid };
+    enum MAPITAGS atags[] = { PidTagAttachLongFilename, PidTagAttachmentContactPhoto, PidTagAttachDataBinary,
+                              PidTagAttachMethod };
+    struct mapistore_property_data d[7], ad[4];
+    struct dav_folder *f;
+    struct dav_card *c = load_card("contact_full.vcf");
+    struct Binary_r *photo;
+    void *msg, *list, *at, *att, *v;
+    uint64_t mid_c, mid_l, cn;
+    uint32_t n;
+
+    CHECK(c && dav_card_get_prop(root, c, &fake_tags, NULL, PidTagAttachDataBinary, &v) == MAPISTORE_SUCCESS);
+    photo = v;
+    CHECK(!backend_up());
+    if (put_fixture(M5 ".vcf", "contact_full.vcf") || put_fixture("16F4F4-6AFC4800-3-3CFB6140.vcf", "list.vlf")) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo", &mid_c, &cn, NULL)) return 1;
+    if (row_of(f, "Lista Exemplo", &mid_l, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid_c, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(B.properties.get_properties(msg, root, 7, tags, d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == 0 && !strcmp(d[0].data, "Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo"));
+    CHECK(d[1].error == 0 && !strcmp(d[1].data, "conceicao@exemplo.test"));
+    CHECK(d[2].error == 0 && *(uint8_t *)d[2].data == 1);
+    CHECK(d[3].error == 0 && *(uint8_t *)d[3].data == 1);
+    CHECK(d[4].error == 0 && (*(uint32_t *)d[4].data & MSGFLAG_HASATTACH));
+    CHECK(d[5].error == MAPISTORE_ERR_NOT_FOUND);	/* the picture is the attachment's, not the message's */
+    CHECK(d[6].error == 0 && *(uint64_t *)d[6].data == mid_c);
+    CHECK(B.message.get_attachment_table(msg, root, &at, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.message.open_attachment(msg, root, 1, &att) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(B.message.open_attachment(msg, root, 0, &att) == MAPISTORE_SUCCESS);
+    CHECK(B.properties.get_properties(att, root, 4, atags, ad) == MAPISTORE_SUCCESS);
+    CHECK(ad[0].error == 0 && !strcmp(ad[0].data, "ContactPicture.jpg"));
+    CHECK(ad[1].error == 0 && *(uint8_t *)ad[1].data == 1);
+    CHECK(ad[2].error == 0 && ((struct Binary_r *)ad[2].data)->cb == photo->cb);
+    CHECK(!memcmp(((struct Binary_r *)ad[2].data)->lpb, photo->lpb, photo->cb));
+    CHECK(ad[3].error == 0 && *(uint32_t *)ad[3].data == 1);
+    /* the list: its member card in this book is the wrapped EntryID of that contact's message */
+    CHECK(B.folder.open_message(f, root, mid_l, false, &list) == MAPISTORE_SUCCESS);
+    {
+        enum MAPITAGS lt[] = { DL_MEMBERS, PidTagMessageClass };
+        struct mapistore_property_data ld[2];
+        struct BinaryArray_r *m;
+        struct Binary_r inner;
+        struct MessageEntryId *e;
+        CHECK(B.properties.get_properties(list, root, 2, lt, ld) == MAPISTORE_SUCCESS);
+        CHECK(ld[1].error == 0 && !strcmp(ld[1].data, "IPM.DistList"));
+        CHECK(ld[0].error == 0 && (m = ld[0].data)->cValues == 3);
+        CHECK(m->lpbin[0].cb > 21 && m->lpbin[0].lpb[20] == 0xC3);
+        inner.cb = m->lpbin[0].cb - 21;
+        inner.lpb = m->lpbin[0].lpb + 21;
+        CHECK((e = get_MessageEntryId(root, &inner)) != NULL);
+        CHECK(e->MessageType == eitLTPPrivateMessage && (uint64_t)e->MessageGlobalCounter.value == mid_c >> 16);
+        CHECK((uint64_t)e->FolderGlobalCounter.value == f->fid >> 16);
+        CHECK(m->lpbin[1].lpb[20] != 0xC3 && m->lpbin[2].lpb[20] != 0xC3);	/* not in the book: one-off */
+        {
+            /* and back: what Outlook sends names the same members */
+            struct SPropValue p;
+            struct SRow row = { .cValues = 1, .lpProps = &p };
+            struct dav_member_resolver r;
+            struct dav_member *mem;
+            size_t k;
+            dav_folder_resolver(f, &r);
+            set_SPropValue_proptag(&p, DL_MEMBERS, m);
+            CHECK(dav_props_members(root, &row, &f->ctx->tags, &r, &mem, &k) && k == 3);
+            CHECK(!strcmp(mem[0].key, M5) && !strcmp(mem[1].key, "mailto:conceicao.casa@exemplo.test"));
+            CHECK(!strcmp(mem[2].key, "mailto:livre@exemplo.test"));
+            inner.lpb[4] ^= 1;	/* another store's entry is not resolved */
+            CHECK(r.uid_for_entryid(r.ctx, root, &inner) == NULL);
+        }
+    }
+    backend_down();
+    return 0;
+}
+
+static int test_ics_incremental(void)
+{
+    struct dav_folder *f;
+    struct UI8Array_r *ids;
+    uint64_t mid_a, mid_b, cn_a, cn_b, mid, cn, dcn0, dcn1;
+    uint32_t n;
+
+    CHECK(!backend_up());
+    if (put("a.vcf", VC("a")) || put("b.vcf", VC("b"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "a", &mid_a, &cn_a, NULL) || row_of(f, "b", &mid_b, &cn_b, NULL)) return 1;
+    CHECK(mid_a && mid_b && cn_a && cn_b);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn0) == MAPISTORE_SUCCESS);
+    CHECK(!has_id(ids, mid_a) && !has_id(ids, mid_b) && dcn0);
+    /* edited by another client: a new change number for that card only */
+    CHECK(!ctl("edit?path=" BOOK "a.vcf"));
+    if (row_of(f, "a", &mid, &cn, NULL)) return 1;
+    CHECK(mid == mid_a && cn != cn_a);
+    if (row_of(f, "b", &mid, &cn, NULL)) return 1;
+    CHECK(mid == mid_b && cn == cn_b);
+    /* deleted by another client: in get_deleted_fmids, with a new change */
+    CHECK(!ctl("delete?path=" BOOK "b.vcf"));
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn1) == MAPISTORE_SUCCESS);
+    CHECK(has_id(ids, mid_b) && !has_id(ids, mid_a) && dcn1 != dcn0);
+    if (row_of(f, "a", &mid, &cn, &n)) return 1;
+    CHECK(n == 1);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_FOLDER_TABLE, 0, &ids, &dcn1) == MAPISTORE_SUCCESS && ids->cValues == 0);
+    backend_down();
+    return 0;
+}
+
+/* Review Focus 5: an unusable sync token never mints a second MID, and deletions are still seen. */
+static int test_ics_token_invalid_no_dup_mids(void)
+{
+    struct dav_folder *f, *f2;
+    struct UI8Array_r *ids;
+    uint64_t mid_a, mid_b, mid, cn, dcn;
+    uint32_t n;
+    void *msg;
+
+    CHECK(!backend_up());
+    if (put("ta.vcf", VC("ta")) || put("tb.vcf", VC("tb"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "ta", &mid_a, &cn, NULL) || row_of(f, "tb", &mid_b, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid_a, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(B.folder.open_message(f, root, mid_b, false, &msg) == MAPISTORE_SUCCESS);
+    /* RFC 6578 servers refuse the token: full listing */
+    CHECK(!ctl("delete?path=" BOOK "tb.vcf") && !ctl("invalidate_token"));
+    if (row_of(f, "ta", &mid, &cn, &n)) return 1;
+    CHECK(n == 1 && mid == mid_a);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS);
+    CHECK(has_id(ids, mid_b) && !has_id(ids, mid_a));
+    /* SOGo answers an unknown token with every card plus tombstones */
+    talloc_free(f->ctx->token);
+    f->ctx->token = talloc_strdup(f->ctx, "1");
+    CHECK(!ctl("edit?path=" BOOK "ta.vcf"));
+    if (row_of(f, "ta", &mid, &cn, &n)) return 1;
+    CHECK(n == 1 && mid == mid_a && f->ctx->nitems == 1);
+    /* a new session lists everything: same MID, and a card it was given that went away is reported */
+    CHECK(B.folder.open_message(f, root, mid_a, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(!ctl("delete?path=" BOOK "ta.vcf") && put("tc.vcf", VC("tc")) == 0);
+    CHECK((f2 = book("personal")) != NULL);
+    CHECK(B.folder.get_deleted_fmids(f2, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS);
+    CHECK(has_id(ids, mid_a));
+    if (row_of(f2, "tc", &mid, &cn, &n)) return 1;
+    CHECK(n == 1 && mid && mid != mid_a && mid != mid_b);
+    backend_down();
+    return 0;
+}
+
+static int test_fp_written_on_read(void)
+{
+    struct dav_folder *f;
+    uint64_t fp[DAV_F_COUNT], mid, cn;
+    char *etag, *norm = "/dav/u/Contacts/personal/fp1.vcf";
+    struct dav_item *it;
+    void *msg;
+
+    CHECK(!backend_up());
+    if (put("fp1.vcf", VC("fp1"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "fp1", &mid, &cn, NULL)) return 1;
+    CHECK(dav_fp_get(f->ctx->fp, root, "u", norm, fp, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK((it = dav_item_by_mid(f->ctx, mid)) != NULL);
+    CHECK(dav_fp_get(f->ctx->fp, root, "u", norm, fp, &etag) == MAPISTORE_SUCCESS && !strcmp(etag, it->etag));
+    CHECK(fp[DAV_F_FN] == dav_fp(test_key, sizeof test_key, DAV_F_FN, "fp1"));
+    CHECK(fp[DAV_F_NOTE] == dav_fp(test_key, sizeof test_key, DAV_F_NOTE, NULL));
+    CHECK(fp[DAV_F_FN] != dav_fp((const uint8_t *)"another key, also 32 bytes long!", 32, DAV_F_FN, "fp1"));
+    /* the next read after an edit elsewhere records the new version */
+    CHECK(!ctl("edit?path=" BOOK "fp1.vcf"));
+    if (row_of(f, "fp1", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_get(f->ctx->fp, root, "u", norm, fp, &etag) == MAPISTORE_SUCCESS && !strcmp(etag, dav_item_by_mid(f->ctx, mid)->etag));
+    backend_down();
+    return 0;
+}
+
+static int test_fpstore_memory(void)
+{
+    struct dav_fpstore *s = dav_fpstore_open(root, NULL);
+    uint64_t fp[DAV_F_COUNT] = { 1, 2, 3 }, got[DAV_F_COUNT];
+    char *etag, **gone, *live[] = { "/b/x" };
+    size_t n;
+
+    CHECK(s);
+    CHECK(dav_fp_put(s, "u", "/b/x", fp, "\"1\"") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_put(s, "u", "/b/y", fp, "\"2\"") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_put(s, "u", "/c/z", fp, "\"3\"") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_put(s, "v", "/b/y", fp, "\"4\"") == MAPISTORE_SUCCESS);
+    fp[0] = 9;
+    CHECK(dav_fp_put(s, "u", "/b/x", fp, "\"5\"") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_get(s, root, "u", "/b/x", got, &etag) == MAPISTORE_SUCCESS && !strcmp(etag, "\"5\"") && got[0] == 9 && got[2] == 3);
+    CHECK(dav_fp_get(s, root, "w", "/b/x", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    /* prune: only this user's rows of this book that are not live */
+    CHECK(dav_fp_prune(s, "u", "/b", live, 1, root, &gone, &n) == MAPISTORE_SUCCESS && n == 1 && !strcmp(gone[0], "/b/y"));
+    CHECK(dav_fp_get(s, root, "u", "/b/y", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(dav_fp_get(s, root, "v", "/b/y", got, &etag) == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_get(s, root, "u", "/c/z", got, &etag) == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_delete(s, "u", "/b/x") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_get(s, root, "u", "/b/x", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    talloc_free(s);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -919,7 +1346,10 @@ int main(int argc, char **argv)
         || test_http_list_books() || test_http_sync_incremental() || test_http_sync_invalid_token_full()
         || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_sogo_fixtures() || test_href_norm()
         || test_http_hrefs_under_book() || test_http_401_denied()
-        || test_http_timeout_conn_refused()) { fake_stop(); return 1; }
+        || test_http_timeout_conn_refused() || test_fpstore_memory() || test_list_contexts_books()
+        || test_list_contexts_sogo_down_keeps() || test_contents_table_contacts_and_lists()
+        || test_open_contact_props_and_photo() || test_ics_incremental() || test_ics_token_invalid_no_dup_mids()
+        || test_fp_written_on_read()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;

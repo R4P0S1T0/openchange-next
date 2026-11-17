@@ -820,17 +820,17 @@ check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
 #################################################################
 # Optional CardDAV contacts mapistore backend (M6, libcurl + expat; ./configure --enable-mapistore-dav)
 #################################################################
-MAPISTORE_DAV_OBJS = mapiproxy/libmapistore/backends/dav/mapistore_dav.po mapiproxy/libmapistore/backends/dav/dav_vcard.po mapiproxy/libmapistore/backends/dav/dav_map.po mapiproxy/libmapistore/backends/dav/dav_http.po mapiproxy/libmapistore/backends/dav/dav_cred.po
+MAPISTORE_DAV_OBJS = mapiproxy/libmapistore/backends/dav/mapistore_dav.po mapiproxy/libmapistore/backends/dav/dav_vcard.po mapiproxy/libmapistore/backends/dav/dav_map.po mapiproxy/libmapistore/backends/dav/dav_http.po mapiproxy/libmapistore/backends/dav/dav_cred.po mapiproxy/libmapistore/backends/dav/dav_fpstore.po mapiproxy/libmapistore/backends/dav/dav_folder.po mapiproxy/libmapistore/backends/dav/dav_message.po
 MAPISTORE_DAV_SO = mapiproxy/libmapistore/backends/mapistore_dav.$(SHLIBEXT)
 
-$(MAPISTORE_DAV_OBJS): CFLAGS += $(DAV_CFLAGS)
+$(MAPISTORE_DAV_OBJS): CFLAGS += $(DAV_CFLAGS) $(MYSQL_CFLAGS)
 $(MAPISTORE_DAV_OBJS): $(wildcard mapiproxy/libmapistore/backends/dav/*.h)
 
 mapistore_dav: $(MAPISTORE_DAV_SO)
 
 $(MAPISTORE_DAV_SO): $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	@echo "Linking $@"
-	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS)
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(MYSQL_LIBS) $(LIBS)
 
 mapistore_dav-install:
 	$(INSTALL) -d $(DESTDIR)$(libdir)/mapistore_backends
@@ -840,12 +840,17 @@ mapistore_dav-uninstall:
 	rm -f $(DESTDIR)$(libdir)/mapistore_backends/mapistore_dav.$(SHLIBEXT)
 
 mapistore_dav-clean:
-	rm -f mapiproxy/libmapistore/backends/dav/*.po $(MAPISTORE_DAV_SO) bin/dav-backend-test
+	rm -f mapiproxy/libmapistore/backends/dav/*.po $(MAPISTORE_DAV_SO) bin/dav-backend-test bin/dav-fpstore-sql-test
 	rm -rf bin/dav-backend-fixture
 
 bin/dav-backend-test: testsuite/modernization/dav_backend_smoke.c $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(DAV_CFLAGS) -Imapiproxy/libmapistore/backends/dav -o $@ $< $(MAPISTORE_DAV_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS)
+	$(CC) $(CFLAGS) $(DAV_CFLAGS) -Imapiproxy/libmapistore/backends/dav -o $@ $< $(MAPISTORE_DAV_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(MYSQL_LIBS) $(LIBS)
+
+# The fingerprint store's SQL against a fake driver (as bin/mysql-backend-check): no database needed.
+bin/dav-fpstore-sql-test: testsuite/modernization/dav_fpstore_sql_smoke.c mapiproxy/libmapistore/backends/dav/dav_fpstore.c mapiproxy/util/mysql.c libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(DAV_CFLAGS) $(MYSQL_CFLAGS) -Imapiproxy/util -o $@ $< mapiproxy/util/ccan/htable/htable.c mapiproxy/util/ccan/hash/hash.c $(LDFLAGS) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS) $(MYSQL_LIBS)
 
 bin/mapistore-changes-test: testsuite/modernization/mapistore_changes_smoke.c mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
 	mkdir -p bin
@@ -856,7 +861,8 @@ check-mapistore-changes: libmapistore bin/mapistore-changes-test
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/mapistore-changes-test
 
 .PHONY: check-dav-backend
-check-dav-backend: libmapistore $(MAPISTORE_DAV_SO) bin/dav-backend-test
+check-dav-backend: libmapistore $(MAPISTORE_DAV_SO) bin/dav-backend-test bin/dav-fpstore-sql-test
+	LD_LIBRARY_PATH=.:$(LD_LIBRARY_PATH) ./bin/dav-fpstore-sql-test
 	rm -rf bin/dav-backend-fixture
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/dav-backend-test $(CURDIR)/bin/dav-backend-fixture $(CURDIR)/testsuite/modernization/fixtures/dav $(CURDIR)/testsuite/modernization/carddav_fake.py
 

@@ -15,8 +15,11 @@
 #include <stddef.h>
 
 #include "mapiproxy/libmapistore/mapistore.h"
+#include "dav_map.h"
 
 #define DAV_NAMESPACE "dav://"
+/* Context URIs: dav://contacts/<book segment>/; an item is <context URI><card segment>. */
+#define DAV_CONTACTS_URI DAV_NAMESPACE "contacts/"
 
 /* Process-wide settings from the smb.conf section [mapistore]. */
 struct dav_settings {
@@ -31,6 +34,106 @@ struct dav_settings *dav_settings_load(TALLOC_CTX *, struct loadparm_context *);
 void dav_backend_fill(struct mapistore_backend *);
 /* Entry point dlopen()ed by mapistore_backend_init. */
 enum mapistore_error mapistore_init_backend(void);
+
+/* Replaces the settings (tests; NULL = not configured). */
+void dav_backend_set_settings(struct dav_settings *);
+
+/* First field of every backend object, so get_properties can dispatch. */
+enum dav_object_type {
+	DAV_OBJ_FOLDER = 0x44415631,
+	DAV_OBJ_TABLE,
+	DAV_OBJ_MESSAGE,
+	DAV_OBJ_ATTACHMENT,
+};
+
+/* One card of the book, as last listed. */
+struct dav_item {
+	char		*href;		/* server path, as the server spells it */
+	char		*norm;		/* dav_href_norm(href): the item's identity on the server */
+	char		*etag;
+	uint64_t	mid;		/* from the indexing, on <context URI><last segment of norm> */
+	struct dav_card	*card;		/* NULL until fetched; owned by the context, referenced by open messages */
+	bool		listed;		/* in the current full listing */
+};
+
+/* One address book of the session's user. Everything here lives in session memory only. */
+struct dav_context {
+	char			*username;
+	struct indexing_context	*ictx;
+	struct GUID		replica_guid, mailbox_guid;
+	struct dav_named_tags	tags;
+	struct dav_fpstore	*fp;
+	char			*home;		/* the user's address-book home URL */
+	char			*book_href;	/* server path of the book, ending with '/' */
+	char			*book_norm;
+	char			*uri;		/* dav://contacts/<segment>/ */
+	char			*displayname;
+	char			*token;		/* sync token; NULL: the next listing is a full one */
+	struct dav_item		*items;
+	size_t			nitems;
+	uint64_t		*deleted;	/* MIDs of cards gone, for ICS (emsmdb keeps those Outlook holds) */
+	size_t			ndeleted;
+	unsigned		deletions;	/* ever added to deleted: the state of the deletions' change */
+	struct dav_folder	*root;
+};
+
+struct dav_folder {
+	uint32_t		type;		/* DAV_OBJ_FOLDER */
+	struct dav_context	*ctx;
+	uint64_t		fid;
+};
+
+struct dav_message {
+	uint32_t		type;		/* DAV_OBJ_MESSAGE */
+	struct dav_folder	*folder;
+	uint64_t		mid;
+	char			*href, *etag;
+	struct dav_card		*card;
+};
+
+struct dav_attachment {
+	uint32_t		type;		/* DAV_OBJ_ATTACHMENT: the contact picture */
+	struct dav_message	*message;
+};
+
+struct dav_table {
+	uint32_t			type;	/* DAV_OBJ_TABLE */
+	struct dav_folder		*folder;
+	enum mapistore_table_type	table_type;
+	uint16_t			column_count;
+	enum MAPITAGS			*columns;
+	uint32_t			row_count;
+	uint64_t			*mids;		/* message table: rows by MID (items move on a sync) */
+	struct dav_message		*message;	/* attachment table */
+};
+
+/* dav_folder.c */
+void dav_folder_fill(struct mapistore_backend *);
+/* The session's HTTP client, with the password as it is now; NULL without credentials. */
+struct dav_http *dav_context_http(struct dav_context *, TALLOC_CTX *);
+/* Brings the item list up to date (sync-collection). */
+enum mapistore_error dav_context_sync(struct dav_context *);
+struct dav_item *dav_item_by_mid(struct dav_context *, uint64_t mid);
+/* Fetches the cards not cached yet (addressbook-multiget). */
+enum mapistore_error dav_context_fetch(struct dav_context *);
+char *dav_item_uri(TALLOC_CTX *, struct dav_context *, const char *norm);
+/* A change property of the object at uri, renewed whenever state (an ETag) changes. */
+void *dav_change_value(TALLOC_CTX *, struct dav_context *, const char *uri, const char *state, enum MAPITAGS);
+uint64_t *dav_i8(TALLOC_CTX *, uint64_t);
+uint32_t *dav_long(TALLOC_CTX *, uint32_t);
+uint8_t *dav_bool(TALLOC_CTX *, bool);
+
+/* dav_message.c */
+void dav_message_fill(struct mapistore_backend *);
+/* List members of folder f: a member card of the book <-> the Message EntryID of its contact. */
+void dav_folder_resolver(struct dav_folder *, struct dav_member_resolver *);
+/* One property of the card at norm shown in folder f; NULL when it has none. card may be NULL (not fetched). */
+void *dav_item_value(TALLOC_CTX *, struct dav_folder *, uint64_t mid, const char *norm, const char *etag,
+		     const struct dav_card *, enum MAPITAGS);
+enum mapistore_error dav_message_properties(struct dav_message *, TALLOC_CTX *, uint16_t, enum MAPITAGS *,
+					    struct mapistore_property_data *);
+enum mapistore_error dav_attachment_properties(struct dav_message *, TALLOC_CTX *, uint16_t, enum MAPITAGS *,
+					       struct mapistore_property_data *);
 
 /* dav_cred.c: per-user password, reference counted by sessions. The result of get is valid only until the
    next dav_cred_set or dav_cred_forget of that user: fetch it for each HTTP client, never keep it. */
