@@ -34,6 +34,7 @@
 
 struct oc_emsmdb_session {
 	struct emsmdbp_context *ctx;
+	bool credentials;	/* mapistore_set_credentials succeeded: disconnect forgets once */
 };
 
 /* Process-wide state from oc_emsmdb_init; sessions are its talloc children. */
@@ -66,7 +67,7 @@ uint32_t oc_emsmdb_init(const char *smb_conf_path)
 	return MAPI_E_SUCCESS;
 }
 
-uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
+uint32_t oc_emsmdb_connect(const char *username, const char *password, const char *user_dn,
 			   uint32_t flags, uint32_t code_page,
 			   uint32_t lcid_sort, uint32_t lcid_string,
 			   oc_emsmdb_session **session,
@@ -81,7 +82,9 @@ uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
 	*session = NULL;
 	*display_name = *dn_prefix = "";
 	if (oc_root == NULL) return MAPI_E_NOT_INITIALIZED;
-	if (username == NULL || username[0] == '\0' || user_dn == NULL || user_dn[0] == '\0') return MAPI_E_NO_ACCESS;
+	if (username == NULL || username[0] == '\0' || password == NULL || user_dn == NULL || user_dn[0] == '\0') {
+		return MAPI_E_NO_ACCESS;
+	}
 	ctx = emsmdbp_init(oc_lp_ctx, username, oc_db_ctx);
 	if (ctx == NULL) return MAPI_E_LOGON_FAILED;
 	/* username is Dovecot's canonical user; the directory binds it to exactly one enabled LegacyDN. */
@@ -92,6 +95,9 @@ uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
 	if (ctx->username == NULL) goto failure;
 	s = talloc_zero(oc_root, oc_emsmdb_session);
 	if (s == NULL) goto failure;
+	/* Before anything that can reach emsmdbp_mailbox_provision: backends log in as the user there. */
+	if (mapistore_set_credentials(ctx->mstore_ctx, username, password) != MAPISTORE_SUCCESS) goto failure;
+	s->credentials = true;
 	status = emsmdbp_connect_identity(ctx, msg, user_dn, lcid_string, s, display_name, dn_prefix);
 	if (status != MAPI_E_SUCCESS) goto failure;
 	if (!emsmdbp_set_session_uuid(ctx, GUID_random())) goto failure;
@@ -99,6 +105,7 @@ uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
 	*session = s;
 	return MAPI_E_SUCCESS;
 failure:
+	if (s && s->credentials) mapistore_forget_credentials(ctx->mstore_ctx, username);
 	talloc_free(s);
 	talloc_free(ctx);
 	*display_name = *dn_prefix = "";
@@ -136,6 +143,7 @@ done:
 
 void oc_emsmdb_disconnect(oc_emsmdb_session *session)
 {
+	if (session && session->credentials) mapistore_forget_credentials(session->ctx->mstore_ctx, session->ctx->username);
 	talloc_free(session);
 }
 

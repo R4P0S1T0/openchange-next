@@ -29,7 +29,8 @@
 typedef struct oc_emsmdb_session oc_emsmdb_session;	/* opaque */
 
 uint32_t oc_emsmdb_init(const char *smb_conf_path);
-uint32_t oc_emsmdb_connect(const char *username, const char *user_dn,
+/* password is the one the daemon verified; mapistore keeps a copy in memory until disconnect. */
+uint32_t oc_emsmdb_connect(const char *username, const char *password, const char *user_dn,
 			   uint32_t flags, uint32_t code_page,
 			   uint32_t lcid_sort, uint32_t lcid_string,
 			   oc_emsmdb_session **session,

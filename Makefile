@@ -820,7 +820,7 @@ check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
 #################################################################
 # Optional CardDAV contacts mapistore backend (M6, libcurl + expat; ./configure --enable-mapistore-dav)
 #################################################################
-MAPISTORE_DAV_OBJS = mapiproxy/libmapistore/backends/dav/mapistore_dav.po mapiproxy/libmapistore/backends/dav/dav_vcard.po mapiproxy/libmapistore/backends/dav/dav_map.po mapiproxy/libmapistore/backends/dav/dav_http.po
+MAPISTORE_DAV_OBJS = mapiproxy/libmapistore/backends/dav/mapistore_dav.po mapiproxy/libmapistore/backends/dav/dav_vcard.po mapiproxy/libmapistore/backends/dav/dav_map.po mapiproxy/libmapistore/backends/dav/dav_http.po mapiproxy/libmapistore/backends/dav/dav_cred.po
 MAPISTORE_DAV_SO = mapiproxy/libmapistore/backends/mapistore_dav.$(SHLIBEXT)
 
 $(MAPISTORE_DAV_OBJS): CFLAGS += $(DAV_CFLAGS)

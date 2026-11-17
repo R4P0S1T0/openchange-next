@@ -185,6 +185,9 @@ struct mapistore_backend {
 		enum mapistore_error	(*list_contexts)(const char *, struct indexing_context *, TALLOC_CTX *, struct mapistore_contexts_list **);
 		enum mapistore_error	(*create_context)(TALLOC_CTX *, struct mapistore_connection_info *, struct indexing_context *, const char *, void **);
 		enum mapistore_error	(*create_root_folder)(const char *, enum mapistore_context_role, uint64_t, const char *, TALLOC_CTX *, char **);
+		/* The user's verified password, held in memory only; forget undoes one set. */
+		enum mapistore_error	(*set_credentials)(const char *, const char *);
+		enum mapistore_error	(*forget_credentials)(const char *);
 	} backend;
 
 	/** context operations */
@@ -337,6 +340,8 @@ enum mapistore_error mapistore_search_context_by_uri(struct mapistore_context *,
 const char *mapistore_errstr(enum mapistore_error);
 
 enum mapistore_error mapistore_list_contexts_for_user(struct mapistore_context *, const char *, TALLOC_CTX *, struct mapistore_contexts_list **);
+enum mapistore_error mapistore_set_credentials(struct mapistore_context *, const char *, const char *);
+enum mapistore_error mapistore_forget_credentials(struct mapistore_context *, const char *);
 enum mapistore_error mapistore_create_root_folder(const char *, enum mapistore_context_role, uint64_t, const char *, TALLOC_CTX *, char **);
 
 enum mapistore_error mapistore_folder_open_folder(struct mapistore_context *, uint32_t, void *, TALLOC_CTX *, uint64_t, void **);

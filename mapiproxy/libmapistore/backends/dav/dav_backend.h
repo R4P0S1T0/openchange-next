@@ -30,4 +30,11 @@ const struct dav_settings *dav_backend_settings(void);
 struct dav_settings *dav_settings_load(TALLOC_CTX *, struct loadparm_context *);
 void dav_backend_fill(struct mapistore_backend *);
 
+/* dav_cred.c: per-user password, reference counted by sessions; the result of get is borrowed until the next forget. */
+enum mapistore_error dav_cred_set(const char *, const char *);
+enum mapistore_error dav_cred_forget(const char *);
+const char *dav_cred_get(const char *);
+/* Tests only: sees each password buffer after the wipe, right before free. */
+void dav_cred_set_free_hook(void (*hook)(const char *buf, size_t len));
+
 #endif /* ! __DAV_BACKEND_H__ */

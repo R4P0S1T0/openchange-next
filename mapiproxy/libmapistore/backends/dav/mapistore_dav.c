@@ -115,6 +115,8 @@ void dav_backend_fill(struct mapistore_backend *backend)
 	backend->backend.init = dav_init;
 	backend->backend.list_contexts = dav_list_contexts;
 	backend->backend.create_context = dav_create_context;
+	backend->backend.set_credentials = dav_cred_set;
+	backend->backend.forget_credentials = dav_cred_forget;
 }
 
 _PUBLIC_ enum mapistore_error mapistore_init_backend(void)

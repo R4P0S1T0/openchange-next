@@ -92,19 +92,19 @@ static int test_connect_without_samdb(const char *conf)
     oc_emsmdb_session *session = (oc_emsmdb_session *)&session;
     const char *name = NULL, *prefix = NULL;
     size_t blocks;
-    CHECK(oc_emsmdb_connect("user", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
+    CHECK(oc_emsmdb_connect("user", "pw", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
         &session, &name, &prefix) == MAPI_E_NOT_INITIALIZED && session == NULL);
     CHECK(oc_emsmdb_init(conf) == MAPI_E_SUCCESS && oc_root != NULL);
     CHECK(oc_emsmdb_init(conf) == MAPI_E_SUCCESS);
     session = (oc_emsmdb_session *)&session;
-    CHECK(oc_emsmdb_connect("user", "", 0, 1252, 1033, 1033, &session, &name, &prefix) == MAPI_E_NO_ACCESS &&
+    CHECK(oc_emsmdb_connect("user", "pw", "", 0, 1252, 1033, 1033, &session, &name, &prefix) == MAPI_E_NO_ACCESS &&
         session == NULL);
     /* The first SamDB attempt may cache Samba module state; the second must not grow anything. */
-    CHECK(oc_emsmdb_connect("user", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
+    CHECK(oc_emsmdb_connect("user", "pw", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
         &session, &name, &prefix) != MAPI_E_SUCCESS);
     blocks = talloc_total_blocks(NULL);
     session = (oc_emsmdb_session *)&session;
-    CHECK(oc_emsmdb_connect("user", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
+    CHECK(oc_emsmdb_connect("user", "pw", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
         &session, &name, &prefix) == MAPI_E_LOGON_FAILED && created == 0);
     CHECK(session == NULL && name && name[0] == '\0' && prefix && prefix[0] == '\0');
     CHECK(talloc_total_blocks(NULL) == blocks);
@@ -179,7 +179,7 @@ static uint32_t connect_as(const char *user, const char *dn, oc_emsmdb_session *
                            const char **name, const char **prefix)
 {
     *session = (oc_emsmdb_session *)session;
-    return oc_emsmdb_connect(user, dn, 0, 1252, 1033, 1033, session, name, prefix);
+    return oc_emsmdb_connect(user, "pw", dn, 0, 1252, 1033, 1033, session, name, prefix);
 }
 
 static int test_connect_success(void)
@@ -963,10 +963,69 @@ static int test_connect_fails_closed(void)
     oc_emsmdb_session *session = NULL;
     const char *name, *prefix;
     fake_init = true;
-    CHECK(oc_emsmdb_connect("user", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
+    CHECK(oc_emsmdb_connect("user", "pw", "/o=example.invalid/cn=user", 0, 1252, 1033, 1033,
         &session, &name, &prefix) == MAPI_E_LOGON_FAILED);
     fake_init = false;
     CHECK(session == NULL && created == 1 && destroyed == 1);
+    return 0;
+}
+
+/* The verified password reaches every mapistore backend at Connect and is forgotten once at Disconnect. */
+static char cred_log[256];
+static enum mapistore_error cred_set(const char *user, const char *pw)
+{
+    snprintf(cred_log + strlen(cred_log), sizeof cred_log - strlen(cred_log), "set %s %s;", user, pw);
+    return MAPISTORE_SUCCESS;
+}
+static enum mapistore_error cred_forget(const char *user)
+{
+    snprintf(cred_log + strlen(cred_log), sizeof cred_log - strlen(cred_log), "forget %s;", user);
+    return MAPISTORE_SUCCESS;
+}
+static bool cred_refuse;
+static enum mapistore_error cred_set_refusing(const char *user, const char *pw)
+{
+    return cred_refuse ? MAPISTORE_ERR_NO_MEMORY : MAPISTORE_SUCCESS;
+}
+static enum mapistore_error no_contexts(const char *user, struct indexing_context *ictx, TALLOC_CTX *mem,
+                                        struct mapistore_contexts_list **list)
+{
+    *list = NULL;
+    return MAPISTORE_SUCCESS;
+}
+
+static int test_connect_passes_credentials(void)
+{
+    struct mapistore_backend fake;
+    oc_emsmdb_session *session;
+    const char *name, *prefix;
+    memset(&fake, 0, sizeof fake);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "credfake"; fake.backend.description = "test"; fake.backend.namespace = "credfake://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = no_contexts;
+    fake.backend.set_credentials = cred_set; fake.backend.forget_credentials = cred_forget;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    CHECK(mapistore_backend_init_defaults(&fake) == MAPISTORE_SUCCESS);
+    fake.backend.name = "credfail"; fake.backend.description = "test"; fake.backend.namespace = "credfail://";
+    fake.backend.init = fake_backend_init; fake.backend.list_contexts = no_contexts;
+    fake.backend.set_credentials = cred_set_refusing;
+    CHECK(mapistore_backend_register(&fake) == MAPISTORE_SUCCESS);
+    session = (oc_emsmdb_session *)&session;
+    CHECK(oc_emsmdb_connect("alice@example.invalid", NULL, ORG_OU "alice-0001", 0, 1252, 1033, 1033,
+        &session, &name, &prefix) == MAPI_E_NO_ACCESS && session == NULL);
+    CHECK(connect_as("nobody@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) != MAPI_E_SUCCESS);
+    CHECK(cred_log[0] == '\0');
+    /* A backend refusing undoes the ones already set: the connect fails and nothing stays behind. */
+    cred_refuse = true;
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) != MAPI_E_SUCCESS &&
+        session == NULL);
+    cred_refuse = false;
+    CHECK(strcmp(cred_log, "set alice@example.invalid pw;forget alice@example.invalid;") == 0);
+    cred_log[0] = '\0';
+    CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
+    CHECK(strcmp(cred_log, "set alice@example.invalid pw;") == 0);
+    oc_emsmdb_disconnect(session);
+    CHECK(strcmp(cred_log, "set alice@example.invalid pw;forget alice@example.invalid;") == 0);
     return 0;
 }
 
@@ -1360,7 +1419,7 @@ int main(int argc, char **argv)
         test_provision_backend_takes_over_inbox() || test_provision_fallback_after_native() || test_provision_store_down_keeps_folders() ||
         test_provision_backend_takes_over_drafts() || test_outbox_taken_over() ||
         test_fai_in_backend_root_kept_in_openchangedb() || test_unread_count_from_backend() || test_native_message_without_freebusy_subject_opens() ||
-        test_connect_fails_closed() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_notify_new_top_level_mailbox() ||
+        test_connect_fails_closed() || test_connect_passes_credentials() || test_execute() || test_fid_for_mailbox_utf7() || test_ffi_folder_changed() || test_notify_new_top_level_mailbox() ||
         test_ffi_watch_params(argv[1])) return 1;  /* last: it leaves mapistore:imap_* options set */
     talloc_free(oc_root);
     printf("oc_emsmdb null handles, directory connect checks and bounded execute: OK\n");

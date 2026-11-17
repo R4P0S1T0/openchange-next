@@ -93,6 +93,49 @@ static int test_backend_registers(void)
     return 0;
 }
 
+static int freed_calls, freed_zero;
+
+static void cred_free_hook(const char *buf, size_t len)
+{
+    size_t i;
+    freed_calls++;
+    freed_zero = len > 0;
+    for (i = 0; i < len; i++) if (buf[i]) freed_zero = 0;
+}
+
+static int test_cred_refcount(void)
+{
+    struct mapistore_backend b;
+
+    memset(&b, 0, sizeof b);
+    CHECK(mapistore_backend_init_defaults(&b) == MAPISTORE_SUCCESS);
+    CHECK(b.backend.set_credentials("other", "x") == MAPISTORE_SUCCESS);	/* defaults: no-op */
+    CHECK(b.backend.forget_credentials("other") == MAPISTORE_SUCCESS);
+    dav_backend_fill(&b);
+    dav_cred_set_free_hook(cred_free_hook);
+    CHECK(dav_cred_get("alice") == NULL);
+    CHECK(b.backend.set_credentials("alice", "s3cret") == MAPISTORE_SUCCESS);
+    CHECK(b.backend.set_credentials("alice", "s3cret") == MAPISTORE_SUCCESS);
+    CHECK(b.backend.set_credentials("bob", "other") == MAPISTORE_SUCCESS);
+    CHECK(b.backend.forget_credentials("alice") == MAPISTORE_SUCCESS);
+    CHECK(freed_calls == 0);
+    CHECK(dav_cred_get("alice") && strcmp(dav_cred_get("alice"), "s3cret") == 0);
+    CHECK(b.backend.forget_credentials("alice") == MAPISTORE_SUCCESS);
+    CHECK(freed_calls == 1 && freed_zero);
+    CHECK(dav_cred_get("alice") == NULL);
+    CHECK(strcmp(dav_cred_get("bob"), "other") == 0);
+    CHECK(b.backend.set_credentials("bob", "changed") == MAPISTORE_SUCCESS);	/* newest verified password wins */
+    CHECK(freed_calls == 2 && freed_zero && strcmp(dav_cred_get("bob"), "changed") == 0);
+    CHECK(b.backend.forget_credentials("bob") == MAPISTORE_SUCCESS);
+    CHECK(freed_calls == 2 && dav_cred_get("bob"));
+    CHECK(b.backend.forget_credentials("alice") == MAPISTORE_SUCCESS);	/* unknown: nothing to do */
+    CHECK(freed_calls == 2);
+    CHECK(b.backend.forget_credentials("bob") == MAPISTORE_SUCCESS);
+    CHECK(freed_calls == 3 && freed_zero && dav_cred_get("bob") == NULL);
+    dav_cred_set_free_hook(NULL);
+    return 0;
+}
+
 
 static char *slurp(const char *name, size_t *len)
 {
@@ -818,7 +861,7 @@ int main(int argc, char **argv)
     vcf_dir = argv[2];
     carddav_fake = argv[3];
     if (mkdir(fixture, 0700) && access(fixture, W_OK)) return 2;
-    if (test_inert_when_unconfigured() || test_settings_key_file() || test_backend_registers()
+    if (test_inert_when_unconfigured() || test_settings_key_file() || test_backend_registers() || test_cred_refcount()
         || test_vcard_roundtrip_untouched() || test_vcard_folding_utf8() || test_vcard_escape()
         || test_vcard_set_keeps_unknown() || test_vlist_parse()
         || test_vcard_trailing_data_rejected() || test_map_contact_full() || test_map_props_to_fields_roundtrip()

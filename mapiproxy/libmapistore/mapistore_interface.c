@@ -481,6 +481,19 @@ _PUBLIC_ enum mapistore_error mapistore_list_contexts_for_user(struct mapistore_
 	return mapistore_backend_list_contexts(owner, ictx, mem_ctx, contexts_listp);
 }
 
+/* Called once per session with the password the transport verified; undone by mapistore_forget_credentials. */
+_PUBLIC_ enum mapistore_error mapistore_set_credentials(struct mapistore_context *mstore_ctx, const char *username, const char *password)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	return mapistore_backend_set_credentials(username, password);
+}
+
+_PUBLIC_ enum mapistore_error mapistore_forget_credentials(struct mapistore_context *mstore_ctx, const char *username)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	return mapistore_backend_forget_credentials(username);
+}
+
 _PUBLIC_ enum mapistore_error mapistore_create_root_folder(const char *username, enum mapistore_context_role ctx_role, uint64_t fid, const char *name, TALLOC_CTX *mem_ctx, char **mapistore_urip)
 {
 	/* Sanity checks */

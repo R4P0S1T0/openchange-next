@@ -336,6 +336,37 @@ enum mapistore_error mapistore_backend_list_contexts(const char *username, struc
 	return MAPISTORE_SUCCESS;
 }
 
+/* All or nothing: a failure undoes the backends already set, so one forget balances one successful set. */
+enum mapistore_error mapistore_backend_set_credentials(const char *username, const char *password)
+{
+	enum mapistore_error	retval;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!username || !password, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		retval = backends[i].backend->backend.set_credentials(username, password);
+		if (retval != MAPISTORE_SUCCESS) {
+			while (i-- > 0) backends[i].backend->backend.forget_credentials(username);
+			return retval;
+		}
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+/* Every backend forgets; the first failure is returned. */
+enum mapistore_error mapistore_backend_forget_credentials(const char *username)
+{
+	enum mapistore_error	retval = MAPISTORE_SUCCESS, ret;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!username, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		ret = backends[i].backend->backend.forget_credentials(username);
+		if (retval == MAPISTORE_SUCCESS) retval = ret;
+	}
+	return retval;
+}
+
 /**
    \details Create backend context
 

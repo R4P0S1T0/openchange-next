@@ -3,6 +3,7 @@
 use crate::auth::Password;
 use crate::session::SessionId;
 use std::collections::VecDeque;
+use std::fmt;
 use std::future::Future;
 use std::sync::Mutex;
 
@@ -11,15 +12,31 @@ pub const MAPI_E_LOGON_FAILED: u32 = 0x8004_0111;
 pub const EC_RPC_FAILED: u32 = 0x8004_0115;
 
 /// Connect request fields EMSMDB needs (MS-OXCMAPIHTTP 2.2.4.1.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectParams {
     /// Account verified by Dovecot.
     pub username: String,
+    /// The Basic password Dovecot verified; mapistore backends log in to other servers with it.
+    pub password: Password,
     pub user_dn: String,
     pub flags: u32,
     pub code_page: u32,
     pub lcid_sort: u32,
     pub lcid_string: u32,
+}
+
+impl fmt::Debug for ConnectParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectParams")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("user_dn", &self.user_dn)
+            .field("flags", &self.flags)
+            .field("code_page", &self.code_page)
+            .field("lcid_sort", &self.lcid_sort)
+            .field("lcid_string", &self.lcid_string)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,12 +381,21 @@ mod tests {
     fn params() -> ConnectParams {
         ConnectParams {
             username: "user@example.invalid".into(),
+            password: Password::from("s3cret-marker"),
             user_dn: "/o=example.invalid/cn=user".into(),
             flags: 0,
             code_page: 1252,
             lcid_sort: 1033,
             lcid_string: 1033,
         }
+    }
+
+    #[test]
+    fn test_connect_params_debug_redacts() {
+        let debug = format!("{:?}", params());
+        assert!(debug.contains(r#"password: "<redacted>""#), "{debug}");
+        assert!(!debug.contains("s3cret-marker"), "{debug}");
+        assert!(debug.contains("user@example.invalid"), "{debug}");
     }
 
     #[test]

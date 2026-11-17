@@ -32,7 +32,12 @@ pub enum Admitted<'s> {
     Session(SessionGuard<'s>),
     /// Credentials the authenticator accepted: its canonical user, and the hash of the
     /// credentials as sent, which later requests on a new session must match.
-    User { user: String, cred_hash: [u8; 32] },
+    /// The password is the one the authenticator verified, for EMSMDB Connect only.
+    User {
+        user: String,
+        password: Password,
+        cred_hash: [u8; 32],
+    },
 }
 
 pub struct MapiRequest<'a> {
@@ -141,6 +146,7 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     Ok(Admitted::User {
         user: canonical,
         cred_hash: sessions.credential_hash(&user, &password),
+        password,
     })
 }
 
@@ -180,9 +186,14 @@ pub async fn handle_body<A: Authenticator, B: Backend>(
     };
     let mut rep = match (req.request_type, admitted) {
         (Some("PING"), _) => reply(req, 200, 0),
-        (Some("Connect"), Admitted::User { user, cred_hash }) => {
-            return emsmdb::connect(srv, req, user, cred_hash).await
-        }
+        (
+            Some("Connect"),
+            Admitted::User {
+                user,
+                password,
+                cred_hash,
+            },
+        ) => return emsmdb::connect(srv, req, user, password, cred_hash).await,
         (Some("Bind"), Admitted::User { cred_hash, .. }) => {
             return nspi::bind(srv, req, cred_hash).await
         }

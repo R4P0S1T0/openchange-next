@@ -28,6 +28,7 @@ mod linked {
         pub(super) fn oc_emsmdb_init(smb_conf_path: *const c_char) -> u32;
         pub(super) fn oc_emsmdb_connect(
             username: *const c_char,
+            password: *const c_char,
             user_dn: *const c_char,
             flags: u32,
             code_page: u32,
@@ -120,8 +121,9 @@ mod linked {
 
     /// Returns the session with its display name and DN prefix.
     pub fn connect(req: &ConnectParams) -> Result<(Session, String, String), u32> {
-        let (Ok(username), Ok(user_dn)) = (
+        let (Ok(username), Ok(password), Ok(user_dn)) = (
             CString::new(req.username.as_str()),
+            CString::new(req.password.expose()),
             CString::new(req.user_dn.as_str()),
         ) else {
             return Err(MAPI_E_INVALID_PARAMETER);
@@ -134,6 +136,7 @@ mod linked {
         let status = unsafe {
             oc_emsmdb_connect(
                 username.as_ptr(),
+                password.as_ptr(),
                 user_dn.as_ptr(),
                 req.flags,
                 req.code_page,
@@ -276,6 +279,7 @@ mod tests {
         let conf = CString::new(conf).unwrap();
         let req = ConnectParams {
             username: "user".into(),
+            password: crate::auth::Password::from("pw"),
             user_dn: "/o=example.invalid/cn=user".into(),
             flags: 0,
             code_page: 1252,
