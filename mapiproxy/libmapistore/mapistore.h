@@ -179,7 +179,7 @@ enum mapistore_change_kind {
 	MAPISTORE_CHANGE_CONTENTS,		/* uri: the folder whose messages changed */
 	MAPISTORE_CHANGE_FOLDER_ADDED,		/* uri: the folder that gained a subfolder */
 	MAPISTORE_CHANGE_FOLDER_DELETED,	/* uri: the folder that lost a subfolder */
-	MAPISTORE_CHANGE_FOLDER_RENAMED		/* uri: the renamed folder */
+	MAPISTORE_CHANGE_FOLDER_RENAMED		/* uri: the folder whose subfolder was renamed */
 };
 
 struct mapistore_change {

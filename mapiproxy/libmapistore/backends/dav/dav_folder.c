@@ -1458,8 +1458,8 @@ static bool change_add(TALLOC_CTX *mem_ctx, struct mapistore_change **list, size
 	return (grown[(*n)++].uri = talloc_strdup(grown, uri)) != NULL;
 }
 
-/* One PROPFIND of the books (names and sync tokens), a full listing only for a book without a token. Added and
-   deleted books are reported on personal, the folder holding them. */
+/* One PROPFIND of the books (names and sync tokens), a full listing only for a book without a token. Added,
+   deleted and renamed books are reported on personal, the folder holding them. */
 static enum mapistore_error dav_poll_changes(struct mapistore_connection_info *conn_info, TALLOC_CTX *mem_ctx,
 					     struct mapistore_change **listp, size_t *np)
 {
@@ -1505,7 +1505,7 @@ static enum mapistore_error dav_poll_changes(struct mapistore_connection_info *c
 			continue;
 		}
 		if (strcmp(old->name, now[i].name) != 0) {
-			ok = ok && change_add(mem_ctx, listp, np, now[i].uri, MAPISTORE_CHANGE_FOLDER_RENAMED);
+			ok = ok && change_add(mem_ctx, listp, np, personal, MAPISTORE_CHANGE_FOLDER_RENAMED);
 		}
 		if (now[i].state && old->state && strcmp(old->state, now[i].state) != 0) {
 			ok = ok && change_add(mem_ctx, listp, np, now[i].uri, MAPISTORE_CHANGE_CONTENTS);

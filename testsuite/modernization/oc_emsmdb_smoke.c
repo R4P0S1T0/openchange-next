@@ -1406,6 +1406,7 @@ static int test_notify_new_top_level_mailbox(void)
 
 /* M6 FFI: a backend's poll names changed folders by URI; each becomes a row Outlook's deep table hears of. */
 static const char *poll_contents_uri, *poll_parent_uri;
+static enum mapistore_change_kind poll_parent_kind = MAPISTORE_CHANGE_FOLDER_ADDED;
 static char poll_user[64];
 static enum mapistore_error fake_poll(struct mapistore_connection_info *ci, TALLOC_CTX *mem,
                                       struct mapistore_change **list, size_t *n)
@@ -1418,7 +1419,7 @@ static enum mapistore_error fake_poll(struct mapistore_connection_info *ci, TALL
     c[0].uri = talloc_strdup(c, poll_contents_uri);
     c[0].kind = MAPISTORE_CHANGE_CONTENTS;
     c[1].uri = talloc_strdup(c, poll_parent_uri);
-    c[1].kind = MAPISTORE_CHANGE_FOLDER_ADDED;
+    c[1].kind = poll_parent_kind;
     c[2].uri = talloc_strdup(c, "pollfake://nowhere/");
     c[2].kind = MAPISTORE_CHANGE_CONTENTS;
     *n = 3;
@@ -1459,6 +1460,17 @@ static int test_ffi_poll_changes(void)
     /* the changed folder's row, and the parent's with a newer PidTagHierRev; the unknown URI is skipped */
     CHECK(execute_notifies(session, 4096, NULL) == 2);
     CHECK(emsmdbp_notify_hierrev(session->ctx, quick) != NULL && emsmdbp_notify_hierrev(session->ctx, sync_issues) == NULL);
+    /* a subfolder renamed: the parent's PidTagHierRev moves on too, or cached Outlook keeps the old name */
+    {
+        const struct FILETIME *rev = emsmdbp_notify_hierrev(session->ctx, quick);
+        NTTIME before = ((NTTIME) rev->dwHighDateTime << 32) | rev->dwLowDateTime;
+        poll_parent_kind = MAPISTORE_CHANGE_FOLDER_RENAMED;
+        CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 1);
+        CHECK(execute_notifies(session, 4096, NULL) == 2);
+        rev = emsmdbp_notify_hierrev(session->ctx, quick);
+        CHECK(rev && (((NTTIME) rev->dwHighDateTime << 32) | rev->dwLowDateTime) > before);
+        poll_parent_kind = MAPISTORE_CHANGE_FOLDER_ADDED;
+    }
     poll_contents_uri = NULL;
     CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
     oc_emsmdb_disconnect(session);

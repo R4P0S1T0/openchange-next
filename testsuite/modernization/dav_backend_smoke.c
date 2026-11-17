@@ -2069,11 +2069,30 @@ static int poll_has(struct mapistore_connection_info *s, size_t want, const char
     return 0;
 }
 
+/* Name and change number of personal's only subfolder, as its folder table shows them. */
+static int child_row(struct dav_folder *f, char **name, uint64_t *cn)
+{
+    enum MAPITAGS cols[] = { PidTagDisplayName, PidTagChangeNumber };
+    struct mapistore_property_data *d;
+    void *t;
+    uint32_t n;
+    CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.table.set_columns(t, 2, cols) == MAPISTORE_SUCCESS);
+    CHECK(B.table.get_row(t, root, MAPISTORE_PREFILTERED_QUERY, 0, &d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == 0 && d[1].error == 0);
+    *name = talloc_strdup(root, d[0].data);
+    *cn = *(uint64_t *)d[1].data;
+    return 0;
+}
+
 static int test_poll_reports_contents_and_books(void)
 {
     struct mapistore_connection_info *s1 = talloc_zero(root, struct mapistore_connection_info);
     struct mapistore_connection_info *s2 = talloc_zero(root, struct mapistore_connection_info);
     struct dav_http *h;
+    struct dav_folder *f;
+    char *name;
+    uint64_t cn0, cn;
 
     CHECK(!backend_up());
     s1->username = talloc_strdup(s1, "u");
@@ -2089,8 +2108,17 @@ static int test_poll_reports_contents_and_books(void)
     /* a card in the new book, a rename, then the book goes */
     CHECK(dav_put(h, root, "/dav/u/Contacts/work/w.vcf", VC("w"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
     if (poll_has(s1, 1, "dav://contacts/work/", MAPISTORE_CHANGE_CONTENTS)) return 1;
+    /* renamed in webmail: reported on personal (Outlook resyncs the hierarchy on its newer PidTagHierRev), and
+       the book's row then shows the new name with a new change number, even within the read window */
+    CHECK((f = book("personal")) != NULL);
+    dav_backend_set_sync_window(10);
+    if (child_row(f, &name, &cn0)) return 1;
+    CHECK(!strcmp(name, "Trabalho"));
     CHECK(dav_rename_book(h, "/dav/u/Contacts/work/", "Trabalho 2") == MAPISTORE_SUCCESS);
-    if (poll_has(s1, 1, "dav://contacts/work/", MAPISTORE_CHANGE_FOLDER_RENAMED)) return 1;
+    if (poll_has(s1, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_FOLDER_RENAMED)) return 1;
+    if (child_row(f, &name, &cn)) return 1;
+    CHECK(!strcmp(name, "Trabalho 2") && cn != cn0);
+    dav_backend_set_sync_window(0);
     CHECK(dav_delete_book(h, "/dav/u/Contacts/work/") == MAPISTORE_SUCCESS);
     if (poll_has(s1, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_FOLDER_DELETED)) return 1;
     /* s2 missed nothing: the card, the rename and the deletion fold into the book's deletion */

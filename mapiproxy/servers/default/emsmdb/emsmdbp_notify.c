@@ -427,7 +427,8 @@ _PUBLIC_ int emsmdbp_notify_mailbox_changed(struct emsmdbp_context *ctx, const c
    \details Other clients changed folders of mapistore backends (mapistore_poll_changes): queue their rows
 
    A folder whose contents changed sends its row (a newer PidTagLocalCommitTimeMax makes Outlook sync it); a
-   folder that gained or lost a subfolder gets a newer PidTagHierRev, as in emsmdbp_notify_mailbox_changed.
+   folder that gained, lost or renamed a subfolder gets a newer PidTagHierRev, as in emsmdbp_notify_mailbox_changed:
+   cached-mode Outlook learns a subfolder's new name only from that hierarchy synchronization.
    Changes of folders Outlook does not know are skipped.
 
    \param ctx the session's EMSMDB provider context
@@ -448,7 +449,7 @@ _PUBLIC_ int emsmdbp_notify_poll_changes(struct emsmdbp_context *ctx)
 	if (mapistore_poll_changes(ctx->mstore_ctx, ctx->username, tmp, &changes, &n) != MAPISTORE_SUCCESS) n = 0;
 	for (i = 0; i < n; i++) {
 		if (emsmdbp_get_fid_from_uri(ctx, changes[i].uri, &fid) != MAPI_E_SUCCESS) continue;
-		if (changes[i].kind == MAPISTORE_CHANGE_FOLDER_ADDED || changes[i].kind == MAPISTORE_CHANGE_FOLDER_DELETED) {
+		if (changes[i].kind != MAPISTORE_CHANGE_CONTENTS) {
 			queued += emsmdbp_notify_hierarchy_changed(ctx, fid);
 		} else {
 			queued += emsmdbp_notify_folder_changed(ctx, fid, EMSMDBP_FOLDER_MODIFIED);
