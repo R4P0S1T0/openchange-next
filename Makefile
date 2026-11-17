@@ -817,6 +817,41 @@ check-imap-backend: libmapistore $(MAPISTORE_IMAP_SO) bin/imap-backend-test
 	rm -rf bin/imap-backend-fixture
 	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/imap-backend-test $(DOVECOT_IMAP) $(CURDIR)/bin/imap-backend-fixture $(CURDIR)/testsuite/modernization/smtp_fake.py $(DOVECOT_MANAGESIEVE)
 
+#################################################################
+# Optional CardDAV contacts mapistore backend (M6, libcurl + expat; ./configure --enable-mapistore-dav)
+#################################################################
+MAPISTORE_DAV_OBJS = mapiproxy/libmapistore/backends/dav/mapistore_dav.po
+MAPISTORE_DAV_SO = mapiproxy/libmapistore/backends/mapistore_dav.$(SHLIBEXT)
+
+$(MAPISTORE_DAV_OBJS): CFLAGS += $(DAV_CFLAGS)
+$(MAPISTORE_DAV_OBJS): $(wildcard mapiproxy/libmapistore/backends/dav/*.h)
+
+mapistore_dav: $(MAPISTORE_DAV_SO)
+
+$(MAPISTORE_DAV_SO): $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	@echo "Linking $@"
+	@$(CC) -o $@ $(DSOOPT) $(LDFLAGS) $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS)
+
+mapistore_dav-install:
+	$(INSTALL) -d $(DESTDIR)$(libdir)/mapistore_backends
+	$(INSTALL) -m 0755 $(MAPISTORE_DAV_SO) $(DESTDIR)$(libdir)/mapistore_backends/
+
+mapistore_dav-uninstall:
+	rm -f $(DESTDIR)$(libdir)/mapistore_backends/mapistore_dav.$(SHLIBEXT)
+
+mapistore_dav-clean:
+	rm -f mapiproxy/libmapistore/backends/dav/*.po $(MAPISTORE_DAV_SO) bin/dav-backend-test
+	rm -rf bin/dav-backend-fixture
+
+bin/dav-backend-test: testsuite/modernization/dav_backend_smoke.c $(MAPISTORE_DAV_OBJS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+	mkdir -p bin
+	$(CC) $(CFLAGS) $(DAV_CFLAGS) -Imapiproxy/libmapistore/backends/dav -o $@ $< $(MAPISTORE_DAV_OBJS) $(LDFLAGS) mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiserver.$(SHLIBEXT).$(PACKAGE_VERSION) mapiproxy/libmapiproxy.$(SHLIBEXT).$(PACKAGE_VERSION) libmapi.$(SHLIBEXT).$(PACKAGE_VERSION) $(DAV_LIBS) $(LIBS)
+
+.PHONY: check-dav-backend
+check-dav-backend: libmapistore $(MAPISTORE_DAV_SO) bin/dav-backend-test
+	rm -rf bin/dav-backend-fixture
+	LD_LIBRARY_PATH=.:mapiproxy:$(LD_LIBRARY_PATH) ./bin/dav-backend-test $(CURDIR)/bin/dav-backend-fixture
+
 mapiproxy/libmapistore.$(SHLIBEXT).$(PACKAGE_VERSION):  mapiproxy/libmapistore/mapistore_interface.po			\
 							mapiproxy/libmapistore/mapistore_processing.po			\
 							mapiproxy/libmapistore/mapistore_backend.po			\
