@@ -113,7 +113,7 @@ enum mapistore_error dav_fp_get(struct dav_fpstore *s, TALLOC_CTX *mem_ctx, cons
 	if (!s || !user || !href || !etag) return MAPISTORE_ERR_INVALID_PARAMETER;
 	*etag = NULL;
 	if (!s->conn) {
-		if (!(r = row_find(s, user, href))) return MAPISTORE_ERR_NOT_FOUND;
+		if (!(r = row_find(s, user, href)) || !r->etag) return MAPISTORE_ERR_NOT_FOUND;
 		memcpy(fp, r->fp, sizeof r->fp);
 		*etag = talloc_strdup(mem_ctx, r->etag);
 		return *etag ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
@@ -121,7 +121,7 @@ enum mapistore_error dav_fp_get(struct dav_fpstore *s, TALLOC_CTX *mem_ctx, cons
 	tmp = talloc_new(NULL);
 	eu = tmp ? _sql(tmp, user) : NULL;
 	eh = tmp ? _sql(tmp, href) : NULL;
-	sql = eu && eh ? talloc_asprintf(tmp, "SELECT etag, HEX(fp) FROM " FP_TABLE " WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
+	sql = eu && eh ? talloc_asprintf(tmp, "SELECT etag, HEX(fp) FROM " FP_TABLE " WHERE user = '%s' AND href = '%s' AND etag IS NOT NULL", eu, eh) : NULL;
 	if (!sql) {
 		talloc_free(tmp);
 		return MAPISTORE_ERR_NO_MEMORY;
@@ -208,16 +208,40 @@ enum mapistore_error dav_fp_delete(struct dav_fpstore *s, const char *user, cons
 	return ret;
 }
 
-/* href is a member of book (normalized, no trailing '/') and not one of live. */
-static bool is_gone(const char *book, const char *href, char **live, size_t n)
+enum { NOT_MEMBER, LIVE, GONE };
+
+/* Where href (normalized) stands for book (normalized, no trailing '/') and its live hrefs. */
+static int classify(const char *book, const char *href, char **live, size_t n)
 {
 	size_t bl = strlen(book), i;
 
-	if (strncmp(href, book, bl) != 0 || href[bl] != '/') return false;
+	if (strncmp(href, book, bl) != 0 || href[bl] != '/') return NOT_MEMBER;
 	for (i = 0; i < n; i++) {
-		if (strcmp(live[i], href) == 0) return false;
+		if (strcmp(live[i], href) == 0) return LIVE;
 	}
-	return true;
+	return GONE;
+}
+
+static bool href_add(TALLOC_CTX *mem_ctx, char ***list, size_t *k, const char *href)
+{
+	char **l = talloc_realloc(mem_ctx, *list, char *, *k + 1);
+
+	if (!l) return false;
+	*list = l;
+	return (l[(*k)++] = talloc_strdup(l, href)) != NULL;
+}
+
+/* A gone item's row stays as a tombstone (no ETag) so every client of the user learns the deletion
+   (emsmdb drops the ones a client already knows); it goes when the href is listed again. */
+static enum mapistore_error tombstone(struct dav_fpstore *s, const char *user, const char *href)
+{
+	TALLOC_CTX		*tmp = talloc_new(NULL);
+	const char		*eu = tmp ? _sql(tmp, user) : NULL, *eh = tmp ? _sql(tmp, href) : NULL;
+	char			*sql = eu && eh ? talloc_asprintf(tmp, "UPDATE " FP_TABLE " SET etag = NULL WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
+	enum mapistore_error	ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+
+	talloc_free(tmp);
+	return ret;
 }
 
 enum mapistore_error dav_fp_prune(struct dav_fpstore *s, const char *user, const char *book_href, char **live, size_t n,
@@ -225,57 +249,56 @@ enum mapistore_error dav_fp_prune(struct dav_fpstore *s, const char *user, const
 {
 	TALLOC_CTX		*tmp;
 	const char		*eu;
-	char			*sql, **gone;
+	char			*sql, **gone = NULL, **mark = NULL, **drop = NULL;
 	MYSQL_RES		*res = NULL;
 	MYSQL_ROW		row;
 	struct fp_row		*r;
-	size_t			k = 0, i;
+	size_t			k = 0, nmark = 0, ndrop = 0, i;
 	enum mapistore_error	ret = MAPISTORE_SUCCESS;
+	int			where;
 
 	if (!s || !user || !book_href || !gonep || !ngonep) return MAPISTORE_ERR_INVALID_PARAMETER;
 	*gonep = NULL;
 	*ngonep = 0;
-	gone = talloc_array(mem_ctx, char *, 1);
-	if (!gone) return MAPISTORE_ERR_NO_MEMORY;
-	if (!s->conn) {
-		for (r = s->rows; r; r = r->next) {
-			if (strcmp(r->user, user) || !is_gone(book_href, r->href, live, n)) continue;
-			gone = talloc_realloc(mem_ctx, gone, char *, k + 1);
-			if (!gone || !(gone[k++] = talloc_strdup(gone, r->href))) return MAPISTORE_ERR_NO_MEMORY;
-		}
-		for (i = 0; i < k; i++) dav_fp_delete(s, user, gone[i]);
-		*gonep = gone;
-		*ngonep = k;
-		return MAPISTORE_SUCCESS;
-	}
 	tmp = talloc_new(NULL);
-	eu = tmp ? _sql(tmp, user) : NULL;
-	sql = eu ? talloc_asprintf(tmp, "SELECT href FROM " FP_TABLE " WHERE user = '%s'", eu) : NULL;
-	if (!sql) {
-		talloc_free(tmp);
-		return MAPISTORE_ERR_NO_MEMORY;
-	}
-	switch (select_without_fetch(s->conn, sql, &res)) {
-	case MYSQL_SUCCESS:
-		while ((row = mysql_fetch_row(res))) {
-			if (!row[0] || !is_gone(book_href, row[0], live, n)) continue;
-			gone = talloc_realloc(mem_ctx, gone, char *, k + 1);
-			if (!gone || !(gone[k++] = talloc_strdup(gone, row[0]))) {
+	if (!tmp) return MAPISTORE_ERR_NO_MEMORY;
+	if (!s->conn) {
+		for (r = s->rows; r && ret == MAPISTORE_SUCCESS; r = r->next) {
+			if (strcmp(r->user, user)) continue;
+			where = classify(book_href, r->href, live, n);
+			if (where == GONE) {
+				TALLOC_FREE(r->etag);
+				if (!href_add(mem_ctx, &gone, &k, r->href)) ret = MAPISTORE_ERR_NO_MEMORY;
+			} else if (where == LIVE && !r->etag && !href_add(tmp, &drop, &ndrop, r->href)) {
 				ret = MAPISTORE_ERR_NO_MEMORY;
-				break;
 			}
 		}
-		mysql_free_result(res);
-		break;
-	case MYSQL_NOT_FOUND:
-		break;
-	default:
-		ret = MAPISTORE_ERR_DATABASE_OPS;
+	} else {
+		eu = _sql(tmp, user);
+		sql = eu ? talloc_asprintf(tmp, "SELECT href, etag IS NULL FROM " FP_TABLE " WHERE user = '%s'", eu) : NULL;
+		switch (sql ? select_without_fetch(s->conn, sql, &res) : MYSQL_ERROR) {
+		case MYSQL_SUCCESS:
+			while (ret == MAPISTORE_SUCCESS && (row = mysql_fetch_row(res))) {
+				bool dead = row[1] && strcmp(row[1], "0") != 0;
+
+				if (!row[0]) continue;
+				where = classify(book_href, row[0], live, n);
+				if ((where == GONE && (!href_add(mem_ctx, &gone, &k, row[0]) || (!dead && !href_add(tmp, &mark, &nmark, row[0])))) ||
+				    (where == LIVE && dead && !href_add(tmp, &drop, &ndrop, row[0]))) {
+					ret = MAPISTORE_ERR_NO_MEMORY;
+				}
+			}
+			mysql_free_result(res);
+			break;
+		case MYSQL_NOT_FOUND:
+			break;
+		default:
+			ret = sql ? MAPISTORE_ERR_DATABASE_OPS : MAPISTORE_ERR_NO_MEMORY;
+		}
+		for (i = 0; ret == MAPISTORE_SUCCESS && i < nmark; i++) ret = tombstone(s, user, mark[i]);
 	}
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < ndrop; i++) ret = dav_fp_delete(s, user, drop[i]);
 	talloc_free(tmp);
-	for (i = 0; ret == MAPISTORE_SUCCESS && i < k; i++) {
-		ret = dav_fp_delete(s, user, gone[i]);
-	}
 	if (ret != MAPISTORE_SUCCESS) {
 		talloc_free(gone);
 		return ret;

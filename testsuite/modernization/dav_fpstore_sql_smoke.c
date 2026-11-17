@@ -46,11 +46,15 @@ int main(void)
     allow_queries = false;
     CHECK(dav_fp_put(&s, "u", "/b/x", fp, "e") == MAPISTORE_ERR_DATABASE_OPS);
     CHECK(dav_fp_get(&s, NULL, "u'1", "/b/x", got, &etag) == MAPISTORE_ERR_DATABASE_OPS && etag == NULL);
-    CHECK(!strcmp(last_query, "SELECT etag, HEX(fp) FROM dav_fingerprints WHERE user = 'u\\'1' AND href = '/b/x'"));
+    CHECK(!strcmp(last_query, "SELECT etag, HEX(fp) FROM dav_fingerprints WHERE user = 'u\\'1' AND href = '/b/x' AND etag IS NOT NULL"));
     CHECK(dav_fp_prune(&s, "u'1", "/b", live, 1, NULL, &gone, &ngone) == MAPISTORE_ERR_DATABASE_OPS && !gone && !ngone);
-    CHECK(!strcmp(last_query, "SELECT href FROM dav_fingerprints WHERE user = 'u\\'1'"));
+    CHECK(!strcmp(last_query, "SELECT href, etag IS NULL FROM dav_fingerprints WHERE user = 'u\\'1'"));
     /* the parts the database never sees */
-    CHECK(is_gone("/b", "/b/y", live, 1) && !is_gone("/b", "/b/x", live, 1) && !is_gone("/b", "/bb/y", live, 1));
+    CHECK(classify("/b", "/b/y", live, 1) == GONE && classify("/b", "/b/x", live, 1) == LIVE);
+    CHECK(classify("/b", "/bb/y", live, 1) == NOT_MEMBER);
+    allow_queries = true;
+    CHECK(tombstone(&s, "u'1", "/b/y'") == MAPISTORE_SUCCESS);
+    CHECK(!strcmp(last_query, "UPDATE dav_fingerprints SET etag = NULL WHERE user = 'u\\'1' AND href = '/b/y\\''"));
     CHECK(parse_hex(hex, got) == false); /* trailing ")" */
     puts("dav fpstore SQL smoke: ok");
     return 0;

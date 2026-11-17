@@ -33,8 +33,9 @@ enum mapistore_error dav_fp_get(struct dav_fpstore *, TALLOC_CTX *, const char *
 enum mapistore_error dav_fp_put(struct dav_fpstore *, const char *user, const char *href,
 				const uint64_t fp[DAV_F_COUNT], const char *etag);
 enum mapistore_error dav_fp_delete(struct dav_fpstore *, const char *user, const char *href);
-/* Deletes the rows of the book's items that are not in live; *gone (in mem_ctx) lists their hrefs: items
-   Outlook was given that no longer exist. */
+/* The book's items with a row that are not in live: *gone (in mem_ctx) lists their hrefs, items a client
+   of the user was given that no longer exist. Their rows stay as tombstones (reported on every full
+   listing, so each client learns the deletion) until the href is listed again. */
 enum mapistore_error dav_fp_prune(struct dav_fpstore *, const char *user, const char *book_href, char **live, size_t n,
 				  TALLOC_CTX *, char ***gone, size_t *ngone);
 

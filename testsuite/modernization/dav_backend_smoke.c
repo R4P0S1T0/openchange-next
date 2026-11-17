@@ -1272,6 +1272,36 @@ static int test_ics_token_invalid_no_dup_mids(void)
     return 0;
 }
 
+/* A card deleted while every client is away: each later session of the user reports it, until it is back. */
+static int test_deletion_reaches_every_client(void)
+{
+    struct dav_folder *a, *b, *c;
+    struct UI8Array_r *ids;
+    uint64_t mid_x, cn, dcn;
+    void *msg;
+
+    CHECK(!backend_up());
+    if (put("dx.vcf", VC("dx"))) return 1;
+    CHECK((a = book("personal")) != NULL);
+    if (row_of(a, "dx", &mid_x, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(a, root, mid_x, false, &msg) == MAPISTORE_SUCCESS);	/* PC1 and PC2 hold it */
+    CHECK(!ctl("delete?path=" BOOK "dx.vcf"));
+    CHECK((a = book("personal")) != NULL);	/* PC1 logs on */
+    CHECK(B.folder.get_deleted_fmids(a, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && has_id(ids, mid_x));
+    CHECK((b = book("personal")) != NULL);	/* PC2 logs on later */
+    CHECK(B.folder.get_deleted_fmids(b, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && has_id(ids, mid_x));
+    /* put back at the same href: no longer deleted, same MID */
+    if (put("dx.vcf", VC("dx"))) return 1;
+    CHECK((c = book("personal")) != NULL);
+    CHECK(B.folder.get_deleted_fmids(c, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && !has_id(ids, mid_x));
+    if (row_of(c, "dx", &cn, &dcn, NULL)) return 1;
+    CHECK(cn == mid_x);
+    CHECK((c = book("personal")) != NULL);
+    CHECK(B.folder.get_deleted_fmids(c, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && !has_id(ids, mid_x));
+    backend_down();
+    return 0;
+}
+
 static int test_fp_written_on_read(void)
 {
     struct dav_folder *f;
@@ -1319,6 +1349,14 @@ static int test_fpstore_memory(void)
     /* prune: only this user's rows of this book that are not live */
     CHECK(dav_fp_prune(s, "u", "/b", live, 1, root, &gone, &n) == MAPISTORE_SUCCESS && n == 1 && !strcmp(gone[0], "/b/y"));
     CHECK(dav_fp_get(s, root, "u", "/b/y", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    /* a tombstone: reported again on the next prune (another client of the user may not know yet) */
+    CHECK(dav_fp_prune(s, "u", "/b", live, 1, root, &gone, &n) == MAPISTORE_SUCCESS && n == 1 && !strcmp(gone[0], "/b/y"));
+    {
+        char *both[] = { "/b/x", "/b/y" };
+        /* listed again (put back): the tombstone goes */
+        CHECK(dav_fp_prune(s, "u", "/b", both, 2, root, &gone, &n) == MAPISTORE_SUCCESS && n == 0);
+        CHECK(dav_fp_prune(s, "u", "/b", live, 1, root, &gone, &n) == MAPISTORE_SUCCESS && n == 0);
+    }
     CHECK(dav_fp_get(s, root, "v", "/b/y", got, &etag) == MAPISTORE_SUCCESS);
     CHECK(dav_fp_get(s, root, "u", "/c/z", got, &etag) == MAPISTORE_SUCCESS);
     CHECK(dav_fp_delete(s, "u", "/b/x") == MAPISTORE_SUCCESS);
@@ -1349,7 +1387,7 @@ int main(int argc, char **argv)
         || test_http_timeout_conn_refused() || test_fpstore_memory() || test_list_contexts_books()
         || test_list_contexts_sogo_down_keeps() || test_contents_table_contacts_and_lists()
         || test_open_contact_props_and_photo() || test_ics_incremental() || test_ics_token_invalid_no_dup_mids()
-        || test_fp_written_on_read()) { fake_stop(); return 1; }
+        || test_fp_written_on_read() || test_deletion_reaches_every_client()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;
