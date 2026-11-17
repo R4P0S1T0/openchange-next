@@ -54,7 +54,7 @@ static struct change *change_get(char *key)
 	return c;
 }
 
-static struct Binary_r *binary_dup(TALLOC_CTX *mem_ctx, const struct Binary_r *b)
+_PUBLIC_ struct Binary_r *mapistore_binary_dup(TALLOC_CTX *mem_ctx, const struct Binary_r *b)
 {
 	struct Binary_r *d = b ? talloc_zero(mem_ctx, struct Binary_r) : NULL;
 
@@ -138,8 +138,8 @@ _PUBLIC_ enum mapistore_error mapistore_change_record_client(const char *usernam
 	TALLOC_FREE(c->pcl);
 	c->cn = cn;
 	c->when = time(NULL);
-	c->ck = binary_dup(c, ck);
-	c->pcl = binary_dup(c, pcl);
+	c->ck = mapistore_binary_dup(c, ck);
+	c->pcl = mapistore_binary_dup(c, pcl);
 	return c->ck && c->pcl ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
 }
 

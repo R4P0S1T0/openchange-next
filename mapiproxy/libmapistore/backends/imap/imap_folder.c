@@ -1012,20 +1012,6 @@ _PUBLIC_ enum mapistore_error imap_change_set_client(struct imap_context *ctx, c
 	return mapistore_change_record_client(ctx->username, uri, cn_source_adapter, ctx, ck, pcl);
 }
 
-static struct Binary_r *binary_dup(TALLOC_CTX *mem_ctx, const struct Binary_r *b)
-{
-	struct Binary_r *d = b ? talloc_zero(mem_ctx, struct Binary_r) : NULL;
-
-	if (d && b->cb && !(d->lpb = talloc_memdup(d, b->lpb, b->cb))) {
-		talloc_free(d);
-		return NULL;
-	}
-	if (d) {
-		d->cb = b->cb;
-	}
-	return d;
-}
-
 /* XID of a change: the replica GUID (NDR) and the 6 low bytes of cn >> 16, as oxcfxics_make_gid. */
 static struct Binary_r *change_key(TALLOC_CTX *mem_ctx, const struct GUID *g, uint64_t cn, bool sized)
 {
@@ -1074,8 +1060,8 @@ _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, 
 
 	switch (tag) {
 	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
-	case PidTagChangeKey:			return own ? binary_dup(mem_ctx, ock) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
-	case PidTagPredecessorChangeList:	return own ? binary_dup(mem_ctx, opcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
+	case PidTagChangeKey:			return own ? mapistore_binary_dup(mem_ctx, ock) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
+	case PidTagPredecessorChangeList:	return own ? mapistore_binary_dup(mem_ctx, opcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
 	case PidTagLastModificationTime:
 	case PidTagLocalCommitTimeMax:		return change_time(mem_ctx, when);
 	default:				return NULL;
