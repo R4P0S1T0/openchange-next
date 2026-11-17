@@ -1012,60 +1012,10 @@ _PUBLIC_ enum mapistore_error imap_change_set_client(struct imap_context *ctx, c
 	return mapistore_change_record_client(ctx->username, uri, cn_source_adapter, ctx, ck, pcl);
 }
 
-/* XID of a change: the replica GUID (NDR) and the 6 low bytes of cn >> 16, as oxcfxics_make_gid. */
-static struct Binary_r *change_key(TALLOC_CTX *mem_ctx, const struct GUID *g, uint64_t cn, bool sized)
-{
-	struct Binary_r	*b = talloc_zero(mem_ctx, struct Binary_r);
-	uint8_t		*p;
-	uint64_t	id = (cn >> 16) & 0x0000FFFFFFFFFFFFULL;
-	int		i;
-
-	if (!b || !(b->lpb = talloc_array(b, uint8_t, 23))) {
-		return NULL;
-	}
-	p = b->lpb;
-	if (sized) {
-		*p++ = 22; /* PredecessorChangeList: one SizedXid */
-	}
-	for (i = 0; i < 4; i++) *p++ = (g->time_low >> (8 * i)) & 0xFF;
-	for (i = 0; i < 2; i++) *p++ = (g->time_mid >> (8 * i)) & 0xFF;
-	for (i = 0; i < 2; i++) *p++ = (g->time_hi_and_version >> (8 * i)) & 0xFF;
-	memcpy(p, g->clock_seq, 2);
-	p += 2;
-	memcpy(p, g->node, 6);
-	p += 6;
-	for (i = 0; i < 6; i++, id >>= 8) *p++ = id & 0xFF;
-	b->cb = sized ? 23 : 22;
-	return b;
-}
-
-static struct FILETIME *change_time(TALLOC_CTX *mem_ctx, time_t t)
-{
-	struct FILETIME	*ft = talloc(mem_ctx, struct FILETIME);
-	uint64_t	nt = ((uint64_t) t + 11644473600ULL) * 10000000ULL;
-
-	if (ft) {
-		ft->dwLowDateTime = (uint32_t) nt;
-		ft->dwHighDateTime = (uint32_t) (nt >> 32);
-	}
-	return ft;
-}
-
 _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when,
 				 enum MAPITAGS tag)
 {
-	const struct Binary_r *ock = NULL, *opcl = NULL;
-	bool own = (tag == PidTagChangeKey || tag == PidTagPredecessorChangeList) &&
-		   mapistore_change_client_keys(ctx->username, NULL, cn, &ock, &opcl) == MAPISTORE_SUCCESS;
-
-	switch (tag) {
-	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
-	case PidTagChangeKey:			return own ? mapistore_binary_dup(mem_ctx, ock) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
-	case PidTagPredecessorChangeList:	return own ? mapistore_binary_dup(mem_ctx, opcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
-	case PidTagLastModificationTime:
-	case PidTagLocalCommitTimeMax:		return change_time(mem_ctx, when);
-	default:				return NULL;
-	}
+	return mapistore_change_value(mem_ctx, ctx->username, NULL, &ctx->replica_guid, cn, when, tag);
 }
 
 /* Folder properties (plan Decision 6); STATUS is asked only when a count is wanted. */

@@ -61,6 +61,20 @@ int main(void)
     CHECK(mapistore_change_client_keys("bob", NULL, other, &gck, &gpcl) == MAPISTORE_SUCCESS);
     CHECK(mapistore_change_client_keys("alice", NULL, other, &gck, &gpcl) != MAPISTORE_SUCCESS);
     CHECK(mapistore_change_client_keys("bo", NULL, other, &gck, &gpcl) != MAPISTORE_SUCCESS);
+    {
+        /* XID of a change: replica GUID (NDR) + the 6 low bytes of cn >> 16; Outlook's own keys when it uploaded */
+        struct GUID g = { .time_low = 0x11223344, .time_mid = 0x5566, .time_hi_and_version = 0x7788 };
+        struct Binary_r *k = mapistore_change_value(NULL, "carol", NULL, &g, (0x0000050403020100ULL << 8) | 1, 0, PidTagChangeKey);
+        struct Binary_r *p = mapistore_change_value(NULL, "carol", NULL, &g, (0x0000050403020100ULL << 8) | 1, 0, PidTagPredecessorChangeList);
+        struct FILETIME *t = mapistore_change_value(NULL, "carol", NULL, &g, 1, 1, PidTagLastModificationTime);
+        CHECK(k && k->cb == 22 && !memcmp(k->lpb, "\x44\x33\x22\x11\x66\x55\x88\x77", 8));
+        CHECK(!memcmp(k->lpb + 16, "\x01\x02\x03\x04\x05\x00", 6));
+        CHECK(p && p->cb == 23 && p->lpb[0] == 22 && !memcmp(p->lpb + 1, k->lpb, 22));
+        CHECK(t && t->dwHighDateTime == 0x019DB1DE && t->dwLowDateTime == 0xD5D71680);
+        k = mapistore_change_value(NULL, "bob", NULL, &g, other, 0, PidTagChangeKey);
+        CHECK(k && k->cb == 3); /* bob uploaded it */
+        CHECK(mapistore_change_value(NULL, "bob", NULL, &g, other, 0, PidTagSubject) == NULL);
+    }
     puts("mapistore changes smoke: ok");
     return 0;
 }
