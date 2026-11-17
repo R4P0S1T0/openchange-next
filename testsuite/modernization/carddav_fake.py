@@ -6,6 +6,7 @@ Serves http://127.0.0.1:<port>/dav/u/Contacts/ with Basic auth u/p, one book "pe
 The port goes to <port-file> once listening; <state-dir>/requests.log gets "METHOD path status".
 Test controls (no auth): POST /_ctl/edit?path=P, /_ctl/delete?path=P (act as another client),
 /_ctl/fail?code=N (every request answers N; 0 clears), /_ctl/slow?secs=S (delay every request),
+/_ctl/serve?file=F (PROPFIND and REPORT answer 207 with the file F until serve?file= is empty),
 /_ctl/invalidate_token (the next sync with a token gets 403 valid-sync-token; real SOGo
 answers 207 with the full state instead).
 A PUT with If-None-Match: * on an existing card answers 412 (RFC 4918); real SOGo ignores it and overwrites (204).
@@ -22,7 +23,7 @@ from xml.sax.saxutils import escape
 HOME = "/dav/u/Contacts/"
 AUTH = "Basic dTpw"  # u:p
 lock = threading.Lock()
-S = {"fail": 0, "slow": 0.0, "invalidate": False, "version": 0}
+S = {"fail": 0, "slow": 0.0, "invalidate": False, "serve": "", "version": 0}
 books = {"personal": {"name": "Personal", "items": {}, "counter": 1794920000, "changes": []}}
 
 
@@ -125,6 +126,8 @@ class H(BaseHTTPRequestHandler):
                 S["fail"] = int(q["code"][0])
             elif op == "slow":
                 S["slow"] = float(q["secs"][0])
+            elif op == "serve":
+                S["serve"] = q.get("file", [""])[0]
             elif op == "invalidate_token":
                 S["invalidate"] = True
             else:
@@ -133,6 +136,11 @@ class H(BaseHTTPRequestHandler):
 
     def dispatch(self, path, data):
         m = self.command
+        if S["serve"] and m in ("PROPFIND", "REPORT"):
+            with open(S["serve"], "rb") as f:
+                return self.xml(207, f.read())
+        if m == "REPORT" and b"sync-collection" in data and self.headers.get("Depth") != "0":
+            return self.send(400)  # RFC 6578: sync-collection is Depth 0
         key, name = split(path)
         book = books.get(key) if key else None
         if m == "PROPFIND" and path == HOME:

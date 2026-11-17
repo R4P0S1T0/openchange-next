@@ -741,6 +741,37 @@ static int test_http_put_if_none_match_exists(void)
     return 0;
 }
 
+/* The captured SOGo responses (anonymized) served by the fake. */
+static int test_http_sogo_fixtures(void)
+{
+    struct dav_http *h;
+    struct dav_book *b;
+    struct dav_change *ch;
+    char *tok, **bodies, **etags, *hrefs[2] = { "/SOGo/dav/u/Contacts/personal/c1.vcf", "/SOGo/dav/u/Contacts/personal/c9.vcf" };
+    char q[512];
+    size_t n;
+    bool full;
+
+    CHECK(!fake_start());
+    h = client("p");
+    snprintf(q, sizeof q, "serve?file=%s/propfind_books.xml", vcf_dir);
+    CHECK(!ctl(q));
+    CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_SUCCESS && n == 1);	/* the GAL directory is left out */
+    CHECK(!strcmp(b[0].segment, "personal") && !strcmp(b[0].displayname, "Personal") && !strcmp(b[0].sync_token, "1794920267"));
+    snprintf(q, sizeof q, "serve?file=%s/sync_incr.xml", vcf_dir);
+    CHECK(!ctl(q));
+    CHECK(dav_sync(h, root, "/SOGo/dav/u/Contacts/personal/", "1794920281", &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
+    CHECK(n == 2 && !full && !strcmp(tok, "1794920281"));
+    CHECK(!strcmp(ch[0].etag, "\"gcs00000002\"") && ch[1].etag == NULL);
+    snprintf(q, sizeof q, "serve?file=%s/multiget.xml", vcf_dir);
+    CHECK(!ctl(q));
+    CHECK(dav_multiget(h, root, "/SOGo/dav/u/Contacts/personal/", hrefs, 2, &bodies, &etags) == MAPISTORE_SUCCESS);
+    CHECK(strstr(bodies[0], "UID:c1") && strstr(bodies[0], "END:VCARD") && !strcmp(etags[0], "\"gcs00000002\"") && !bodies[1]);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
 static int test_http_401_denied(void)
 {
     struct dav_http *h;
@@ -793,7 +824,7 @@ int main(int argc, char **argv)
         || test_vcard_trailing_data_rejected() || test_map_contact_full() || test_map_props_to_fields_roundtrip()
         || test_field_set_no_line_injection() || test_map_list_members() || test_photo_cap()
         || test_http_list_books() || test_http_sync_incremental() || test_http_sync_invalid_token_full()
-        || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_401_denied()
+        || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_sogo_fixtures() || test_http_401_denied()
         || test_http_timeout_conn_refused()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);

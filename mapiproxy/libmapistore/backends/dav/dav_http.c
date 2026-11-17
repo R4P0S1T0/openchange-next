@@ -372,18 +372,20 @@ static char *xml_escape(TALLOC_CTX *mem, const char *s)
 	return o;
 }
 
-static const char *const xml_hdrs[] = { "Content-Type: application/xml; charset=utf-8", "Depth: 1", NULL };
+static const char *const xml_hdrs[] = { "Content-Type: application/xml; charset=utf-8", NULL };
+static const char *const depth1_hdrs[] = { "Content-Type: application/xml; charset=utf-8", "Depth: 1", NULL };
+static const char *const depth0_hdrs[] = { "Content-Type: application/xml; charset=utf-8", "Depth: 0", NULL };
 
 /* A request whose 207 body is parsed into s; *bad_token tells a 403/409 valid-sync-token error. */
 static enum mapistore_error report(struct dav_http *h, TALLOC_CTX *mem, const char *method, const char *href,
-				   const char *body, struct pst *s, bool *bad_token)
+				   const char *const *hdrs, const char *body, struct pst *s, bool *bad_token)
 {
 	struct buf b;
 	long st;
 	enum mapistore_error err;
 
 	memset(s, 0, sizeof *s);
-	err = dav_do(h, method, href, xml_hdrs, body, &st, &b);
+	err = dav_do(h, method, href, hdrs, body, &st, &b);
 	if (err) return err;
 	if (st == 207) {
 		err = ms_parse(mem, &b, s);
@@ -408,7 +410,7 @@ enum mapistore_error dav_list_books(struct dav_http *h, TALLOC_CTX *mem_ctx, str
 
 	*books = NULL;
 	*n = 0;
-	err = report(h, tmp, "PROPFIND", h->base_path, body, &s, NULL);
+	err = report(h, tmp, "PROPFIND", h->base_path, depth1_hdrs, body, &s, NULL);
 	if (err) goto done;
 	out = talloc_zero_array(mem_ctx, struct dav_book, s.n ? s.n : 1);
 	if (!out) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
@@ -451,7 +453,7 @@ enum mapistore_error dav_sync(struct dav_http *h, TALLOC_CTX *mem_ctx, const cha
 				       "<sync-token>%s</sync-token><sync-level>1</sync-level><prop><getetag/></prop></sync-collection>", t);
 		if (!body) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
 		bad_token = false;
-		err = report(h, tmp, "REPORT", book_href, body, &s, &bad_token);
+		err = report(h, tmp, "REPORT", book_href, depth0_hdrs, body, &s, &bad_token);
 		if (err && bad_token && token) {
 			token = NULL;
 			full = true;
@@ -502,7 +504,7 @@ enum mapistore_error dav_multiget(struct dav_http *h, TALLOC_CTX *mem_ctx, const
 	}
 	body = body ? talloc_strdup_append(body, "</C:addressbook-multiget>") : NULL;
 	if (!body) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
-	err = report(h, tmp, "REPORT", book_href, body, &s, NULL);
+	err = report(h, tmp, "REPORT", book_href, xml_hdrs, body, &s, NULL);
 	if (err) goto done;
 	bo = talloc_zero_array(mem_ctx, char *, n ? n : 1);
 	et = talloc_zero_array(mem_ctx, char *, n ? n : 1);
