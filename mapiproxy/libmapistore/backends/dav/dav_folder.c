@@ -13,6 +13,7 @@
 
 #include <string.h>
 #include <strings.h>
+#include <inttypes.h>
 
 #include "mapiproxy/libmapistore/mapistore.h"
 #include "mapiproxy/libmapistore/mapistore_errors.h"
@@ -100,7 +101,7 @@ struct dav_http *dav_context_http(struct dav_context *ctx, TALLOC_CTX *mem_ctx)
 	return user_http(mem_ctx, ctx->username, ctx->home);
 }
 
-/* Every address book: personal as the main Contacts folder, the others as more contacts folders.
+/* personal as the main Contacts folder; the other books are its subfolders (open_table, open_folder).
    No password or SOGo unreachable: an error, so provisioning keeps the folders it knows. */
 static enum mapistore_error dav_list_contexts(const char *username, struct indexing_context *ictx,
 					      TALLOC_CTX *mem_ctx, struct mapistore_contexts_list **listp)
@@ -130,7 +131,8 @@ static enum mapistore_error dav_list_contexts(const char *username, struct index
 		talloc_free(tmp);
 		return MAPISTORE_ERR_CONN_REFUSED;
 	}
-	for (i = 0; i < n; i++) {
+	for (i = 0; i < n && !have_main; i++) {
+		if (strcmp(books[i].segment, "personal") != 0) continue;
 		e = talloc_zero(mem_ctx, struct mapistore_contexts_list);
 		if (!e || !(e->url = talloc_asprintf(e, DAV_CONTACTS_URI "%s/", books[i].segment)) ||
 		    !(e->name = talloc_strdup(e, books[i].displayname ? books[i].displayname : books[i].segment))) {
@@ -139,8 +141,7 @@ static enum mapistore_error dav_list_contexts(const char *username, struct index
 			break;
 		}
 		e->role = MAPISTORE_CONTACTS_ROLE;
-		e->main_folder = !have_main && strcmp(books[i].segment, "personal") == 0;
-		have_main |= e->main_folder;
+		e->main_folder = have_main = true;
 		DLIST_ADD_END(list, e, struct mapistore_contexts_list *);
 	}
 	talloc_free(tmp);
@@ -682,7 +683,48 @@ static const char *row_string(struct SRow *row, enum MAPITAGS unicode_tag, enum 
 	return NULL;
 }
 
-/* Books Outlook created under Contacts (create_folder) open through it. */
+/* The user's other books, as subfolders of personal (books are flat: none below another book). Their IDs
+   come from the indexing of their URIs, so they stay the same across sessions. */
+static enum mapistore_error child_books(TALLOC_CTX *mem_ctx, struct dav_folder *p, struct dav_folder ***out, uint32_t *n)
+{
+	struct dav_book		*books;
+	struct dav_folder	*f, **list;
+	struct dav_http		*h;
+	TALLOC_CTX		*tmp;
+	enum mapistore_error	ret;
+	size_t			nb, i;
+	char			*norm;
+
+	*out = NULL;
+	*n = 0;
+	if (!is_personal(p->ctx)) return MAPISTORE_SUCCESS;
+	tmp = talloc_new(NULL);
+	h = tmp ? dav_context_http(p->ctx, tmp) : NULL;
+	ret = !tmp ? MAPISTORE_ERR_NO_MEMORY : !h ? MAPISTORE_ERR_CONN_REFUSED : dav_list_books(h, tmp, &books, &nb);
+	list = ret == MAPISTORE_SUCCESS ? talloc_array(mem_ctx, struct dav_folder *, nb + 1) : NULL;
+	if (ret == MAPISTORE_SUCCESS && !list) ret = MAPISTORE_ERR_NO_MEMORY;
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < nb; i++) {
+		norm = dav_href_norm(tmp, books[i].href);
+		if (!norm || strcmp(norm, p->ctx->book_norm) == 0) continue;
+		if (!(f = book_folder(list, p->ctx, books[i].segment)) ||
+		    !(f->ctx->displayname = talloc_strdup(f->ctx, books[i].displayname ? books[i].displayname : books[i].segment))) {
+			ret = MAPISTORE_ERR_NO_MEMORY;
+			break;
+		}
+		f->parent_fid = p->fid;
+		list[(*n)++] = f;
+	}
+	talloc_free(tmp);
+	if (ret != MAPISTORE_SUCCESS) {
+		talloc_free(list);
+		*n = 0;
+		return ret;
+	}
+	*out = list;
+	return MAPISTORE_SUCCESS;
+}
+
+/* The other books open through personal. */
 static enum mapistore_error open_folder(void *parent, TALLOC_CTX *mem_ctx, uint64_t fid, void **child)
 {
 	struct dav_folder	*p = parent, *f;
@@ -703,6 +745,7 @@ static enum mapistore_error open_folder(void *parent, TALLOC_CTX *mem_ctx, uint6
 	if (!f) {
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
+	f->parent_fid = p->fid;
 	*child = f;
 	return MAPISTORE_SUCCESS;
 }
@@ -748,6 +791,7 @@ static enum mapistore_error create_folder(void *parent, TALLOC_CTX *mem_ctx, uin
 		return ret;
 	}
 	f->ctx->displayname = talloc_strdup(f->ctx, name);
+	f->parent_fid = p->fid;
 	*childp = f;
 	return MAPISTORE_SUCCESS;
 }
@@ -791,7 +835,7 @@ static enum mapistore_error delete_folder(void *folder)
 	return ret == MAPISTORE_ERR_NOT_FOUND ? MAPISTORE_SUCCESS : ret;
 }
 
-/* Outlook deletes the version it last agreed on (If-Match): a card changed on another client since is
+/* Outlook deletes the version it was last shown (If-Match): a card changed on another client since is
    kept, and its newer version reaches Outlook again on the next sync (nothing lost wins over delete). */
 static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
 {
@@ -832,8 +876,9 @@ static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t f
 		dav_context_sync(ctx);
 		ret = MAPISTORE_SUCCESS;
 	} else if (ret == MAPISTORE_SUCCESS || ret == MAPISTORE_ERR_NOT_FOUND) {
-		if (dav_fp_delete(ctx->fp, ctx->username, norm) != MAPISTORE_SUCCESS) {
-			OC_DEBUG(1, "DAV backend: fingerprints of %s not deleted\n", norm);
+		/* a tombstone: every other client of the user learns the deletion too */
+		if (dav_fp_tombstone(ctx->fp, ctx->username, norm) != MAPISTORE_SUCCESS) {
+			OC_DEBUG(1, "DAV backend: tombstone of %s not kept\n", norm);
 		}
 		dav_context_sync(ctx);
 		ret = MAPISTORE_SUCCESS;
@@ -851,6 +896,13 @@ static enum mapistore_error get_child_count(void *object, enum mapistore_table_t
 		return MAPISTORE_ERR_INVALID_PARAMETER;
 	}
 	*count = 0;
+	if (type == MAPISTORE_FOLDER_TABLE) {
+		struct dav_folder **children;
+
+		ret = child_books(NULL, f, &children, count);
+		talloc_free(children);
+		return ret;
+	}
 	if (type != MAPISTORE_MESSAGE_TABLE) {
 		return MAPISTORE_SUCCESS;
 	}
@@ -891,10 +943,59 @@ static enum mapistore_error open_table(void *object, TALLOC_CTX *mem_ctx, enum m
 		}
 		for (i = 0; i < f->ctx->nitems; i++) t->mids[i] = f->ctx->items[i].mid;
 		t->row_count = f->ctx->nitems;
+	} else if (type == MAPISTORE_FOLDER_TABLE) {
+		ret = child_books(t, f, &t->folders, &t->row_count);
+		if (ret != MAPISTORE_SUCCESS) {
+			talloc_free(t);
+			return ret;
+		}
 	}
 	*table = t;
 	*row_count = t->row_count;
 	return MAPISTORE_SUCCESS;
+}
+
+/* Books of the user the indexing knows that are gone (deleted in webmail or in Outlook). */
+static enum mapistore_error deleted_books(struct dav_folder *f, struct UI8Array_r *ids, uint64_t *cnp)
+{
+	struct indexing_context	*ictx = f->ctx->ictx;
+	struct dav_folder	**children = NULL;
+	TALLOC_CTX		*tmp = talloc_new(NULL);
+	uint64_t		*fmids, *cn;
+	uint32_t		n = 0, nchildren = 0, i, j;
+	size_t			len = strlen(DAV_CONTACTS_URI);
+	char			**uris, *state;
+	enum mapistore_error	ret;
+
+	*cnp = 0;
+	if (!tmp) return MAPISTORE_ERR_NO_MEMORY;
+	ret = child_books(tmp, f, &children, &nchildren);
+	if (ret == MAPISTORE_SUCCESS && is_personal(f->ctx) && ictx->list_folders &&
+	    ictx->list_folders(ictx, f->ctx->username, tmp, &n, &fmids, &uris) != MAPISTORE_SUCCESS) {
+		n = 0;
+	}
+	state = talloc_strdup(tmp, "deleted books");
+	ids->lpui8 = talloc_array(ids, uint64_t, n + 1);
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < n; i++) {
+		const char *u = uris[i];
+
+		if (strncmp(u, DAV_CONTACTS_URI, len) != 0 || strchr(u + len, '/') != u + strlen(u) - 1 || !strcmp(u, f->ctx->uri)) continue;
+		for (j = 0; j < nchildren && strcmp(children[j]->ctx->uri, u) != 0; j++);
+		if (j < nchildren) continue;
+		if (!ids->lpui8 || !state) {
+			ret = MAPISTORE_ERR_NO_MEMORY;
+			break;
+		}
+		ids->lpui8[ids->cValues++] = fmids[i];
+		state = talloc_asprintf_append_buffer(state, " %"PRIx64, fmids[i]);
+	}
+	/* the change that carries them: renewed when the set changes */
+	cn = ret == MAPISTORE_SUCCESS && state ? dav_change_value(tmp, f->ctx, talloc_asprintf(tmp, "%s#deleted-books", f->ctx->uri),
+								     state, PidTagChangeNumber) : NULL;
+	if (ret == MAPISTORE_SUCCESS && !cn) ret = MAPISTORE_ERR_NO_MEMORY;
+	if (cn) *cnp = *cn;
+	talloc_free(tmp);
+	return ret;
 }
 
 static enum mapistore_error get_deleted_fmids(void *folder, TALLOC_CTX *mem_ctx, enum mapistore_table_type type,
@@ -915,6 +1016,9 @@ static enum mapistore_error get_deleted_fmids(void *folder, TALLOC_CTX *mem_ctx,
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
 	*idsp = ids;
+	if (type == MAPISTORE_FOLDER_TABLE) {
+		return deleted_books(f, ids, cnp);
+	}
 	if (type != MAPISTORE_MESSAGE_TABLE) {
 		return MAPISTORE_SUCCESS;
 	}
@@ -970,7 +1074,8 @@ static char *book_displayname(struct dav_context *ctx)
 /* The folder's state for ICS: the sync token, or every ETag when the server keeps no token. */
 static char *folder_state(TALLOC_CTX *mem_ctx, struct dav_context *ctx)
 {
-	char	*s = talloc_asprintf(mem_ctx, "%zu %s", ctx->nitems, ctx->token ? ctx->token : "");
+	char	*s = talloc_asprintf(mem_ctx, "%zu %s %s", ctx->nitems, ctx->token ? ctx->token : "",
+				     book_displayname(ctx) ? ctx->displayname : "");
 	size_t	i;
 
 	for (i = 0; s && !ctx->token && i < ctx->nitems; i++) {
@@ -1011,7 +1116,17 @@ static enum mapistore_error folder_properties(struct dav_folder *f, TALLOC_CTX *
 		case PidTagContentUnreadCount:
 			set(d, dav_long(mem_ctx, 0));
 			break;
-		case PidTagSubfolders:
+		case PidTagSubfolders: {
+			struct dav_folder **children;
+			uint32_t n = 0;
+
+			if (child_books(NULL, f, &children, &n) == MAPISTORE_SUCCESS) set(d, dav_bool(mem_ctx, n > 0));
+			talloc_free(children);
+			break;
+		}
+		case PidTagParentFolderId:
+			if (f->parent_fid) set(d, dav_i8(mem_ctx, f->parent_fid));
+			break;
 		case PidTagAttributeHidden:
 			set(d, dav_bool(mem_ctx, false));
 			break;
@@ -1056,7 +1171,7 @@ static enum mapistore_error get_properties(void *object, TALLOC_CTX *mem_ctx, ui
 
 static const enum MAPITAGS folder_candidates[] = {
 	PidTagDisplayName, PidTagContainerClass, PidTagContentCount, PidTagContentUnreadCount, PidTagSubfolders,
-	PidTagFolderType, PidTagFolderId, PidTagAttributeHidden, PidTagChangeNumber, PidTagChangeKey,
+	PidTagFolderType, PidTagFolderId, PidTagParentFolderId, PidTagAttributeHidden, PidTagChangeNumber, PidTagChangeKey,
 	PidTagPredecessorChangeList, PidTagLastModificationTime,
 };
 
@@ -1199,6 +1314,9 @@ static enum mapistore_error table_get_row(void *object, TALLOC_CTX *mem_ctx, enu
 	}
 	if (t->table_type == MAPISTORE_ATTACHMENT_TABLE) {
 		return dav_attachment_properties(t->message, mem_ctx, t->column_count, t->columns, *data);
+	}
+	if (t->table_type == MAPISTORE_FOLDER_TABLE) {
+		return folder_properties(t->folders[row], mem_ctx, t->column_count, t->columns, *data);
 	}
 	/* a card removed by a later sync is gone from the table too */
 	if (t->table_type != MAPISTORE_MESSAGE_TABLE || !(it = dav_item_by_mid(t->folder->ctx, t->mids[row]))) {

@@ -12,6 +12,8 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <sys/time.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
 
@@ -23,6 +25,7 @@
 #include "dav_fpstore.h"
 
 #define FP_TABLE "dav_fingerprints"
+#define FP_VERSIONS_TABLE "dav_fingerprint_versions"
 #define FP_BYTES (DAV_F_COUNT * 8)
 
 struct fp_row {
@@ -31,9 +34,17 @@ struct fp_row {
 	uint64_t	fp[DAV_F_COUNT];
 };
 
+struct fp_version {
+	struct fp_version	*prev, *next;	/* newest first */
+	char			*user, *href, *etag;
+	struct Binary_r		*ck;
+	uint64_t		fp[DAV_F_COUNT];
+};
+
 struct dav_fpstore {
-	MYSQL		*conn;		/* NULL: rows in memory */
-	struct fp_row	*rows;
+	MYSQL			*conn;		/* NULL: rows in memory */
+	struct fp_row		*rows;
+	struct fp_version	*versions;
 };
 
 uint64_t dav_fp(const uint8_t *key, size_t key_len, enum dav_field f, const char *value)
@@ -59,6 +70,10 @@ static const char *create_table_sql =
 	"CREATE TABLE IF NOT EXISTS " FP_TABLE " (user VARCHAR(320), href VARCHAR(1024), etag VARCHAR(255), fp BLOB, "
 	"PRIMARY KEY(user, href(255))) CHARSET utf8mb4 COLLATE utf8mb4_bin";
 
+static const char *create_versions_sql =
+	"CREATE TABLE IF NOT EXISTS " FP_VERSIONS_TABLE " (user VARCHAR(320), href VARCHAR(1024), ck VARBINARY(64), seq BIGINT, "
+	"etag VARCHAR(255), fp BLOB, PRIMARY KEY(user, href(255), ck)) CHARSET utf8mb4 COLLATE utf8mb4_bin";
+
 struct dav_fpstore *dav_fpstore_open(TALLOC_CTX *mem_ctx, const char *indexing_url)
 {
 	struct dav_fpstore *s = talloc_zero(mem_ctx, struct dav_fpstore);
@@ -66,7 +81,8 @@ struct dav_fpstore *dav_fpstore_open(TALLOC_CTX *mem_ctx, const char *indexing_u
 	if (!s || !indexing_url || strncmp(indexing_url, "mysql://", 8) != 0) {
 		return s;
 	}
-	if (!create_connection(indexing_url, &s->conn) || execute_query(s->conn, create_table_sql) != MYSQL_SUCCESS) {
+	if (!create_connection(indexing_url, &s->conn) || execute_query(s->conn, create_table_sql) != MYSQL_SUCCESS ||
+	    execute_query(s->conn, create_versions_sql) != MYSQL_SUCCESS) {
 		/* The URL may carry a password: not logged. */
 		OC_DEBUG(0, "DAV backend: fingerprint table unavailable; fingerprints kept in memory\n");
 		s->conn = NULL;
@@ -97,6 +113,23 @@ static bool parse_hex(const char *hex, uint64_t fp[DAV_F_COUNT])
 		}
 	}
 	return true;
+}
+
+static int hexval(char c)
+{
+	return c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10 : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+
+/* Whether pcl (SizedXids, MS-OXCFXICS 2.2.2.3) lists the XID ck. */
+static bool pcl_has(const struct Binary_r *pcl, const uint8_t *ck, size_t len)
+{
+	uint32_t i = 0, n;
+
+	while (i < pcl->cb && (n = pcl->lpb[i]) && i + 1 + n <= pcl->cb) {
+		if (n == len && memcmp(pcl->lpb + i + 1, ck, len) == 0) return true;
+		i += 1 + n;
+	}
+	return false;
 }
 
 enum mapistore_error dav_fp_get(struct dav_fpstore *s, TALLOC_CTX *mem_ctx, const char *user, const char *href,
@@ -191,19 +224,31 @@ enum mapistore_error dav_fp_delete(struct dav_fpstore *s, const char *user, cons
 	struct fp_row		*r;
 	enum mapistore_error	ret;
 
+	struct fp_version	*v, *next;
+
 	if (!s || !user || !href) return MAPISTORE_ERR_INVALID_PARAMETER;
 	if (!s->conn) {
 		if ((r = row_find(s, user, href))) {
 			DLIST_REMOVE(s->rows, r);
 			talloc_free(r);
 		}
+		for (v = s->versions; v; v = next) {
+			next = v->next;
+			if (strcmp(v->user, user) || strcmp(v->href, href)) continue;
+			DLIST_REMOVE(s->versions, v);
+			talloc_free(v);
+		}
 		return MAPISTORE_SUCCESS;
 	}
 	tmp = talloc_new(NULL);
 	eu = tmp ? _sql(tmp, user) : NULL;
 	eh = tmp ? _sql(tmp, href) : NULL;
-	sql = eu && eh ? talloc_asprintf(tmp, "DELETE FROM " FP_TABLE " WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
+	sql = eu && eh ? talloc_asprintf(tmp, "DELETE FROM " FP_VERSIONS_TABLE " WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
 	ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	sql = ret == MAPISTORE_SUCCESS ? talloc_asprintf(tmp, "DELETE FROM " FP_TABLE " WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
+	if (ret == MAPISTORE_SUCCESS) {
+		ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	}
 	talloc_free(tmp);
 	return ret;
 }
@@ -240,6 +285,145 @@ static enum mapistore_error tombstone(struct dav_fpstore *s, const char *user, c
 	char			*sql = eu && eh ? talloc_asprintf(tmp, "UPDATE " FP_TABLE " SET etag = NULL WHERE user = '%s' AND href = '%s'", eu, eh) : NULL;
 	enum mapistore_error	ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
 
+	talloc_free(tmp);
+	return ret;
+}
+
+enum mapistore_error dav_fp_tombstone(struct dav_fpstore *s, const char *user, const char *href)
+{
+	struct fp_row *r;
+
+	if (!s || !user || !href) return MAPISTORE_ERR_INVALID_PARAMETER;
+	if (!s->conn) {
+		if ((r = row_find(s, user, href))) TALLOC_FREE(r->etag);
+		return MAPISTORE_SUCCESS;
+	}
+	return tombstone(s, user, href);
+}
+
+static char *hex_of(TALLOC_CTX *mem_ctx, const uint8_t *b, size_t n)
+{
+	char	*o = talloc_array(mem_ctx, char, 2 * n + 1);
+	size_t	i;
+
+	for (i = 0; o && i < n; i++) snprintf(o + 2 * i, 3, "%02X", b[i]);
+	if (o) o[2 * n] = '\0';
+	return o;
+}
+
+enum mapistore_error dav_fp_version_put(struct dav_fpstore *s, const char *user, const char *href, const struct Binary_r *ck,
+					const uint64_t fp[DAV_F_COUNT], const char *etag)
+{
+	static uint64_t		last_seq;
+	TALLOC_CTX		*tmp;
+	struct fp_version	*v, *next;
+	struct timeval		tv;
+	const char		*eu, *eh, *ee;
+	char			*sql, *k;
+	uint64_t		seq;
+	unsigned		kept = 0;
+	enum mapistore_error	ret;
+	int			i;
+
+	if (!s || !user || !href || !ck || !ck->cb || ck->cb > 64 || !etag) return MAPISTORE_ERR_INVALID_PARAMETER;
+	if (!s->conn) {
+		for (v = s->versions; v; v = next) {
+			next = v->next;
+			if (strcmp(v->user, user) || strcmp(v->href, href)) continue;
+			/* the same version again, or one beyond the kept ones (the list is newest first) */
+			if ((v->ck->cb == ck->cb && !memcmp(v->ck->lpb, ck->lpb, ck->cb)) || ++kept >= DAV_FP_VERSIONS) {
+				DLIST_REMOVE(s->versions, v);
+				talloc_free(v);
+			}
+		}
+		v = talloc_zero(s, struct fp_version);
+		if (!v || !(v->user = talloc_strdup(v, user)) || !(v->href = talloc_strdup(v, href)) ||
+		    !(v->etag = talloc_strdup(v, etag)) || !(v->ck = talloc_zero(v, struct Binary_r)) ||
+		    !(v->ck->lpb = talloc_memdup(v->ck, ck->lpb, ck->cb))) {
+			talloc_free(v);
+			return MAPISTORE_ERR_NO_MEMORY;
+		}
+		v->ck->cb = ck->cb;
+		memcpy(v->fp, fp, sizeof v->fp);
+		DLIST_ADD(s->versions, v);
+		return MAPISTORE_SUCCESS;
+	}
+	/* newest = highest seq: microseconds, strictly increasing in this process */
+	gettimeofday(&tv, NULL);
+	seq = (uint64_t) tv.tv_sec * 1000000 + tv.tv_usec;
+	seq = last_seq = seq > last_seq ? seq : last_seq + 1;
+	tmp = talloc_new(NULL);
+	eu = tmp ? _sql(tmp, user) : NULL;
+	eh = tmp ? _sql(tmp, href) : NULL;
+	ee = tmp ? _sql(tmp, etag) : NULL;
+	k = tmp ? hex_of(tmp, ck->lpb, ck->cb) : NULL;
+	sql = eu && eh && ee && k ? talloc_asprintf(tmp, "REPLACE INTO " FP_VERSIONS_TABLE " (user, href, ck, seq, etag, fp) VALUES "
+						     "('%s', '%s', 0x%s, %llu, '%s', 0x", eu, eh, k, (unsigned long long) seq, ee) : NULL;
+	for (i = 0; sql && i < DAV_F_COUNT; i++) sql = talloc_asprintf_append_buffer(sql, "%016llX", (unsigned long long) fp[i]);
+	sql = sql ? talloc_strdup_append_buffer(sql, ")") : NULL;
+	ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	if (ret == MAPISTORE_SUCCESS) {
+		sql = talloc_asprintf(tmp, "DELETE FROM " FP_VERSIONS_TABLE " WHERE user = '%s' AND href = '%s' AND seq < (SELECT seq FROM "
+				      "(SELECT seq FROM " FP_VERSIONS_TABLE " WHERE user = '%s' AND href = '%s' ORDER BY seq DESC LIMIT 1 OFFSET %d) AS k)",
+				      eu, eh, eu, eh, DAV_FP_VERSIONS - 1);
+		ret = !sql ? MAPISTORE_ERR_NO_MEMORY : execute_query(s->conn, sql) == MYSQL_SUCCESS ? MAPISTORE_SUCCESS : MAPISTORE_ERR_DATABASE_OPS;
+	}
+	talloc_free(tmp);
+	return ret;
+}
+
+enum mapistore_error dav_fp_version_get(struct dav_fpstore *s, TALLOC_CTX *mem_ctx, const char *user, const char *href,
+					const struct Binary_r *pcl, uint64_t fp[DAV_F_COUNT], char **etag)
+{
+	TALLOC_CTX		*tmp;
+	struct fp_version	*v;
+	const char		*eu, *eh;
+	char			*sql;
+	MYSQL_RES		*res = NULL;
+	MYSQL_ROW		row;
+	uint8_t			ck[64];
+	size_t			n, i;
+	enum mapistore_error	ret = MAPISTORE_ERR_NOT_FOUND;
+
+	if (!s || !user || !href || !pcl || !etag) return MAPISTORE_ERR_INVALID_PARAMETER;
+	*etag = NULL;
+	if (!s->conn) {
+		for (v = s->versions; v; v = v->next) {
+			if (strcmp(v->user, user) || strcmp(v->href, href) || !pcl_has(pcl, v->ck->lpb, v->ck->cb)) continue;
+			memcpy(fp, v->fp, sizeof v->fp);
+			*etag = talloc_strdup(mem_ctx, v->etag);
+			return *etag ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+		}
+		return MAPISTORE_ERR_NOT_FOUND;
+	}
+	tmp = talloc_new(NULL);
+	eu = tmp ? _sql(tmp, user) : NULL;
+	eh = tmp ? _sql(tmp, href) : NULL;
+	sql = eu && eh ? talloc_asprintf(tmp, "SELECT HEX(ck), etag, HEX(fp) FROM " FP_VERSIONS_TABLE " WHERE user = '%s' AND href = '%s' "
+					 "ORDER BY seq DESC", eu, eh) : NULL;
+	if (!sql) {
+		talloc_free(tmp);
+		return MAPISTORE_ERR_NO_MEMORY;
+	}
+	switch (select_without_fetch(s->conn, sql, &res)) {
+	case MYSQL_SUCCESS:
+		while (ret == MAPISTORE_ERR_NOT_FOUND && (row = mysql_fetch_row(res))) {
+			n = row[0] ? strlen(row[0]) / 2 : 0;
+			if (!n || n > sizeof ck || !row[1]) continue;
+			for (i = 0; i < n && hexval(row[0][2 * i]) >= 0 && hexval(row[0][2 * i + 1]) >= 0; i++) {
+				ck[i] = hexval(row[0][2 * i]) << 4 | hexval(row[0][2 * i + 1]);
+			}
+			if (i < n || !pcl_has(pcl, ck, n) || !parse_hex(row[2], fp)) continue;
+			*etag = talloc_strdup(mem_ctx, row[1]);
+			ret = *etag ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+		}
+		mysql_free_result(res);
+		break;
+	case MYSQL_NOT_FOUND:
+		break;
+	default:
+		ret = MAPISTORE_ERR_DATABASE_OPS;
+	}
 	talloc_free(tmp);
 	return ret;
 }

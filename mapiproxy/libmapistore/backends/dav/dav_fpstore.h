@@ -33,6 +33,17 @@ enum mapistore_error dav_fp_get(struct dav_fpstore *, TALLOC_CTX *, const char *
 enum mapistore_error dav_fp_put(struct dav_fpstore *, const char *user, const char *href,
 				const uint64_t fp[DAV_F_COUNT], const char *etag);
 enum mapistore_error dav_fp_delete(struct dav_fpstore *, const char *user, const char *href);
+/* The item is gone: its row stays as a tombstone (see dav_fp_prune) so every client of the user learns it. */
+enum mapistore_error dav_fp_tombstone(struct dav_fpstore *, const char *user, const char *href);
+
+/* Versions a client may hold, by the change key (XID) the item showed with them; the newest DAV_FP_VERSIONS
+   of each item are kept. The base of a client's upload is the newest one its PredecessorChangeList lists. */
+#define DAV_FP_VERSIONS 10
+enum mapistore_error dav_fp_version_put(struct dav_fpstore *, const char *user, const char *href, const struct Binary_r *ck,
+					const uint64_t fp[DAV_F_COUNT], const char *etag);
+/* NOT_FOUND when pcl lists none of the kept versions. */
+enum mapistore_error dav_fp_version_get(struct dav_fpstore *, TALLOC_CTX *, const char *user, const char *href,
+					const struct Binary_r *pcl, uint64_t fp[DAV_F_COUNT], char **etag);
 /* The book's items with a row that are not in live: *gone (in mem_ctx) lists their hrefs, items a client
    of the user was given that no longer exist. Their rows stay as tombstones (reported on every full
    listing, so each client learns the deletion) until the href is listed again. */

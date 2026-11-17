@@ -56,6 +56,26 @@ int main(void)
     CHECK(tombstone(&s, "u'1", "/b/y'") == MAPISTORE_SUCCESS);
     CHECK(!strcmp(last_query, "UPDATE dav_fingerprints SET etag = NULL WHERE user = 'u\\'1' AND href = '/b/y\\''"));
     CHECK(parse_hex(hex, got) == false); /* trailing ")" */
+    CHECK(dav_fp_tombstone(&s, "u", "/b/z") == MAPISTORE_SUCCESS);
+    CHECK(!strcmp(last_query, "UPDATE dav_fingerprints SET etag = NULL WHERE user = 'u' AND href = '/b/z'"));
+    /* versions */
+    CHECK(strstr(create_versions_sql, "dav_fingerprint_versions (user VARCHAR(320), href VARCHAR(1024), ck VARBINARY(64), seq BIGINT, "
+                 "etag VARCHAR(255), fp BLOB, PRIMARY KEY(user, href(255), ck)) CHARSET utf8mb4 COLLATE utf8mb4_bin"));
+    {
+        uint8_t x[2] = { 0xAB, 0x01 };
+        struct Binary_r ck = { .cb = 2, .lpb = x };
+        CHECK(dav_fp_version_put(&s, "u'1", "/b/x", &ck, fp, "e") == MAPISTORE_SUCCESS);
+        CHECK(!strcmp(last_query, "DELETE FROM dav_fingerprint_versions WHERE user = 'u\\'1' AND href = '/b/x' AND seq < (SELECT seq FROM "
+                      "(SELECT seq FROM dav_fingerprint_versions WHERE user = 'u\\'1' AND href = '/b/x' ORDER BY seq DESC LIMIT 1 OFFSET 9) AS k)"));
+        allow_queries = false;
+        CHECK(dav_fp_version_put(&s, "u", "/b/x", &ck, fp, "e") == MAPISTORE_ERR_DATABASE_OPS);
+        CHECK(!strncmp(last_query, "REPLACE INTO dav_fingerprint_versions (user, href, ck, seq, etag, fp) VALUES ('u', '/b/x', 0xAB01, ", 98));
+        CHECK(dav_fp_version_get(&s, NULL, "u", "/b/x", &ck, got, &etag) == MAPISTORE_ERR_DATABASE_OPS);
+        CHECK(!strcmp(last_query, "SELECT HEX(ck), etag, HEX(fp) FROM dav_fingerprint_versions WHERE user = 'u' AND href = '/b/x' ORDER BY seq DESC"));
+        allow_queries = true;
+        CHECK(dav_fp_delete(&s, "u", "/b/x") == MAPISTORE_SUCCESS);
+        CHECK(!strcmp(last_query, "DELETE FROM dav_fingerprints WHERE user = 'u' AND href = '/b/x'"));
+    }
     puts("dav fpstore SQL smoke: ok");
     return 0;
 }

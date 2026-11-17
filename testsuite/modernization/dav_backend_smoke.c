@@ -942,12 +942,26 @@ static enum mapistore_error fi_update_fmid(struct indexing_context *c, const cha
     }
     return MAPISTORE_ERR_NOT_FOUND;
 }
+static enum mapistore_error fi_list_folders(struct indexing_context *c, const char *u, TALLOC_CTX *mem, uint32_t *n,
+                                           uint64_t **fmids, char ***uris)
+{
+    size_t i;
+    *n = 0;
+    *fmids = talloc_array(mem, uint64_t, fidx.n + 1);
+    *uris = talloc_array(mem, char *, fidx.n + 1);
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.uri[i][strlen(fidx.uri[i]) - 1] != '/') continue;
+        (*fmids)[*n] = fidx.fmid[i];
+        (*uris)[(*n)++] = fidx.uri[i];
+    }
+    return MAPISTORE_SUCCESS;
+}
 static enum mapistore_error fi_allocate(struct indexing_context *c, const char *u, uint64_t *fmid)
 {
     *fmid = fidx.next++;
     return MAPISTORE_SUCCESS;
 }
-static struct indexing_context ictx = { .add_fmid = fi_add_fmid, .update_fmid = fi_update_fmid, .get_uri = fi_get_uri, .get_fmid = fi_get_fmid,
+static struct indexing_context ictx = { .add_fmid = fi_add_fmid, .update_fmid = fi_update_fmid, .list_folders = fi_list_folders, .get_uri = fi_get_uri, .get_fmid = fi_get_fmid,
                                         .allocate_fmid = fi_allocate };
 
 /* Named properties: the mapped ID of a PSETID_Address LID is the LID itself. */
@@ -1054,14 +1068,13 @@ static int test_list_contexts_books(void)
     h = client("p");
     CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "Trabalho") == MAPISTORE_SUCCESS);
     CHECK(dav_mkcol_book(h, "/dav/u/Contacts/fam/", "Fam\xc3\xadlia") == MAPISTORE_SUCCESS);
+    /* only personal: the other books are its subfolders (test_books_are_subfolders) */
     CHECK(B.backend.list_contexts("u", &ictx, root, &l) == MAPISTORE_SUCCESS);
     for (e = l; e; e = e->next) {
         CHECK(e->role == MAPISTORE_CONTACTS_ROLE);
         if (!strcmp(e->url, "dav://contacts/personal/")) { CHECK(e->main_folder && !strcmp(e->name, "Personal")); seen |= 1; }
-        if (!strcmp(e->url, "dav://contacts/work/")) { CHECK(!e->main_folder && !strcmp(e->name, "Trabalho")); seen |= 2; }
-        if (!strcmp(e->url, "dav://contacts/fam/")) { CHECK(!e->main_folder && !strcmp(e->name, "Fam\xc3\xadlia")); seen |= 4; }
     }
-    CHECK(seen == 7 && l->next && l->next->next && !l->next->next->next);
+    CHECK(seen == 1 && !l->next);
     /* a user whose password the backend does not hold: an error, never an empty list */
     CHECK(B.backend.list_contexts("nobody", &ictx, root, &l) == MAPISTORE_ERR_CONN_REFUSED && l == NULL);
     talloc_free(h);
@@ -1370,6 +1383,39 @@ static int test_fpstore_memory(void)
     CHECK(dav_fp_get(s, root, "u", "/c/z", got, &etag) == MAPISTORE_SUCCESS);
     CHECK(dav_fp_delete(s, "u", "/b/x") == MAPISTORE_SUCCESS);
     CHECK(dav_fp_get(s, root, "u", "/b/x", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    /* tombstone: no longer read, reported gone */
+    CHECK(dav_fp_tombstone(s, "u", "/c/z") == MAPISTORE_SUCCESS);
+    CHECK(dav_fp_get(s, root, "u", "/c/z", got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(dav_fp_prune(s, "u", "/c", NULL, 0, root, &gone, &n) == MAPISTORE_SUCCESS && n == 1 && !strcmp(gone[0], "/c/z"));
+    /* versions: the newest the PCL names; only the last DAV_FP_VERSIONS kept */
+    {
+        uint8_t x[11][22], pcl[2 * 23];
+        struct Binary_r ck = { .cb = 22 }, p = { .cb = 46, .lpb = pcl };
+        int i;
+        for (i = 0; i < 11; i++) {
+            memset(x[i], 0xEE, 22);
+            x[i][21] = i;
+            ck.lpb = x[i];
+            fp[0] = 100 + i;
+            CHECK(dav_fp_version_put(s, "u", "/b/v", &ck, fp, talloc_asprintf(root, "\"%d\"", i)) == MAPISTORE_SUCCESS);
+        }
+        ck.lpb = x[5];
+        fp[0] = 105;
+        CHECK(dav_fp_version_put(s, "u", "/b/v", &ck, fp, "\"5\"") == MAPISTORE_SUCCESS);	/* again: one row */
+        pcl[0] = pcl[23] = 22;
+        memcpy(pcl + 1, x[3], 22);
+        memcpy(pcl + 24, x[5], 22);
+        CHECK(dav_fp_version_get(s, root, "u", "/b/v", &p, got, &etag) == MAPISTORE_SUCCESS && got[0] == 105 && !strcmp(etag, "\"5\""));
+        memcpy(pcl + 24, x[0], 22);	/* the oldest went: the next named one */
+        CHECK(dav_fp_version_get(s, root, "u", "/b/v", &p, got, &etag) == MAPISTORE_SUCCESS && got[0] == 103);
+        p.cb = 23;
+        memcpy(pcl + 1, x[0], 22);
+        CHECK(dav_fp_version_get(s, root, "u", "/b/v", &p, got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+        CHECK(dav_fp_version_get(s, root, "w", "/b/v", &p, got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+        CHECK(dav_fp_delete(s, "u", "/b/v") == MAPISTORE_SUCCESS);
+        memcpy(pcl + 1, x[10], 22);
+        CHECK(dav_fp_version_get(s, root, "u", "/b/v", &p, got, &etag) == MAPISTORE_ERR_NOT_FOUND);
+    }
     talloc_free(s);
     return 0;
 }
@@ -1684,7 +1730,8 @@ static int test_save_concurrent_edit_merged(void)
     char *body;
     /* Outlook's own replica (another GUID) */
     uint8_t ckb[22] = { 0xAA, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0, 0, 7 }, pclb[23];
-    struct Binary_r ck = { .cb = 22, .lpb = ckb }, pcl = { .cb = 23, .lpb = pclb }, *got;
+    uint8_t pcl2b[46];
+    struct Binary_r ck = { .cb = 22, .lpb = ckb }, pcl = { .cb = 23, .lpb = pclb }, pcl2 = { .cb = 46, .lpb = pcl2b }, *got;
     enum MAPITAGS kt[] = { PidTagChangeKey, PidTagPredecessorChangeList };
     struct mapistore_property_data kd[2];
     pclb[0] = 22;
@@ -1695,11 +1742,15 @@ static int test_save_concurrent_edit_merged(void)
     CHECK((f = book("personal")) != NULL);
     if (row_of(f, "ce", &mid, &cn, NULL)) return 1;
     CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);	/* Outlook downloads it */
+    CHECK(B.properties.get_properties(msg, root, 1, kt, kd) == MAPISTORE_SUCCESS && kd[0].error == 0);
+    pcl2.lpb[0] = 22;
+    memcpy(pcl2.lpb + 1, ((struct Binary_r *)kd[0].data)->lpb, 22);	/* the version Outlook was given */
+    memcpy(pcl2.lpb + 23, pclb, 23);
     CHECK(!ctl("edit?path=" WBOOK "ce.vcf&set=TEL;TYPE=CELL:999"));	/* the phone, on webmail */
     /* Outlook offline changed the e-mail; its upload still carries the old phone */
     if (upload(f, mid, props(7, PidTagDisplayName, "ce", PidTagSurname, "ce", EMAIL1, "new@x.test",
                              PidTagMobileTelephoneNumber, "111", PidTagMessageClass, "IPM.Contact",
-                             PidTagChangeKey, &ck, PidTagPredecessorChangeList, &pcl), MAPISTORE_SUCCESS)) return 1;
+                             PidTagChangeKey, &ck, PidTagPredecessorChangeList, &pcl2), MAPISTORE_SUCCESS)) return 1;
     body = stored("ce.vcf");
     CHECK(strstr(body, "new@x.test") && strstr(body, "TEL;TYPE=CELL:999\r\n") && strstr(body, "X-PHONE-ONLY:keep\r\n")
           && !strstr(body, "conflito"));
@@ -1710,9 +1761,12 @@ static int test_save_concurrent_edit_merged(void)
     CHECK(B.properties.get_properties(msg, root, 2, kt, kd) == MAPISTORE_SUCCESS && kd[0].error == 0 && kd[1].error == 0);
     got = kd[1].data;
     CHECK(((struct Binary_r *)kd[0].data)->cb == 22 && memcmp(((struct Binary_r *)kd[0].data)->lpb, ck.lpb, 16) != 0);
+    /* Outlook's XID kept, the older server XID replaced by the new one */
     CHECK(got->cb == 23 + 23 && !memcmp(got->lpb, pcl.lpb, 23) && !memcmp(got->lpb + 24, ((struct Binary_r *)kd[0].data)->lpb, 22));
     /* an upload nothing else touched: Outlook's own keys stand for it, no change bounces back */
     ck.lpb[21] = 8;
+    pcl.lpb = talloc_memdup(root, got->lpb, got->cb);	/* what Outlook now holds, plus its new change */
+    pcl.cb = got->cb;
     pcl.lpb[22] = 8;
     if (upload(f, mid, props(7, PidTagDisplayName, "ce", PidTagSurname, "ce", EMAIL1, "new@x.test",
                              PidTagMobileTelephoneNumber, "999", PidTagMessageClass, "IPM.Contact",
@@ -1736,14 +1790,18 @@ static int test_save_412_three_times_conflict(void)
     if (row_of(f, "cf", &mid, &cn, NULL)) return 1;
     CHECK(B.folder.open_message(f, root, mid, true, &msg) == MAPISTORE_SUCCESS);	/* online edit */
     CHECK(B.properties.set_properties(msg, props(1, PidTagMobileTelephoneNumber, "222")) == MAPISTORE_SUCCESS);
-    CHECK(!ctl("conflict?n=3"));
+    CHECK(!ctl("conflict?n=4"));	/* one try and three redos, all refused */
     CHECK(B.message.save(msg, root) == MAPISTORE_ERR_CONFLICT);
     CHECK(mapistore_error_to_mapi(MAPISTORE_ERR_CONFLICT) == MAPI_E_OBJECT_CHANGED);
     CHECK(strstr(stored("cf.vcf"), "TEL;TYPE=CELL:111\r\n"));
-    /* changed twice meanwhile: merged again, saved */
-    CHECK(!ctl("conflict?n=2"));
+    /* changed three times meanwhile: merged again, saved */
+    CHECK(!ctl("conflict?n=3"));
     CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);
     CHECK(strstr(stored("cf.vcf"), "TEL;TYPE=CELL:222\r\n"));
+    /* saved again on the same handle with nothing new: the server's later edit stays, no conflict line */
+    CHECK(!ctl("edit?path=" WBOOK "cf.vcf&set=TEL;TYPE=CELL:555"));
+    CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);
+    CHECK(strstr(stored("cf.vcf"), "TEL;TYPE=CELL:555\r\n") && !strstr(stored("cf.vcf"), "conflito"));
     backend_down();
     return 0;
 }
@@ -1779,7 +1837,7 @@ static int test_save_after_remote_delete_recreates(void)
 
 static int test_delete_after_remote_edit_survives(void)
 {
-    struct dav_folder *f;
+    struct dav_folder *f, *f2;
     struct UI8Array_r *ids;
     uint64_t mid, mid_g, cn, cn2, dcn, fp[DAV_F_COUNT];
     char *etag;
@@ -1799,11 +1857,22 @@ static int test_delete_after_remote_edit_survives(void)
     CHECK(cn2 != cn);
     CHECK(dav_fp_get(f->ctx->fp, root, "u", WBOOK "ds.vcf", fp, &etag) == MAPISTORE_SUCCESS);
     CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && !has_id(ids, mid));
-    /* unchanged elsewhere: deleted, fingerprints gone */
+    /* unchanged elsewhere: deleted; its row a tombstone, so a later session of the user (another PC) learns it */
     CHECK(B.folder.delete_message(f, mid_g, 0) == MAPISTORE_SUCCESS);
     CHECK(stored("dg.vcf") == NULL);
     CHECK(dav_fp_get(f->ctx->fp, root, "u", WBOOK "dg.vcf", fp, &etag) == MAPISTORE_ERR_NOT_FOUND);
     CHECK(B.folder.delete_message(f, mid_g, 0) == MAPISTORE_SUCCESS);	/* already gone */
+    CHECK((f2 = book("personal")) != NULL);
+    CHECK(B.folder.get_deleted_fmids(f2, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && has_id(ids, mid_g));
+    /* online: edited elsewhere before Outlook opened it to write, then deleted: the version it was shown goes */
+    if (put("do.vcf", VC("do"))) return 1;
+    if (row_of(f, "do", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(!ctl("edit?path=" WBOOK "do.vcf&set=NOTE:outro"));
+    if (row_of(f, "do", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(B.folder.delete_message(f, mid, 0) == MAPISTORE_SUCCESS);
+    CHECK(stored("do.vcf") == NULL);
     backend_down();
     return 0;
 }
@@ -1869,6 +1938,123 @@ static int test_delete_personal_denied(void)
     return 0;
 }
 
+/* R11: PC A and PC B both hold v1; A saves v2 (one field); B, offline, uploads an edit of another field
+   naming only v1: both edits stay, B's stale copy of A's field reverts nothing, no NOTE. */
+static int test_stale_client_never_reverts(void)
+{
+    struct dav_folder *f;
+    enum MAPITAGS kt[] = { PidTagChangeKey };
+    struct mapistore_property_data kd[1];
+    uint8_t xa[22] = { 0xA1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0, 0, 1 }, xb[22];
+    uint8_t pa[46], pb[46];
+    struct Binary_r cka = { .cb = 22, .lpb = xa }, ckb = { .cb = 22, .lpb = xb };
+    struct Binary_r pcla = { .cb = 46, .lpb = pa }, pclb = { .cb = 46, .lpb = pb };
+    uint64_t mid, cn;
+    void *msg;
+    char *body;
+
+    CHECK(!backend_up());
+    if (put("st.vcf", WCARD("st", "v1@x.test", "111"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "st", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);	/* A and B download v1 */
+    CHECK(B.properties.get_properties(msg, root, 1, kt, kd) == MAPISTORE_SUCCESS && kd[0].error == 0);
+    memcpy(xb, xa, 22);
+    xb[0] = 0xB1;
+    pa[0] = pb[0] = 22;
+    memcpy(pa + 1, ((struct Binary_r *)kd[0].data)->lpb, 22);
+    memcpy(pb + 1, pa + 1, 22);
+    pa[23] = pb[23] = 22;
+    memcpy(pa + 24, xa, 22);
+    memcpy(pb + 24, xb, 22);
+    /* A: the e-mail */
+    if (upload(f, mid, props(6, PidTagDisplayName, "st", PidTagSurname, "st", EMAIL1, "a@x.test",
+                             PidTagMobileTelephoneNumber, "111", PidTagChangeKey, &cka, PidTagPredecessorChangeList, &pcla),
+               MAPISTORE_SUCCESS)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);	/* the poll shows v2 to someone */
+    /* B: the phone, its e-mail still v1's */
+    if (upload(f, mid, props(6, PidTagDisplayName, "st", PidTagSurname, "st", EMAIL1, "v1@x.test",
+                             PidTagMobileTelephoneNumber, "222", PidTagChangeKey, &ckb, PidTagPredecessorChangeList, &pclb),
+               MAPISTORE_SUCCESS)) return 1;
+    body = stored("st.vcf");
+    CHECK(strstr(body, "a@x.test") && !strstr(body, "v1@x.test") && strstr(body, "TEL;TYPE=CELL:222\r\n")
+          && !strstr(body, "conflito"));
+    backend_down();
+    return 0;
+}
+
+/* R9: the other books are subfolders of personal, with the same IDs in every session. */
+static int test_books_are_subfolders(void)
+{
+    struct dav_folder *f, *g;
+    struct dav_http *h;
+    enum MAPITAGS cols[] = { PidTagFolderId, PidTagDisplayName, PidTagParentFolderId, PidTagContainerClass };
+    enum MAPITAGS sub[] = { PidTagSubfolders };
+    struct mapistore_property_data *d, sd[1];
+    struct UI8Array_r *ids;
+    uint64_t fid_work, dcn;
+    uint32_t n;
+    void *t, *c;
+
+    CHECK(!backend_up());
+    h = client("p");
+    CHECK(dav_mkcol_book(h, "/dav/u/Contacts/work/", "Trabalho") == MAPISTORE_SUCCESS);
+    CHECK((f = book("personal")) != NULL);
+    CHECK(B.folder.get_child_count(f, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.properties.get_properties(f, root, 1, sub, sd) == MAPISTORE_SUCCESS && sd[0].error == 0 && *(uint8_t *)sd[0].data);
+    CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.table.set_columns(t, 4, cols) == MAPISTORE_SUCCESS);
+    CHECK(B.table.get_row(t, root, MAPISTORE_PREFILTERED_QUERY, 0, &d) == MAPISTORE_SUCCESS);
+    CHECK(d[0].error == 0 && d[1].error == 0 && !strcmp(d[1].data, "Trabalho") && d[2].error == 0
+          && *(uint64_t *)d[2].data == f->fid && d[3].error == 0 && !strcmp(d[3].data, "IPF.Contact"));
+    fid_work = *(uint64_t *)d[0].data;
+    /* a contact in it, through personal */
+    CHECK(B.folder.open_folder(f, root, fid_work, &c) == MAPISTORE_SUCCESS);
+    g = c;
+    CHECK(g->fid == fid_work && g->parent_fid == f->fid);
+    CHECK(dav_put(h, root, "/dav/u/Contacts/work/w1.vcf", VC("w1"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
+    CHECK(B.folder.get_child_count(g, MAPISTORE_MESSAGE_TABLE, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.folder.get_child_count(g, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 0);
+    /* a new session: the same ID */
+    CHECK((f = book("personal")) != NULL);
+    CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);
+    CHECK(B.table.set_columns(t, 1, cols) == MAPISTORE_SUCCESS);
+    CHECK(B.table.get_row(t, root, MAPISTORE_PREFILTERED_QUERY, 0, &d) == MAPISTORE_SUCCESS && *(uint64_t *)d[0].data == fid_work);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_FOLDER_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && !has_id(ids, fid_work));
+    /* deleted in webmail: reported as a deleted folder */
+    CHECK(dav_delete_book(h, "/dav/u/Contacts/work/") == MAPISTORE_SUCCESS);
+    CHECK(B.folder.get_child_count(f, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 0);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_FOLDER_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && has_id(ids, fid_work) && dcn);
+    talloc_free(h);
+    backend_down();
+    return 0;
+}
+
+/* Online, Outlook keeps the item open and saves again: nothing it did not set again is re-applied. */
+static int test_second_save_same_handle(void)
+{
+    struct dav_folder *f;
+    uint64_t mid, cn;
+    void *msg;
+    char *body;
+
+    CHECK(!backend_up());
+    if (put("ss.vcf", WCARD("ss", "a@x.test", "111"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "ss", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, true, &msg) == MAPISTORE_SUCCESS);
+    CHECK(!ctl("edit?path=" WBOOK "ss.vcf&set=TEL;TYPE=CELL:999"));
+    CHECK(B.properties.set_properties(msg, props(1, PidTagMobileTelephoneNumber, "222")) == MAPISTORE_SUCCESS);
+    CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);	/* both changed, the server's is not older: kept */
+    body = stored("ss.vcf");
+    CHECK(strstr(body, "TEL;TYPE=CELL:999\r\n") && strstr(body, "conflito] celular: 222"));
+    CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);
+    body = stored("ss.vcf");
+    CHECK(strstr(body, "TEL;TYPE=CELL:999\r\n") && strstr(body, "conflito] celular: 222"));
+    backend_down();
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -1897,7 +2083,8 @@ int main(int argc, char **argv)
         || test_merge_keeps_unknown_lines() || test_fp_keyed() || test_save_new_contact_put()
         || test_save_concurrent_edit_merged() || test_save_412_three_times_conflict()
         || test_save_after_remote_delete_recreates() || test_delete_after_remote_edit_survives()
-        || test_folder_create_rename_delete() || test_delete_personal_denied()) { fake_stop(); return 1; }
+        || test_folder_create_rename_delete() || test_delete_personal_denied() || test_stale_client_never_reverts()
+        || test_books_are_subfolders() || test_second_save_same_handle()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;

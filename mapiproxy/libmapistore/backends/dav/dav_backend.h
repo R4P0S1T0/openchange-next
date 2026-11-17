@@ -82,6 +82,7 @@ struct dav_folder {
 	uint32_t		type;		/* DAV_OBJ_FOLDER */
 	struct dav_context	*ctx;
 	uint64_t		fid;
+	uint64_t		parent_fid;	/* another book: personal's folder ID; 0 for a context's own root */
 };
 
 struct dav_message {
@@ -92,9 +93,8 @@ struct dav_message {
 	char			*path;		/* the card's server path, as the server spells it */
 	struct dav_card		*card;		/* the version opened; NULL for a new message */
 	/* Outlook's write */
-	struct SRow		*props;
+	struct SRow		*props;		/* set since the last save */
 	struct Binary_r		*client_ck, *client_pcl;
-	uint64_t		*prior;		/* fingerprints agreed before this open (an ICS upload's base); NULL: none */
 	bool			full;		/* purged: the upload carries the whole message, absent = removed */
 	struct dav_attachment	*photo;		/* the contact picture Outlook attached */
 };
@@ -114,6 +114,7 @@ struct dav_table {
 	uint32_t			row_count;
 	uint64_t			*mids;		/* message table: rows by MID (items move on a sync) */
 	struct dav_message		*message;	/* attachment table */
+	struct dav_folder		**folders;	/* folder table: personal's other books */
 };
 
 /* dav_folder.c */

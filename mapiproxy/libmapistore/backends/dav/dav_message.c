@@ -141,18 +141,26 @@ void *dav_item_value(TALLOC_CTX *mem_ctx, struct dav_folder *f, uint64_t mid, co
 	}
 }
 
-/* Fingerprints of the version Outlook now holds: the base of the field merge on its next upload. */
-static void record_fingerprints(struct dav_context *ctx, const struct dav_item *it)
+/* Fingerprints of the version Outlook is now shown: the last one shown (what a delete names) and one of the
+   versions an upload's PredecessorChangeList can name as its base. */
+static void record_fingerprints(struct dav_context *ctx, const char *norm, const char *etag, const struct dav_card *card)
 {
 	const struct dav_settings	*settings = dav_backend_settings();
+	TALLOC_CTX			*tmp = talloc_new(NULL);
 	uint64_t			fp[DAV_F_COUNT];
+	struct Binary_r			*ck;
 	enum mapistore_error		ret;
 
-	dav_fp_card(settings->fp_key, settings->fp_key_len, it->card, fp);
-	ret = dav_fp_put(ctx->fp, ctx->username, it->norm, fp, it->etag);
+	dav_fp_card(settings->fp_key, settings->fp_key_len, card, fp);
+	ret = dav_fp_put(ctx->fp, ctx->username, norm, fp, etag);
+	ck = tmp ? dav_change_value(tmp, ctx, dav_item_uri(tmp, ctx, norm), etag, PidTagChangeKey) : NULL;
+	if (ret == MAPISTORE_SUCCESS) {
+		ret = ck ? dav_fp_version_put(ctx->fp, ctx->username, norm, ck, fp, etag) : MAPISTORE_ERR_NO_MEMORY;
+	}
 	if (ret != MAPISTORE_SUCCESS) {
 		OC_DEBUG(1, "DAV backend: fingerprints not stored (%s)\n", mapistore_errstr(ret));
 	}
+	talloc_free(tmp);
 }
 
 static enum mapistore_error open_message(void *folder, TALLOC_CTX *mem_ctx, uint64_t mid, bool read_write,
@@ -164,7 +172,6 @@ static enum mapistore_error open_message(void *folder, TALLOC_CTX *mem_ctx, uint
 	struct dav_item		*it;
 	struct dav_http		*h;
 	char			*body = NULL, *etag = NULL;
-	uint64_t		prior[DAV_F_COUNT];
 	enum mapistore_error	ret;
 
 	if (!f || f->type != DAV_OBJ_FOLDER || !messagep) {
@@ -202,14 +209,7 @@ static enum mapistore_error open_message(void *folder, TALLOC_CTX *mem_ctx, uint
 	m->folder = f;
 	m->mid = mid;
 	m->card = it->card;
-	/* An open to write (an ICS upload among them) is no read into Outlook: the version Outlook last
-	   agreed on stays the base of the merge. */
-	if (!read_write || dav_fp_get(ctx->fp, m, ctx->username, it->norm, prior, &etag) != MAPISTORE_SUCCESS) {
-		record_fingerprints(ctx, it);
-	} else if (!(m->prior = talloc_memdup(m, prior, sizeof prior))) {
-		talloc_free(m);
-		return MAPISTORE_ERR_NO_MEMORY;
-	}
+	record_fingerprints(ctx, it->norm, it->etag, it->card);
 	*messagep = m;
 	return MAPISTORE_SUCCESS;
 }
@@ -642,8 +642,8 @@ static enum mapistore_error merge_put(struct dav_message *m, struct dav_http *h,
 {
 	const struct dav_settings	*st = dav_backend_settings();
 	uint64_t			fp[DAV_F_COUNT];
-	const uint64_t			*base = m->prior;
-	char				*body, *current, today[11];
+	const uint64_t			*base = NULL;
+	char				*body, *current, *base_etag, today[11];
 	struct dav_card			*c;
 	struct tm			tm;
 	enum mapistore_error		ret;
@@ -652,8 +652,14 @@ static enum mapistore_error merge_put(struct dav_message *m, struct dav_http *h,
 	if (ret != MAPISTORE_SUCCESS) return ret;
 	if (!current || !(c = dav_card_parse(mem_ctx, body, strlen(body)))) return MAPISTORE_ERR_INVALID_DATA;
 	outlook_fields(mem_ctx, m, row, c, v, p);
-	/* online, the base is the version Outlook opened; an ICS upload's, the one it last agreed on */
-	if (!m->full && m->card) {
+	/* The base: the newest version the upload's PredecessorChangeList names (none: no base, so a stale
+	   client never silently reverts another's synced edit); online without one, the version opened. */
+	if (m->client_pcl) {
+		if (dav_fp_version_get(m->folder->ctx->fp, mem_ctx, m->folder->ctx->username, m->href, m->client_pcl, fp,
+				       &base_etag) == MAPISTORE_SUCCESS) {
+			base = fp;
+		}
+	} else if (!m->full && m->card) {
 		dav_fp_card(st->fp_key, st->fp_key_len, m->card, fp);
 		base = fp;
 	}
@@ -694,7 +700,6 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 	TALLOC_CTX			*tmp;
 	char				*v[DAV_F_COUNT], *path, *etag = NULL, *body, *norm, **stubs = NULL;
 	bool				p[DAV_F_COUNT];
-	uint64_t			fp[DAV_F_COUNT];
 	size_t				nstubs = 0;
 	time_t				now = time(NULL);
 	int				attempt;
@@ -712,8 +717,12 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 		return row ? MAPISTORE_ERR_CONN_REFUSED : MAPISTORE_ERR_NO_MEMORY;
 	}
 	path = m->path;
+	if (path && !m->props && !m->photo && !m->full) {
+		talloc_free(tmp);
+		return MAPISTORE_SUCCESS;	/* nothing written since the last save */
+	}
 	/* changed again meanwhile (412): merged again, at most 3 times */
-	for (attempt = 0; path && attempt < 3; attempt++) {
+	for (attempt = 0; path && attempt < 4; attempt++) {
 		ret = merge_put(m, h, tmp, row, v, p, &stubs, &nstubs, now, &c, &etag);
 		if (ret != MAPISTORE_ERR_CONFLICT) break;
 	}
@@ -742,10 +751,7 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 	if (ret != MAPISTORE_SUCCESS) {
 		OC_DEBUG(1, "DAV backend: index of mid 0x%"PRIx64" not updated (%s)\n", m->mid, mapistore_errstr(ret));
 	}
-	dav_fp_card(st->fp_key, st->fp_key_len, c, fp);
-	if (dav_fp_put(ctx->fp, ctx->username, norm, fp, etag) != MAPISTORE_SUCCESS) {
-		OC_DEBUG(1, "DAV backend: fingerprints of %s not stored\n", norm);
-	}
+	record_fingerprints(ctx, norm, etag, c);
 	/* the message is now the stored version: a later save merges from it */
 	path = talloc_strdup(m, path);	/* may be m->path */
 	talloc_free(m->href);
@@ -757,7 +763,8 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 	m->path = path;
 	m->card = talloc_reference(m, c) ? c : NULL;
 	m->full = false;
-	TALLOC_FREE(m->prior);
+	m->photo = NULL;
+	TALLOC_FREE(m->props);
 	TALLOC_FREE(m->client_ck);
 	TALLOC_FREE(m->client_pcl);
 	talloc_free(tmp);
