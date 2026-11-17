@@ -204,6 +204,17 @@ static int test_vlist_parse(void)
     return 0;
 }
 
+static int test_vcard_trailing_data_rejected(void)
+{
+    const char *two = "BEGIN:VCARD\r\nFN:a\r\nEND:VCARD\r\nBEGIN:VCARD\r\nFN:b\r\nEND:VCARD\r\n";
+    const char *blank = "BEGIN:VCARD\r\nFN:a\r\nEND:VCARD\r\n\r\n\n";
+    const char *junk = "BEGIN:VCARD\r\nFN:a\r\nEND:VCARD\r\nX-JUNK:1";
+    CHECK(dav_card_parse(root, two, strlen(two)) == NULL);
+    CHECK(dav_card_parse(root, junk, strlen(junk)) == NULL);
+    CHECK(dav_card_parse(root, blank, strlen(blank)) != NULL);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -216,7 +227,8 @@ int main(int argc, char **argv)
     if (mkdir(fixture, 0700) && access(fixture, W_OK)) return 2;
     if (test_inert_when_unconfigured() || test_settings_key_file() || test_backend_registers()
         || test_vcard_roundtrip_untouched() || test_vcard_folding_utf8() || test_vcard_escape()
-        || test_vcard_set_keeps_unknown() || test_vlist_parse()) return 1;
+        || test_vcard_set_keeps_unknown() || test_vlist_parse()
+        || test_vcard_trailing_data_rejected()) return 1;
     printf("dav backend smoke: ok\n");
     talloc_free(root);
     return 0;

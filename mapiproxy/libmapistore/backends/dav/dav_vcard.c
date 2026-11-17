@@ -114,7 +114,7 @@ struct dav_card *dav_card_parse(TALLOC_CTX *mem, const char *text, size_t len)
 			talloc_free(un); talloc_free(rw);
 			un = rw = NULL; unlen = rwlen = 0;
 		}
-		if (!have) break;
+		if (!have || ended) break; /* p still points at the first line after END */
 		if (fold) {
 			un = talloc_realloc(tmp, un, char, unlen + (e - p));
 			memcpy(un + unlen, p + 1, e - p - 1);
@@ -139,7 +139,9 @@ struct dav_card *dav_card_parse(TALLOC_CTX *mem, const char *text, size_t len)
 		if (p < end && *p == '\n') p++;
 	}
 	talloc_free(tmp);
-	if (!ok || !ended) {
+	/* anything but blanks after END would be dropped on render: refuse */
+	while (ok && ended && p < end && strchr(" \t\r\n", *p)) p++;
+	if (!ok || !ended || p < end) {
 		talloc_free(c);
 		return NULL;
 	}
