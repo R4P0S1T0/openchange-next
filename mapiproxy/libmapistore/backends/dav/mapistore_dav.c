@@ -49,12 +49,13 @@ static bool read_key(TALLOC_CTX *mem_ctx, const char *path, struct dav_settings 
 	n = read(fd, buf, sizeof buf);
 	close(fd);
 	if (n < DAV_MIN_KEY || n > DAV_MAX_KEY) {
+		explicit_bzero(buf, sizeof buf);
 		OC_DEBUG(0, "DAV backend: %s must hold %d to %d bytes\n", path, DAV_MIN_KEY, DAV_MAX_KEY);
 		return false;
 	}
 	s->fp_key = talloc_memdup(s, buf, n);
 	s->fp_key_len = n;
-	memset(buf, 0, sizeof buf);
+	explicit_bzero(buf, sizeof buf);
 	return s->fp_key != NULL;
 }
 
@@ -64,7 +65,7 @@ struct dav_settings *dav_settings_load(TALLOC_CTX *mem_ctx, struct loadparm_cont
 	const char		*url, *key_file;
 
 	url = lp ? lpcfg_parm_string(lp, NULL, "mapistore", "dav_url") : NULL;
-	if (!url) {
+	if (!url || !*url) {
 		return NULL;
 	}
 	key_file = lpcfg_parm_string(lp, NULL, "mapistore", "dav_fingerprint_key_file");

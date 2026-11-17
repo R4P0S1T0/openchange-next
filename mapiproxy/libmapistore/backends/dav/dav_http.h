@@ -31,6 +31,10 @@ struct dav_change {
 
 /* `password` is borrowed: it must outlive the dav_http. The scheme (http or https) comes
  * from base_url; TLS verification is always on. All hrefs below are server paths ("/..."). */
+/* The path of href, percent-decoded (an encoded '/' stays "%2F"), without trailing '/' ("/" for the root);
+ * NULL when it has "." or ".." segments or a NUL. Two hrefs name the same resource when these are equal. */
+char *dav_href_norm(TALLOC_CTX *, const char *href);
+
 struct dav_http *dav_http_new(TALLOC_CTX *, const char *base_url, const char *user, const char *password);
 
 /* PROPFIND base_url, Depth 1: the address books (read-only directories are left out). */
@@ -46,8 +50,8 @@ enum mapistore_error dav_multiget(struct dav_http *, TALLOC_CTX *, const char *b
 				  char ***bodies, char ***etags);
 enum mapistore_error dav_get(struct dav_http *, TALLOC_CTX *, const char *href, char **body, char **etag);
 
-/* *new_etag (may stay NULL when the server sends none) is owned by the dav_http and valid until its next request. */
-enum mapistore_error dav_put(struct dav_http *, const char *href, const char *body, const char *content_type,
+/* *new_etag (in mem_ctx) may stay NULL when the server sends none. */
+enum mapistore_error dav_put(struct dav_http *, TALLOC_CTX *, const char *href, const char *body, const char *content_type,
 			     const char *if_match, bool if_none_match, char **new_etag);
 enum mapistore_error dav_delete(struct dav_http *, const char *href, const char *if_match);
 enum mapistore_error dav_mkcol_book(struct dav_http *, const char *href, const char *displayname);

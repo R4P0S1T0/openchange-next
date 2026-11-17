@@ -32,7 +32,6 @@
     return 1; \
 } } while (0)
 
-enum mapistore_error mapistore_init_backend(void);
 enum mapistore_error mapistore_backend_registered(const char *);
 
 static TALLOC_CTX *root;
@@ -83,6 +82,8 @@ static int test_settings_key_file(void)
     CHECK((s = dav_settings_load(root, lp)) != NULL);
     CHECK(strcmp(s->url_template, "https://sogo.invalid/dav/%u/Contacts/") == 0);
     CHECK(s->fp_key_len == 40 && memcmp(s->fp_key, "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN", 40) == 0);
+    CHECK(lpcfg_set_cmdline(lp, "mapistore:dav_url", ""));
+    CHECK(dav_settings_load(root, lp) == NULL); /* empty = unset: inert */
     return 0;
 }
 
@@ -702,9 +703,9 @@ static int test_http_sync_incremental(void)
 
     CHECK(!fake_start());
     h = client("p");
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), "text/vcard; charset=utf-8", NULL, true, &etag_a) == MAPISTORE_SUCCESS && etag_a);
-    etag_a = talloc_strdup(root, etag_a);
-    CHECK(dav_put(h, BOOK "b.vcf", VC("b"), "text/vcard; charset=utf-8", NULL, true, &etag_b) == MAPISTORE_SUCCESS);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a"), "text/vcard; charset=utf-8", NULL, true, &etag_a) == MAPISTORE_SUCCESS && etag_a);
+    CHECK(dav_put(h, root, BOOK "b.vcf", VC("b"), "text/vcard; charset=utf-8", NULL, true, &etag_b) == MAPISTORE_SUCCESS);
+    CHECK(etag_b && strcmp(etag_a, etag_b)); /* still valid after the next request */
     CHECK(dav_sync(h, root, BOOK, NULL, &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
     CHECK(n == 2 && full && tok && ch[0].etag && ch[1].etag);
     CHECK(!ctl("edit?path=" BOOK "a.vcf"));
@@ -738,7 +739,7 @@ static int test_http_sync_invalid_token_full(void)
 
     CHECK(!fake_start());
     h = client("p");
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
     CHECK(dav_sync(h, root, BOOK, NULL, &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
     CHECK(!ctl("invalidate_token"));
     CHECK(dav_sync(h, root, BOOK, tok, &ch, &n, &tok2, &full) == MAPISTORE_SUCCESS);
@@ -757,15 +758,13 @@ static int test_http_put_if_match_412(void)
 
     CHECK(!fake_start());
     h = client("p");
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, &etag) == MAPISTORE_SUCCESS);
-    etag = talloc_strdup(root, etag);
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a2"), NULL, "\"nope\"", false, NULL) == MAPISTORE_ERR_CONFLICT);
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a2"), NULL, etag, false, &e2) == MAPISTORE_SUCCESS && e2 && strcmp(e2, etag));
-    e2 = talloc_strdup(root, e2);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a"), NULL, NULL, true, &etag) == MAPISTORE_SUCCESS);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a2"), NULL, "\"nope\"", false, NULL) == MAPISTORE_ERR_CONFLICT);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a2"), NULL, etag, false, &e2) == MAPISTORE_SUCCESS && e2 && strcmp(e2, etag));
     CHECK(dav_delete(h, BOOK "a.vcf", etag) == MAPISTORE_ERR_CONFLICT);
     CHECK(dav_delete(h, BOOK "a.vcf", e2) == MAPISTORE_SUCCESS);
     CHECK(dav_delete(h, BOOK "a.vcf", NULL) == MAPISTORE_ERR_NOT_FOUND);
-    CHECK(dav_put(h, BOOK "a.vcf", "x", "text/x\r\nX: y", NULL, false, NULL) == MAPISTORE_ERR_INVALID_PARAMETER);
+    CHECK(dav_put(h, root, BOOK "a.vcf", "x", "text/x\r\nX: y", NULL, false, NULL) == MAPISTORE_ERR_INVALID_PARAMETER);
     talloc_free(h);
     fake_stop();
     return 0;
@@ -777,8 +776,8 @@ static int test_http_put_if_none_match_exists(void)
 
     CHECK(!fake_start());
     h = client("p");
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
-    CHECK(dav_put(h, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_ERR_CONFLICT);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_SUCCESS);
+    CHECK(dav_put(h, root, BOOK "a.vcf", VC("a"), NULL, NULL, true, NULL) == MAPISTORE_ERR_CONFLICT);
     talloc_free(h);
     fake_stop();
     return 0;
@@ -796,7 +795,9 @@ static int test_http_sogo_fixtures(void)
     bool full;
 
     CHECK(!fake_start());
-    h = client("p");
+    /* the captured paths are SOGo's: the client's home must be the one they live under */
+    snprintf(q, sizeof q, "%.*s/SOGo/dav/u/Contacts/", (int)(strstr(fake_base, "/dav/") - fake_base), fake_base);
+    h = dav_http_new(root, q, "u", "p");
     snprintf(q, sizeof q, "serve?file=%s/propfind_books.xml", vcf_dir);
     CHECK(!ctl(q));
     CHECK(dav_list_books(h, root, &b, &n) == MAPISTORE_SUCCESS && n == 1);	/* the GAL directory is left out */
@@ -810,6 +811,55 @@ static int test_http_sogo_fixtures(void)
     CHECK(!ctl(q));
     CHECK(dav_multiget(h, root, "/SOGo/dav/u/Contacts/personal/", hrefs, 2, &bodies, &etags) == MAPISTORE_SUCCESS);
     CHECK(strstr(bodies[0], "UID:c1") && strstr(bodies[0], "END:VCARD") && !strcmp(etags[0], "\"gcs00000002\"") && !bodies[1]);
+    talloc_free(h);
+    fake_stop();
+    return 0;
+}
+
+static int test_href_norm(void)
+{
+    CHECK(!strcmp(dav_href_norm(root, "/a/b%40c/"), "/a/b@c"));
+    CHECK(!strcmp(dav_href_norm(root, "http://h:1/a/%62.vcf"), "/a/b.vcf"));
+    CHECK(!strcmp(dav_href_norm(root, "/a/x%2fy"), "/a/x%2Fy"));	/* an encoded slash stays one segment */
+    CHECK(!strcmp(dav_href_norm(root, "/"), "/"));
+    CHECK(dav_href_norm(root, "/a/../b") == NULL && dav_href_norm(root, "/a/%2e%2E/b") == NULL);
+    CHECK(dav_href_norm(root, "/a/./b") == NULL && dav_href_norm(root, "/a/%00") == NULL);
+    return 0;
+}
+
+/* A card named like its book is a card; hrefs outside the book, or escaping it, are ignored. */
+static int test_http_hrefs_under_book(void)
+{
+    static const char sync_xml[] = "<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\">"
+        "<D:response><D:href>/dav/u/Contacts/personal/</D:href><D:propstat><D:prop><D:getetag>\"b\"</D:getetag></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        "<D:response><D:href>/dav/u/Contacts/personal/personal</D:href><D:propstat><D:prop><D:getetag>\"1\"</D:getetag></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        "<D:response><D:href>/dav/u/Contacts/other/x.vcf</D:href><D:propstat><D:prop><D:getetag>\"2\"</D:getetag></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        "<D:response><D:href>/dav/u/Contacts/personal/../other/y.vcf</D:href><D:propstat><D:prop><D:getetag>\"3\"</D:getetag></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        "<D:response><D:href>/dav/u/Contacts/personal/a%20b.vcf</D:href><D:propstat><D:prop><D:getetag>\"4\"</D:getetag>"
+        "<C:address-data xmlns:C=\"urn:ietf:params:xml:ns:carddav\">BEGIN:VCARD</C:address-data></D:prop>"
+        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+        "<D:sync-token>9</D:sync-token></D:multistatus>";
+    char *path = talloc_asprintf(root, "%s/hrefs.xml", fixture), q[512], *tok, **bodies, **etags;
+    char *want[2] = { BOOK "a b.vcf", BOOK "other.vcf" };
+    struct dav_http *h;
+    struct dav_change *ch;
+    size_t n;
+    bool full;
+    FILE *f = fopen(path, "w");
+
+    CHECK(f && fputs(sync_xml, f) >= 0 && fclose(f) == 0);
+    CHECK(!fake_start());
+    h = client("p");
+    snprintf(q, sizeof q, "serve?file=%s", path);
+    CHECK(!ctl(q));
+    CHECK(dav_sync(h, root, BOOK, "1", &ch, &n, &tok, &full) == MAPISTORE_SUCCESS);
+    CHECK(n == 2 && !strcmp(ch[0].href, BOOK "personal") && !strcmp(ch[1].href, BOOK "a%20b.vcf"));
+    CHECK(dav_multiget(h, root, BOOK, want, 2, &bodies, &etags) == MAPISTORE_SUCCESS);
+    CHECK(bodies[0] && !strcmp(etags[0], "\"4\"") && !bodies[1]);
     talloc_free(h);
     fake_stop();
     return 0;
@@ -867,7 +917,8 @@ int main(int argc, char **argv)
         || test_vcard_trailing_data_rejected() || test_map_contact_full() || test_map_props_to_fields_roundtrip()
         || test_field_set_no_line_injection() || test_map_list_members() || test_photo_cap()
         || test_http_list_books() || test_http_sync_incremental() || test_http_sync_invalid_token_full()
-        || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_sogo_fixtures() || test_http_401_denied()
+        || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_sogo_fixtures() || test_href_norm()
+        || test_http_hrefs_under_book() || test_http_401_denied()
         || test_http_timeout_conn_refused()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);

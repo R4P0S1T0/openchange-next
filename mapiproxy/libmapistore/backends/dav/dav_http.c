@@ -128,15 +128,51 @@ static const char *href_path(const char *href)
 	return href;
 }
 
-/* The last non-empty path segment of href (a view into it) and its length. */
-static const char *last_segment(const char *href, size_t *len)
+static int hexval(char c)
 {
-	size_t n = strlen(href), z;
-	while (n > 1 && href[n - 1] == '/') n--;
-	z = n;
-	while (n > 0 && href[n - 1] != '/') n--;
-	*len = z - n;
-	return href + n;
+	return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+char *dav_href_norm(TALLOC_CTX *mem_ctx, const char *href)
+{
+	const char *p = href_path(href);
+	char *o = talloc_array(mem_ctx, char, strlen(p) + 1), *s;
+	size_t n = 0, sl;
+	int c;
+
+	if (!o) return NULL;
+	for (; *p; p++) {
+		c = *p;
+		if (c == '%' && hexval(p[1]) >= 0 && hexval(p[2]) >= 0) {
+			c = hexval(p[1]) * 16 + hexval(p[2]);
+			p += 2;
+			if (c == 0) { talloc_free(o); return NULL; }
+			if (c == '/' || c == '%') {
+				n += sprintf(o + n, "%%%02X", c);
+				continue;
+			}
+		}
+		o[n++] = c;
+	}
+	while (n > 1 && o[n - 1] == '/') n--;
+	o[n] = '\0';
+	for (s = o; *s; s += sl) {
+		while (*s == '/') s++;
+		sl = strcspn(s, "/");
+		if ((sl == 1 && s[0] == '.') || (sl == 2 && s[0] == '.' && s[1] == '.')) {
+			talloc_free(o);
+			return NULL;
+		}
+	}
+	return o;
+}
+
+/* href (normalized) is a direct member of the collection `parent` (normalized). */
+static bool is_member(const char *parent, const char *href)
+{
+	size_t pl = strcmp(parent, "/") ? strlen(parent) : 0;
+
+	return href && !strncmp(href, parent, pl) && href[pl] == '/' && href[pl + 1] && !strchr(href + pl + 1, '/');
 }
 
 static bool header_safe(const char *s)
@@ -404,8 +440,8 @@ enum mapistore_error dav_list_books(struct dav_http *h, TALLOC_CTX *mem_ctx, str
 	TALLOC_CTX *tmp = talloc_new(NULL);
 	struct pst s;
 	struct dav_book *out = NULL;
-	size_t i, k = 0, sl;
-	const char *seg;
+	size_t i, k = 0;
+	char *home, *norm;
 	enum mapistore_error err;
 
 	*books = NULL;
@@ -413,13 +449,15 @@ enum mapistore_error dav_list_books(struct dav_http *h, TALLOC_CTX *mem_ctx, str
 	err = report(h, tmp, "PROPFIND", h->base_path, depth1_hdrs, body, &s, NULL);
 	if (err) goto done;
 	out = talloc_zero_array(mem_ctx, struct dav_book, s.n ? s.n : 1);
-	if (!out) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
+	home = dav_href_norm(tmp, h->base_path);
+	if (!out || !home) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
 	for (i = 0; i < s.n; i++) {
 		struct resp *r = &s.r[i];
 		if (!r->book || r->dir || !r->href) continue;
-		seg = last_segment(href_path(r->href), &sl);
+		norm = dav_href_norm(tmp, r->href);
+		if (!is_member(home, norm)) continue;
 		out[k].href = talloc_strdup(out, href_path(r->href));
-		out[k].segment = talloc_strndup(out, seg, sl);
+		out[k].segment = talloc_strdup(out, strrchr(norm, '/') + 1);
 		out[k].displayname = r->displayname ? talloc_strdup(out, r->displayname) : NULL;
 		out[k].sync_token = r->token ? talloc_strdup(out, r->token) : NULL;
 		k++;
@@ -437,9 +475,8 @@ enum mapistore_error dav_sync(struct dav_http *h, TALLOC_CTX *mem_ctx, const cha
 	TALLOC_CTX *tmp = talloc_new(NULL);
 	struct pst s;
 	struct dav_change *out;
-	char *body;
-	size_t i, k = 0, bl, rl;
-	const char *bs, *rs;
+	char *body, *book;
+	size_t i, k = 0;
 	enum mapistore_error err;
 	bool full = !token, bad_token;
 
@@ -463,13 +500,12 @@ enum mapistore_error dav_sync(struct dav_http *h, TALLOC_CTX *mem_ctx, const cha
 	}
 	if (err) goto done;
 	out = talloc_zero_array(mem_ctx, struct dav_change, s.n ? s.n : 1);
-	if (!out) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
-	bs = last_segment(href_path(book_href), &bl);
+	book = dav_href_norm(tmp, book_href);
+	if (!out || !book) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
 	for (i = 0; i < s.n; i++) {
 		struct resp *r = &s.r[i];
-		if (!r->href) continue;
-		rs = last_segment(href_path(r->href), &rl);
-		if (rl == bl && !strncmp(rs, bs, bl)) continue;	/* the collection itself */
+		/* the collection itself, and anything outside it, is not a card of this book */
+		if (!r->href || !is_member(book, dav_href_norm(tmp, r->href))) continue;
 		if (full && r->status == 404) continue;
 		out[k].href = talloc_strdup(out, href_path(r->href));
 		out[k].etag = r->status == 404 ? NULL : talloc_strdup(out, r->etag ? r->etag : "");
@@ -489,9 +525,8 @@ enum mapistore_error dav_multiget(struct dav_http *h, TALLOC_CTX *mem_ctx, const
 {
 	TALLOC_CTX *tmp = talloc_new(NULL);
 	struct pst s;
-	char *body, *e, **bo = NULL, **et = NULL;
-	size_t i, j, wl, rl;
-	const char *ws, *rs;
+	char *body, *e, **bo = NULL, **et = NULL, *want, **got = NULL;
+	size_t i, j;
 	enum mapistore_error err;
 
 	*bodies = NULL;
@@ -508,13 +543,16 @@ enum mapistore_error dav_multiget(struct dav_http *h, TALLOC_CTX *mem_ctx, const
 	if (err) goto done;
 	bo = talloc_zero_array(mem_ctx, char *, n ? n : 1);
 	et = talloc_zero_array(mem_ctx, char *, n ? n : 1);
-	if (!bo || !et) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
+	got = talloc_zero_array(tmp, char *, s.n ? s.n : 1);
+	if (!bo || !et || !got) { err = MAPISTORE_ERR_NO_MEMORY; goto done; }
+	for (j = 0; j < s.n; j++) {
+		got[j] = s.r[j].href ? dav_href_norm(tmp, s.r[j].href) : NULL;
+	}
 	for (i = 0; i < n; i++) {
-		ws = last_segment(href_path(hrefs[i]), &wl);
+		if (!(want = dav_href_norm(tmp, hrefs[i]))) continue;
 		for (j = 0; j < s.n; j++) {
-			if (!s.r[j].href || s.r[j].status == 404 || !s.r[j].data) continue;
-			rs = last_segment(href_path(s.r[j].href), &rl);
-			if (rl != wl || strncmp(rs, ws, wl)) continue;
+			if (!got[j] || s.r[j].status == 404 || !s.r[j].data) continue;
+			if (strcmp(got[j], want)) continue;
 			bo[i] = talloc_strdup(bo, s.r[j].data);
 			et[i] = s.r[j].etag ? talloc_strdup(et, s.r[j].etag) : NULL;
 			break;
@@ -567,7 +605,7 @@ static enum mapistore_error simple(struct dav_http *h, const char *method, const
 	return err;
 }
 
-enum mapistore_error dav_put(struct dav_http *h, const char *href, const char *body, const char *content_type,
+enum mapistore_error dav_put(struct dav_http *h, TALLOC_CTX *mem_ctx, const char *href, const char *body, const char *content_type,
 			     const char *if_match, bool if_none_match, char **new_etag)
 {
 	const char *hdrs[5];
@@ -584,7 +622,7 @@ enum mapistore_error dav_put(struct dav_http *h, const char *href, const char *b
 	if (if_none_match) hdrs[k++] = "If-None-Match: *";
 	hdrs[k] = NULL;
 	err = simple(h, "PUT", href, hdrs, body ? body : "");
-	if (!err && new_etag && h->etag) *new_etag = h->etag;
+	if (!err && new_etag && h->etag && !(*new_etag = talloc_strdup(mem_ctx, h->etag))) err = MAPISTORE_ERR_NO_MEMORY;
 	talloc_free(tmp);
 	return err;
 }

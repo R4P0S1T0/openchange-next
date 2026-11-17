@@ -29,8 +29,11 @@ struct dav_settings {
 const struct dav_settings *dav_backend_settings(void);
 struct dav_settings *dav_settings_load(TALLOC_CTX *, struct loadparm_context *);
 void dav_backend_fill(struct mapistore_backend *);
+/* Entry point dlopen()ed by mapistore_backend_init. */
+enum mapistore_error mapistore_init_backend(void);
 
-/* dav_cred.c: per-user password, reference counted by sessions; the result of get is borrowed until the next forget. */
+/* dav_cred.c: per-user password, reference counted by sessions. The result of get is valid only until the
+   next dav_cred_set or dav_cred_forget of that user: fetch it for each HTTP client, never keep it. */
 enum mapistore_error dav_cred_set(const char *, const char *);
 enum mapistore_error dav_cred_forget(const char *);
 const char *dav_cred_get(const char *);
