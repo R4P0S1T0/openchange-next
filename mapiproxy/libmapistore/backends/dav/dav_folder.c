@@ -329,7 +329,10 @@ static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapis
 		return MAPISTORE_ERR_NOT_INITIALIZED;
 	}
 	if (!fpstore) {
-		fpstore = dav_fpstore_open(NULL, ictx->url);
+		/* ictx->url holds the user name, not the database URL: read the configured indexing backend. */
+		struct loadparm_context *lp = mapistore_backend_lp_ctx();
+
+		fpstore = dav_fpstore_open(NULL, lp ? lpcfg_parm_string(lp, NULL, "mapistore", "indexing_backend") : NULL);
 	}
 	ctx->fp = fpstore;
 	ctx->home = home_url(ctx, ctx->username);
