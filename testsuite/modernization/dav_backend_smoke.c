@@ -1794,6 +1794,8 @@ static int test_save_412_three_times_conflict(void)
     CHECK(!ctl("conflict?n=4"));	/* one try and three redos, all refused */
     CHECK(B.message.save(msg, root) == MAPISTORE_ERR_CONFLICT);
     CHECK(mapistore_error_to_mapi(MAPISTORE_ERR_CONFLICT) == MAPI_E_OBJECT_CHANGED);
+    /* SOGo down: a network error, so Outlook keeps the upload and retries instead of filing it under Local Failures */
+    CHECK(mapistore_error_to_mapi(MAPISTORE_ERR_CONN_REFUSED) == ecRpcFailed);
     CHECK(strstr(stored("cf.vcf"), "TEL;TYPE=CELL:111\r\n"));
     /* changed three times meanwhile: merged again, saved */
     CHECK(!ctl("conflict?n=3"));

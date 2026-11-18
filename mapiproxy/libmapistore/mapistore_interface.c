@@ -1927,7 +1927,8 @@ _PUBLIC_ enum MAPISTATUS mapistore_error_to_mapi(enum mapistore_error mapistore_
 		mapi_err = MAPI_E_NO_ACCESS;
 		break;
 	case MAPISTORE_ERR_CONN_REFUSED:
-		mapi_err = MAPI_E_CALL_FAILED;
+		/* the store behind the backend is down: Outlook retries a network error later */
+		mapi_err = ecRpcFailed;
 		break;
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		mapi_err = MAPI_E_NOT_IMPLEMENTED;

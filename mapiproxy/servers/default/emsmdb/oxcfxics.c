@@ -2420,15 +2420,15 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageChange(TALLOC_CTX *mem_ctx,
 			OC_DEBUG(3, "ImportMessageChange: mid 0x%"PRIx64" in %s folder 0x%"PRIx64" could not be created (0x%x)\n",
 				 messageID, emsmdbp_is_mapistore(message_object) ? "mapistore" : "openchangedb",
 				 folderID, created);
-			mapi_repl->error_code = MAPI_E_NOT_FOUND;
+			mapi_repl->error_code = created == MAPISTORE_ERR_CONN_REFUSED ? mapistore_error_to_mapi(created) : MAPI_E_NOT_FOUND;
 			goto end;
 		}
 		message_object->object.message->read_write = true;
 	}
 	else if (ret != MAPISTORE_SUCCESS) {
 		mapi_handles_delete(emsmdbp_ctx->handles_ctx, message_object_handle->handle);
-		if (ret == MAPISTORE_ERR_DENIED) {
-			mapi_repl->error_code = MAPI_E_NO_ACCESS;
+		if (ret == MAPISTORE_ERR_DENIED || ret == MAPISTORE_ERR_CONN_REFUSED) {
+			mapi_repl->error_code = mapistore_error_to_mapi(ret);
 		}
 		else {
 			mapi_repl->error_code = MAPI_E_INVALID_OBJECT;
