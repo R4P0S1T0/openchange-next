@@ -187,7 +187,12 @@ enum mapistore_error {
 /**
    The function is not implemented
 */
-	MAPISTORE_ERR_NOT_IMPLEMENTED
+	MAPISTORE_ERR_NOT_IMPLEMENTED,
+
+/**
+   The object changed on the remote side since it was read
+*/
+	MAPISTORE_ERR_CONFLICT
 };
 
 #endif /* ! __MAPISTORE_ERRORS_H */

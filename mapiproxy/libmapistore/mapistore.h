@@ -174,6 +174,19 @@ struct indexing_context {
 	void *cache;
 };
 
+/* What another client changed since the session's last poll (backend.poll_changes). */
+enum mapistore_change_kind {
+	MAPISTORE_CHANGE_CONTENTS,		/* uri: the folder whose messages changed */
+	MAPISTORE_CHANGE_FOLDER_ADDED,		/* uri: the folder that gained a subfolder */
+	MAPISTORE_CHANGE_FOLDER_DELETED,	/* uri: the folder that lost a subfolder */
+	MAPISTORE_CHANGE_FOLDER_RENAMED		/* uri: the folder whose subfolder was renamed */
+};
+
+struct mapistore_change {
+	char				*uri;
+	enum mapistore_change_kind	kind;
+};
+
 struct mapistore_backend {
 	/** backend operations */
 	struct {
@@ -185,6 +198,11 @@ struct mapistore_backend {
 		enum mapistore_error	(*list_contexts)(const char *, struct indexing_context *, TALLOC_CTX *, struct mapistore_contexts_list **);
 		enum mapistore_error	(*create_context)(TALLOC_CTX *, struct mapistore_connection_info *, struct indexing_context *, const char *, void **);
 		enum mapistore_error	(*create_root_folder)(const char *, enum mapistore_context_role, uint64_t, const char *, TALLOC_CTX *, char **);
+		/* The user's verified password, held in memory only; forget undoes one set. */
+		enum mapistore_error	(*set_credentials)(const char *, const char *);
+		enum mapistore_error	(*forget_credentials)(const char *);
+		/* Per session (conn_info): the changes since that session's previous call; the first call only learns the state. */
+		enum mapistore_error	(*poll_changes)(struct mapistore_connection_info *, TALLOC_CTX *, struct mapistore_change **, size_t *);
 	} backend;
 
 	/** context operations */
@@ -337,6 +355,9 @@ enum mapistore_error mapistore_search_context_by_uri(struct mapistore_context *,
 const char *mapistore_errstr(enum mapistore_error);
 
 enum mapistore_error mapistore_list_contexts_for_user(struct mapistore_context *, const char *, TALLOC_CTX *, struct mapistore_contexts_list **);
+enum mapistore_error mapistore_set_credentials(struct mapistore_context *, const char *, const char *);
+enum mapistore_error mapistore_forget_credentials(struct mapistore_context *, const char *);
+enum mapistore_error mapistore_poll_changes(struct mapistore_context *, const char *, TALLOC_CTX *, struct mapistore_change **, size_t *);
 enum mapistore_error mapistore_create_root_folder(const char *, enum mapistore_context_role, uint64_t, const char *, TALLOC_CTX *, char **);
 
 enum mapistore_error mapistore_folder_open_folder(struct mapistore_context *, uint32_t, void *, TALLOC_CTX *, uint64_t, void **);
@@ -455,6 +476,14 @@ enum mapistore_error mapistore_notification_deliver_get(TALLOC_CTX *, struct map
 enum mapistore_error mapistore_notification_deliver_delete(struct mapistore_context *, struct GUID);
 
 enum mapistore_error mapistore_notification_payload_newmail(TALLOC_CTX *, char *, char *, char *, char, uint8_t **, size_t *);
+
+/* mapistore_changes.c: per-item change numbers; source allocates a fresh cn */
+typedef enum mapistore_error (*mapistore_cn_source)(void *, uint64_t *);
+struct Binary_r *mapistore_binary_dup(TALLOC_CTX *, const struct Binary_r *);
+enum mapistore_error mapistore_change_number(const char *, const char *, const char *, mapistore_cn_source, void *, uint64_t *, time_t *);
+enum mapistore_error mapistore_change_record_client(const char *, const char *, mapistore_cn_source, void *, const struct Binary_r *, const struct Binary_r *);
+enum mapistore_error mapistore_change_client_keys(const char *, const char *, uint64_t, const struct Binary_r **, const struct Binary_r **);
+void *mapistore_change_value(TALLOC_CTX *, const char *, const char *, const struct GUID *, uint64_t, time_t, enum MAPITAGS);
 
 __END_DECLS
 

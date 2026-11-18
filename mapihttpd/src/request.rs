@@ -24,6 +24,8 @@ pub struct Server<A: Authenticator, B: Backend> {
     pub notification_wait: Duration,
     /// The IMAP watchers that wake NotificationWait (M5).
     pub watch: crate::imapwatch::WatchManager,
+    /// The per-session polls of other clients' changes that wake NotificationWait (M6).
+    pub poll: crate::davpoll::PollManager,
 }
 
 /// Who `check_headers` let through.
@@ -32,7 +34,12 @@ pub enum Admitted<'s> {
     Session(SessionGuard<'s>),
     /// Credentials the authenticator accepted: its canonical user, and the hash of the
     /// credentials as sent, which later requests on a new session must match.
-    User { user: String, cred_hash: [u8; 32] },
+    /// The password is the one the authenticator verified, for EMSMDB Connect only.
+    User {
+        user: String,
+        password: Password,
+        cred_hash: [u8; 32],
+    },
 }
 
 pub struct MapiRequest<'a> {
@@ -141,6 +148,7 @@ pub async fn check_headers<'s, A: Authenticator, B: Backend>(
     Ok(Admitted::User {
         user: canonical,
         cred_hash: sessions.credential_hash(&user, &password),
+        password,
     })
 }
 
@@ -180,9 +188,14 @@ pub async fn handle_body<A: Authenticator, B: Backend>(
     };
     let mut rep = match (req.request_type, admitted) {
         (Some("PING"), _) => reply(req, 200, 0),
-        (Some("Connect"), Admitted::User { user, cred_hash }) => {
-            return emsmdb::connect(srv, req, user, cred_hash).await
-        }
+        (
+            Some("Connect"),
+            Admitted::User {
+                user,
+                password,
+                cred_hash,
+            },
+        ) => return emsmdb::connect(srv, req, user, password, cred_hash).await,
         (Some("Bind"), Admitted::User { cred_hash, .. }) => {
             return nspi::bind(srv, req, cred_hash).await
         }
@@ -303,6 +316,7 @@ pub(crate) mod tests {
             backend: FakeBackend::default(),
             notification_wait: Duration::from_secs(300),
             watch: crate::imapwatch::WatchManager::disabled(),
+            poll: crate::davpoll::PollManager::disabled(),
         }
     }
 

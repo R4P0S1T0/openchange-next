@@ -974,17 +974,6 @@ _PUBLIC_ uint64_t *imap_i8(TALLOC_CTX *mem_ctx, uint64_t v)
 	return p;
 }
 
-/* A change kept per object URI for the life of the process (bounded by the objects shown). */
-struct change {
-	struct change	*prev, *next;
-	char		*key;		/* user, then URI */
-	char		*state;		/* NULL: Outlook's own change, state not seen yet */
-	uint64_t	cn;
-	time_t		when;
-	struct Binary_r	*ck, *pcl;	/* Outlook's change key and PCL for its own change */
-};
-static struct change *changes;
-
 /* Change numbers share the indexing ID counter with the ranges RopGetLocalReplicaIds reserves for
    Outlook's own uploads; openchangedb's change counter runs far below that, and once Outlook had
    uploaded a change every later server change looked already seen. */
@@ -1005,168 +994,28 @@ _PUBLIC_ void imap_backend_set_cn_source(imap_cn_source source)
 	cn_source = source ? source : id_counter_cn;
 }
 
+static enum mapistore_error cn_source_adapter(void *ctx, uint64_t *cn)
+{
+	return cn_source(ctx, cn);
+}
+
 _PUBLIC_ enum mapistore_error imap_change_number(struct imap_context *ctx, const char *uri, const char *state,
 						 uint64_t *cn, time_t *when)
 {
-	struct change		*c;
-	char			*key = talloc_asprintf(NULL, "%s\n%s", ctx->username, uri);
-	enum mapistore_error	ret;
-
-	if (!key || !state) {
-		talloc_free(key);
-		return MAPISTORE_ERR_NO_MEMORY;
-	}
-	for (c = changes; c && strcmp(c->key, key) != 0; c = c->next);
-	/* Outlook's own change: the first state seen after it is that change, not a new one. */
-	if (c && !c->state) {
-		c->state = talloc_strdup(c, state);
-	}
-	if (c && c->state && strcmp(c->state, state) == 0) {
-		talloc_free(key);
-		*cn = c->cn;
-		*when = c->when;
-		return MAPISTORE_SUCCESS;
-	}
-	ret = cn_source(ctx, cn);
-	if (ret != MAPISTORE_SUCCESS) {
-		talloc_free(key);
-		return ret;
-	}
-	if (!c) {
-		c = talloc_zero(NULL, struct change);
-		if (!c) {
-			talloc_free(key);
-			return MAPISTORE_ERR_NO_MEMORY;
-		}
-		c->key = talloc_steal(c, key);
-		DLIST_ADD(changes, c);
-	} else {
-		talloc_free(key);
-	}
-	talloc_free(c->state);
-	c->state = talloc_strdup(c, state);
-	c->cn = *cn;
-	c->when = time(NULL);
-	TALLOC_FREE(c->ck);	/* changed on the server: the server's own key from now on */
-	TALLOC_FREE(c->pcl);
-	*when = c->when;
-	return c->state ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
+	return mapistore_change_number(ctx->username, uri, state, cn_source_adapter, ctx, cn, when);
 }
 
-static struct Binary_r *binary_dup(TALLOC_CTX *mem_ctx, const struct Binary_r *b)
-{
-	struct Binary_r *d = b ? talloc_zero(mem_ctx, struct Binary_r) : NULL;
-
-	if (d && b->cb && !(d->lpb = talloc_memdup(d, b->lpb, b->cb))) {
-		talloc_free(d);
-		return NULL;
-	}
-	if (d) {
-		d->cb = b->cb;
-	}
-	return d;
-}
-
-/* Outlook uploaded this object's current state with its own change key: report that key, so its
-   next sync does not see a server change and open a conflict. */
+/* Outlook uploaded this object's current state with its own change key. */
 _PUBLIC_ enum mapistore_error imap_change_set_client(struct imap_context *ctx, const char *uri,
 						     const struct Binary_r *ck, const struct Binary_r *pcl)
 {
-	struct change		*c;
-	char			*key;
-	uint64_t		cn;
-	enum mapistore_error	ret;
-
-	if (!uri || !ck || !pcl) {
-		return MAPISTORE_ERR_INVALID_PARAMETER;
-	}
-	ret = cn_source(ctx, &cn);
-	key = ret == MAPISTORE_SUCCESS ? talloc_asprintf(NULL, "%s\n%s", ctx->username, uri) : NULL;
-	if (!key) {
-		return ret != MAPISTORE_SUCCESS ? ret : MAPISTORE_ERR_NO_MEMORY;
-	}
-	for (c = changes; c && strcmp(c->key, key) != 0; c = c->next);
-	if (!c) {
-		c = talloc_zero(NULL, struct change);
-		if (!c) {
-			talloc_free(key);
-			return MAPISTORE_ERR_NO_MEMORY;
-		}
-		c->key = talloc_steal(c, key);
-		DLIST_ADD(changes, c);
-	} else {
-		talloc_free(key);
-	}
-	TALLOC_FREE(c->state);
-	TALLOC_FREE(c->ck);
-	TALLOC_FREE(c->pcl);
-	c->cn = cn;
-	c->when = time(NULL);
-	c->ck = binary_dup(c, ck);
-	c->pcl = binary_dup(c, pcl);
-	return c->ck && c->pcl ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NO_MEMORY;
-}
-
-static const struct change *client_change(uint64_t cn)
-{
-	const struct change *c;
-
-	for (c = changes; c && !(c->cn == cn && c->ck); c = c->next);
-	return c;
-}
-
-/* XID of a change: the replica GUID (NDR) and the 6 low bytes of cn >> 16, as oxcfxics_make_gid. */
-static struct Binary_r *change_key(TALLOC_CTX *mem_ctx, const struct GUID *g, uint64_t cn, bool sized)
-{
-	struct Binary_r	*b = talloc_zero(mem_ctx, struct Binary_r);
-	uint8_t		*p;
-	uint64_t	id = (cn >> 16) & 0x0000FFFFFFFFFFFFULL;
-	int		i;
-
-	if (!b || !(b->lpb = talloc_array(b, uint8_t, 23))) {
-		return NULL;
-	}
-	p = b->lpb;
-	if (sized) {
-		*p++ = 22; /* PredecessorChangeList: one SizedXid */
-	}
-	for (i = 0; i < 4; i++) *p++ = (g->time_low >> (8 * i)) & 0xFF;
-	for (i = 0; i < 2; i++) *p++ = (g->time_mid >> (8 * i)) & 0xFF;
-	for (i = 0; i < 2; i++) *p++ = (g->time_hi_and_version >> (8 * i)) & 0xFF;
-	memcpy(p, g->clock_seq, 2);
-	p += 2;
-	memcpy(p, g->node, 6);
-	p += 6;
-	for (i = 0; i < 6; i++, id >>= 8) *p++ = id & 0xFF;
-	b->cb = sized ? 23 : 22;
-	return b;
-}
-
-static struct FILETIME *change_time(TALLOC_CTX *mem_ctx, time_t t)
-{
-	struct FILETIME	*ft = talloc(mem_ctx, struct FILETIME);
-	uint64_t	nt = ((uint64_t) t + 11644473600ULL) * 10000000ULL;
-
-	if (ft) {
-		ft->dwLowDateTime = (uint32_t) nt;
-		ft->dwHighDateTime = (uint32_t) (nt >> 32);
-	}
-	return ft;
+	return mapistore_change_record_client(ctx->username, uri, cn_source_adapter, ctx, ck, pcl);
 }
 
 _PUBLIC_ void *imap_change_value(TALLOC_CTX *mem_ctx, struct imap_context *ctx, uint64_t cn, time_t when,
 				 enum MAPITAGS tag)
 {
-	const struct change *own = (tag == PidTagChangeKey || tag == PidTagPredecessorChangeList) ? client_change(cn) : NULL;
-
-	switch (tag) {
-	case PidTagChangeNumber:		return imap_i8(mem_ctx, cn);
-	case PidTagChangeKey:			return own ? binary_dup(mem_ctx, own->ck) : change_key(mem_ctx, &ctx->replica_guid, cn, false);
-	case PidTagPredecessorChangeList:	return own ? binary_dup(mem_ctx, own->pcl) : change_key(mem_ctx, &ctx->replica_guid, cn, true);
-	case PidTagLastModificationTime:
-	case PidTagLocalCommitTimeMax:		return change_time(mem_ctx, when);
-	default:				return NULL;
-	}
+	return mapistore_change_value(mem_ctx, ctx->username, NULL, &ctx->replica_guid, cn, when, tag);
 }
 
 /* Folder properties (plan Decision 6); STATUS is asked only when a count is wanted. */

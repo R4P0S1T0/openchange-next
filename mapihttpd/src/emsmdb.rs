@@ -1,7 +1,7 @@
 //! Mailbox endpoint request bodies (MS-OXCMAPIHTTP 2.2.4): codecs and handlers.
 //! Little-endian, no alignment; every read is bounds-checked and fails with code 12.
 
-use crate::auth::Authenticator;
+use crate::auth::{Authenticator, Password};
 use crate::backend::{Backend, ConnectParams, EC_RPC_FAILED};
 use crate::request::{reply, MapiReply, MapiRequest, Server};
 use crate::session::SessionGuard;
@@ -98,11 +98,16 @@ fn walk_aux(buf: &[u8]) -> Result<Vec<u16>, u32> {
 }
 
 /// Connect request body (2.2.4.1.1) and its auxiliary block sizes.
-fn parse_connect(body: &[u8], username: String) -> Result<(ConnectParams, Vec<u16>), u32> {
+fn parse_connect(
+    body: &[u8],
+    username: String,
+    password: Password,
+) -> Result<(ConnectParams, Vec<u16>), u32> {
     let mut r = Reader(body);
     let user_dn = r.ascii_z()?;
     let params = ConnectParams {
         username,
+        password,
         user_dn,
         flags: r.u32()?,
         code_page: r.u32()?,
@@ -137,9 +142,10 @@ pub async fn connect<A: Authenticator, B: Backend>(
     srv: &Server<A, B>,
     req: &MapiRequest<'_>,
     user: String,
+    password: Password,
     cred_hash: [u8; 32],
 ) -> MapiReply {
-    let params = match parse_connect(req.body, user.clone()) {
+    let params = match parse_connect(req.body, user.clone(), password) {
         Ok((params, _aux)) => params,
         Err(code) => return reply(req, 200, code),
     };
@@ -161,6 +167,14 @@ pub async fn connect<A: Authenticator, B: Backend>(
     let mut rep = with_body(req, body);
     rep.set_cookie = Some(srv.sessions.create(&user, cred_hash, c.id, Instant::now()));
     srv.watch.session_started(&user);
+    if let Some((_, signal)) = srv
+        .sessions
+        .sessions_of(&user)
+        .into_iter()
+        .find(|(id, _)| *id == c.id)
+    {
+        srv.poll.session_started(c.id, signal);
+    }
     rep.expiration_ms = srv.sessions.idle_ms();
     rep
 }
@@ -215,6 +229,7 @@ pub async fn disconnect<A: Authenticator, B: Backend>(
     }
     let user = session.user();
     if let Some(id) = session.remove() {
+        srv.poll.session_ended(id);
         srv.backend.disconnect(id).await;
     }
     if let Some(user) = user {
@@ -251,6 +266,7 @@ pub async fn sweep<A: Authenticator, B: Backend>(srv: &Server<A, B>, now: Instan
     // NSPI sessions hold no backend state.
     srv.nspi.sessions.expire(now);
     for id in srv.sessions.expire(now) {
+        srv.poll.session_ended(id);
         srv.backend.disconnect(id).await;
     }
 }
@@ -319,14 +335,17 @@ mod tests {
         for entry in std::fs::read_dir(dir).unwrap() {
             let name = entry.unwrap().file_name().into_string().unwrap();
             if name.starts_with("connect-") && name.ends_with(".bin") {
-                assert!(parse_connect(&fixture(&name), "u".into()).is_ok(), "{name}");
+                assert!(
+                    parse_connect(&fixture(&name), "u".into(), Password::from("pass")).is_ok(),
+                    "{name}"
+                );
                 seen += 1;
             }
         }
         assert!(seen >= 1);
 
         let body = fixture(CAPTURE);
-        let (p, aux) = parse_connect(&body, "user".into()).unwrap();
+        let (p, aux) = parse_connect(&body, "user".into(), Password::from("pass")).unwrap();
         let dn = "/o=Lab/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=spike";
         assert_eq!(p.user_dn, dn);
         assert_eq!((p.flags, p.code_page), (0, 1252));
@@ -376,6 +395,7 @@ mod tests {
         assert_eq!((rep.http_status, rep.response_code), (200, 0));
         let expected = ConnectParams {
             username: "user".into(),
+            password: Password::from("pass"),
             user_dn: user_dn.into(),
             flags: 0,
             code_page: 1252,
@@ -405,6 +425,18 @@ mod tests {
         let exec = words(&[0, 8, 0, 0, 0x8000, 0]);
         run(handle(&srv, post("Execute", &exec, Some(cookie_of(&sc)))));
         assert!(matches!(calls(&srv)[1], Call::Execute { id: 7, .. }));
+    }
+
+    #[test]
+    fn test_connect_passes_password() {
+        let srv = server();
+        let body = connect_body("/o=example/cn=alice", 0x409);
+        run(handle(&srv, post("Connect", &body, None)));
+        // BASIC is user:pass; the backend gets the password as sent, not the canonical user's.
+        match &calls(&srv)[..] {
+            [Call::Connect(p)] => assert_eq!(p.password.expose(), "pass"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

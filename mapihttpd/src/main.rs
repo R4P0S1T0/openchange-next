@@ -2,6 +2,7 @@
 
 mod auth;
 mod autodiscover;
+mod davpoll;
 mod emsmdb;
 mod imapwatch;
 mod nspi;
@@ -335,6 +336,7 @@ fn main() -> ExitCode {
             ou: args.ou,
         };
         let (watch, watched) = imapwatch::WatchManager::new();
+        let (poll, polled) = davpoll::PollManager::new();
         let srv = Arc::new(Server {
             auth: DovecotAuthenticator {
                 socket: args.dovecot_socket,
@@ -349,7 +351,9 @@ fn main() -> ExitCode {
             notification_wait: Duration::from_secs(args.notification_wait_seconds),
             autodiscover: autodiscover_settings,
             watch,
+            poll,
         });
+        tokio::spawn(davpoll::supervise(srv.clone(), polled, davpoll::POLL_EVERY));
         let log: imapwatch::Log = Arc::new(|line| eprintln!("openchange-mapihttpd: {line}"));
         tokio::spawn(imapwatch::supervise(
             srv.clone(),

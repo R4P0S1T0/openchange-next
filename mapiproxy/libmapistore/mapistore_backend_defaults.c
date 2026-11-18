@@ -44,6 +44,24 @@ static enum mapistore_error mapistore_op_defaults_list_contexts(const char *owne
 	return MAPISTORE_ERR_NOT_IMPLEMENTED;
 }
 
+static enum mapistore_error mapistore_op_defaults_set_credentials(const char *username, const char *password)
+{
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error mapistore_op_defaults_forget_credentials(const char *username)
+{
+	return MAPISTORE_SUCCESS;
+}
+
+static enum mapistore_error mapistore_op_defaults_poll_changes(struct mapistore_connection_info *conn_info, TALLOC_CTX *mem_ctx,
+							       struct mapistore_change **list, size_t *n)
+{
+	*list = NULL;
+	*n = 0;
+	return MAPISTORE_SUCCESS;
+}
+
 static enum mapistore_error mapistore_op_defaults_create_context(TALLOC_CTX *mem_ctx, 
 								 struct mapistore_connection_info *conn_info,
 								 struct indexing_context *indexing_ctx,
@@ -403,6 +421,9 @@ extern enum mapistore_error mapistore_backend_init_defaults(struct mapistore_bac
 	backend->backend.list_contexts = mapistore_op_defaults_list_contexts;
 	backend->backend.create_context = mapistore_op_defaults_create_context;
 	backend->backend.create_root_folder = mapistore_op_defaults_create_root_folder;
+	backend->backend.set_credentials = mapistore_op_defaults_set_credentials;
+	backend->backend.forget_credentials = mapistore_op_defaults_forget_credentials;
+	backend->backend.poll_changes = mapistore_op_defaults_poll_changes;
 
 	/* context operations */
 	backend->context.get_path = mapistore_op_defaults_get_path;

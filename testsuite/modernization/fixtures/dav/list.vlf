@@ -1,0 +1,11 @@
+BEGIN:VLIST
+UID:16F4F4-6AFC4800-3-3CFB6140.vcf
+VERSION:1.0
+CARD;EMAIL=conceicao@exemplo.test;FN=Dra. Conceição Ângela Exemplo:16F4F4-6
+ AFC4800-5-3CFB6140.vcf
+CARD;EMAIL=conceicao.casa@exemplo.test;FN=Dra. Conceição Ângela Exemplo:16F
+ 4F4-6AFC4800-7-3CFB6140.vcf
+CARD;EMAIL=livre@exemplo.test;FN=Livre Exemplo:16F4F4-6AFC4800-9-3CFB6140.v
+ cf
+FN:Lista Exemplo
+END:VLIST

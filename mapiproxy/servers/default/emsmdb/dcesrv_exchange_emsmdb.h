@@ -331,6 +331,7 @@ enum emsmdbp_folder_change { EMSMDBP_FOLDER_MODIFIED, EMSMDBP_FOLDER_ADDED, EMSM
 void		      emsmdbp_notify_track_table(struct emsmdbp_context *, struct emsmdbp_object *, uint32_t, uint8_t);
 int		      emsmdbp_notify_folder_changed(struct emsmdbp_context *, uint64_t, enum emsmdbp_folder_change);
 int		      emsmdbp_notify_mailbox_changed(struct emsmdbp_context *, const char *, char, enum emsmdbp_folder_change);
+int		      emsmdbp_notify_poll_changes(struct emsmdbp_context *);
 enum MAPISTATUS       emsmdbp_fid_for_mailbox(struct emsmdbp_context *, const char *, char, uint64_t *);
 bool		      emsmdbp_notify_pending(struct emsmdbp_context *);
 const struct FILETIME *emsmdbp_notify_hierrev(struct emsmdbp_context *, uint64_t);

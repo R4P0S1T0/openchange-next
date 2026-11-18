@@ -26,12 +26,29 @@ jobs:
           flex bison python3-dev python3-samba python3-mysqldb samba-dev libmariadb-dev-compat
           libmemcached-dev libnanomsg-dev libpopt-dev libparse-yapp-perl
           check libsubunit-dev libetpan-dev dovecot-imapd dovecot-managesieved dovecot-sieve
+          libcurl4-gnutls-dev libexpat1-dev libgnutls28-dev
       - uses: actions/checkout@v4
+      # download.samba.org drops connections at times: the checked PIDL tree is cached
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/samba-4.22.10/pidl
+          key: samba-4.22.10-pidl-e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34
       - name: Fetch matching-generation PIDL source
         run: |
-          curl --fail --location --retry 3 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz
-          printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
-          tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
+          if [ ! -d /tmp/samba-4.22.10/pidl ]; then
+            if curl --fail --location --retry 1 --retry-all-errors --connect-timeout 20 --max-time 180 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz; then
+              printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
+              tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
+            else
+              # the Samba team's GitHub mirror of the same tag; the tree hash below checks its content
+              curl --fail --location --retry 3 --retry-all-errors --output /tmp/samba-gh.tar.gz https://github.com/samba-team/samba/archive/refs/tags/samba-4.22.10.tar.gz
+              mkdir -p /tmp/samba-4.22.10
+              tar -xzf /tmp/samba-gh.tar.gz -C /tmp/samba-4.22.10 --strip-components=1 samba-samba-4.22.10/pidl
+            fi
+          fi
+          # the PIDL tree of the 4.22.10 release, whichever source it came from (or the cache)
+          (cd /tmp/samba-4.22.10 && find pidl -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum) \
+            | grep -q '^67ada2ce1a8e9de93377fbb027a0b5bd2f4150a32338327bb75e477ccda217c9 '
           echo /tmp/samba-4.22.10/pidl >> "$GITHUB_PATH"
           echo PERL5LIB=/tmp/samba-4.22.10/pidl/lib >> "$GITHUB_ENV"
       - run: ./autogen.sh && ./configure --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
@@ -112,7 +129,7 @@ jobs:
       - name: Enable and check the MAPI/HTTP C backend
         run: |
           apt-get update && apt-get install -y cargo rustc rust-clippy rustfmt
-          ./configure --enable-mapihttp --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
+          ./configure --enable-mapihttp --enable-mapistore-dav --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
           make -j2 all
           make check-emsmdb check-oc-emsmdb check-mapihttp
           OC_EMSMDB_LIBDIR="$PWD/mapiproxy/servers" cargo clippy --offline --locked --all-targets --features c-backend -- -D warnings
@@ -122,6 +139,12 @@ jobs:
           rm -f mapiproxy/libmapistore/backends/imap/*.po bin/imap-backend-test
           make check-imap-backend CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
           rm -f mapiproxy/libmapistore/backends/imap/*.po bin/imap-backend-test
+      - name: Check the CardDAV backend against the fake server (no root)
+        run: |
+          make check-dav-backend
+          make mapistore_dav-clean
+          make check-dav-backend CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+          make mapistore_dav-clean
       - name: Check the C boundary with sanitizers and restore plain objects
         run: |
           make -W mapiproxy/servers/default/emsmdb/oc_emsmdb.c -W mapiproxy/servers/default/emsmdb/emsmdb_execute.c -W testsuite/modernization/oc_emsmdb_smoke.c check-oc-emsmdb CC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'

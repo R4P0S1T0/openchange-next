@@ -3,6 +3,7 @@
 use crate::auth::Password;
 use crate::session::SessionId;
 use std::collections::VecDeque;
+use std::fmt;
 use std::future::Future;
 use std::sync::Mutex;
 
@@ -11,15 +12,31 @@ pub const MAPI_E_LOGON_FAILED: u32 = 0x8004_0111;
 pub const EC_RPC_FAILED: u32 = 0x8004_0115;
 
 /// Connect request fields EMSMDB needs (MS-OXCMAPIHTTP 2.2.4.1.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectParams {
     /// Account verified by Dovecot.
     pub username: String,
+    /// The Basic password Dovecot verified; mapistore backends log in to other servers with it.
+    pub password: Password,
     pub user_dn: String,
     pub flags: u32,
     pub code_page: u32,
     pub lcid_sort: u32,
     pub lcid_string: u32,
+}
+
+impl fmt::Debug for ConnectParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectParams")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("user_dn", &self.user_dn)
+            .field("flags", &self.flags)
+            .field("code_page", &self.code_page)
+            .field("lcid_sort", &self.lcid_sort)
+            .field("lcid_string", &self.lcid_string)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +85,9 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = bool> + Send;
     /// None when the IMAP backend is not configured.
     fn watch_params(&self) -> impl Future<Output = Option<WatchParams>> + Send;
+    /// Asks the mapistore backends what other clients changed since the session's last poll; true when
+    /// the session now has notifications queued for its next Execute.
+    fn poll_changes(&self, id: SessionId) -> impl Future<Output = bool> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +106,7 @@ pub enum Call {
         delimiter: u8,
         kind: FolderChange,
     },
+    PollChanges(SessionId),
 }
 
 /// Records every call; answers from the scripted queues, failing once they are empty.
@@ -96,6 +117,8 @@ pub struct FakeBackend {
     pub executes: Mutex<VecDeque<Result<Vec<u8>, u32>>>,
     /// What watch_params answers.
     pub watch: Mutex<Option<WatchParams>>,
+    /// What poll_changes answers, in order; false once empty.
+    pub polls: Mutex<VecDeque<bool>>,
 }
 
 impl FakeBackend {
@@ -152,6 +175,12 @@ impl Backend for FakeBackend {
     async fn watch_params(&self) -> Option<WatchParams> {
         self.watch.lock().unwrap().clone()
     }
+
+    async fn poll_changes(&self, id: SessionId) -> bool {
+        self.record(Call::PollChanges(id));
+        let next = self.polls.lock().unwrap().pop_front();
+        next.unwrap_or(false)
+    }
 }
 
 /// Stands in for EMSMDB in builds without the C library: every Connect fails closed.
@@ -176,6 +205,10 @@ impl Backend for NoBackend {
 
     async fn watch_params(&self) -> Option<WatchParams> {
         None
+    }
+
+    async fn poll_changes(&self, _: SessionId) -> bool {
+        false
     }
 }
 
@@ -211,6 +244,7 @@ pub mod c {
             reply: oneshot::Sender<bool>,
         },
         WatchParams(oneshot::Sender<Option<WatchParams>>),
+        PollChanges(SessionId, oneshot::Sender<bool>),
     }
 
     /// One OS thread makes every C call and owns every C session handle.
@@ -250,6 +284,18 @@ pub mod c {
         }
     }
 
+    /// A session whose Connect caller went away (client hung up) never reaches the session table,
+    /// so nothing would disconnect it: drop it here, which forgets the user's password.
+    fn reply_connect<S>(
+        sessions: &mut HashMap<SessionId, S>,
+        reply: oneshot::Sender<Result<Connected, u32>>,
+        result: Result<Connected, u32>,
+    ) {
+        if let Err(Ok(c)) = reply.send(result) {
+            sessions.remove(&c.id);
+        }
+    }
+
     fn worker(rx: mpsc::Receiver<Job>) {
         let mut sessions: HashMap<SessionId, ffi::Session> = HashMap::new();
         let mut next: SessionId = 0;
@@ -265,7 +311,7 @@ pub mod c {
                             dn_prefix,
                         }
                     });
-                    let _ = reply.send(result);
+                    reply_connect(&mut sessions, reply, result);
                 }
                 Job::Execute {
                     id,
@@ -298,6 +344,10 @@ pub mod c {
                 }
                 Job::WatchParams(reply) => {
                     let _ = reply.send(ffi::watch_params());
+                }
+                Job::PollChanges(id, reply) => {
+                    let pending = sessions.get_mut(&id).is_some_and(|s| s.poll_changes());
+                    let _ = reply.send(pending);
                 }
             }
         }
@@ -353,6 +403,55 @@ pub mod c {
         async fn watch_params(&self) -> Option<WatchParams> {
             self.ask(Job::WatchParams).await.flatten()
         }
+
+        async fn poll_changes(&self, id: SessionId) -> bool {
+            self.ask(|reply| Job::PollChanges(id, reply))
+                .await
+                .unwrap_or(false)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        /// Counts drops, standing in for ffi::Session (whose drop runs oc_emsmdb_disconnect).
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn connected(id: SessionId) -> Result<Connected, u32> {
+            Ok(Connected {
+                id,
+                display_name: String::new(),
+                dn_prefix: String::new(),
+            })
+        }
+
+        #[test]
+        fn test_connect_caller_gone_disconnects() {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut sessions = HashMap::new();
+            sessions.insert(1, Counted(drops.clone()));
+            sessions.insert(2, Counted(drops.clone()));
+
+            let (tx, rx) = oneshot::channel();
+            reply_connect(&mut sessions, tx, connected(1));
+            assert!(rx.blocking_recv().unwrap().is_ok());
+            assert!(sessions.contains_key(&1));
+
+            // The client hung up while Connect was in flight: nobody will ever disconnect id 2.
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            reply_connect(&mut sessions, tx, connected(2));
+            assert!(!sessions.contains_key(&2));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
     }
 }
 
@@ -364,12 +463,21 @@ mod tests {
     fn params() -> ConnectParams {
         ConnectParams {
             username: "user@example.invalid".into(),
+            password: Password::from("s3cret-marker"),
             user_dn: "/o=example.invalid/cn=user".into(),
             flags: 0,
             code_page: 1252,
             lcid_sort: 1033,
             lcid_string: 1033,
         }
+    }
+
+    #[test]
+    fn test_connect_params_debug_redacts() {
+        let debug = format!("{:?}", params());
+        assert!(debug.contains(r#"password: "<redacted>""#), "{debug}");
+        assert!(!debug.contains("s3cret-marker"), "{debug}");
+        assert!(debug.contains("user@example.invalid"), "{debug}");
     }
 
     #[test]
@@ -393,6 +501,7 @@ mod tests {
                     .await
             );
             assert!(fake.watch_params().await.is_none());
+            assert!(!fake.poll_changes(7).await);
         });
         let exec = Call::Execute {
             id: 7,
@@ -413,7 +522,8 @@ mod tests {
                     mailbox: "INBOX".into(),
                     delimiter: b'/',
                     kind: FolderChange::Added
-                }
+                },
+                Call::PollChanges(7)
             ]
         );
     }

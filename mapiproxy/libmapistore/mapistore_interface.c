@@ -465,6 +465,8 @@ _PUBLIC_ const char *mapistore_errstr(enum mapistore_error mapistore_err)
 		return "Not available";
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		return "Not implemented";
+	case MAPISTORE_ERR_CONFLICT:
+		return "Conflict: the object changed on the server";
 	}
 
 	return "Unknown error";
@@ -477,6 +479,29 @@ _PUBLIC_ enum mapistore_error mapistore_list_contexts_for_user(struct mapistore_
 	mapistore_indexing_add(mstore_ctx, owner, &ictx);
 	/* TODO change backend definition to accept indexing_context instead of tdb_wrap */
 	return mapistore_backend_list_contexts(owner, ictx, mem_ctx, contexts_listp);
+}
+
+/* Called once per session with the password the transport verified; undone by mapistore_forget_credentials. */
+_PUBLIC_ enum mapistore_error mapistore_set_credentials(struct mapistore_context *mstore_ctx, const char *username, const char *password)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	return mapistore_backend_set_credentials(username, password);
+}
+
+_PUBLIC_ enum mapistore_error mapistore_forget_credentials(struct mapistore_context *mstore_ctx, const char *username)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	return mapistore_backend_forget_credentials(username);
+}
+
+/* The session's changes from other clients (see backend.poll_changes); username must be the session's. */
+_PUBLIC_ enum mapistore_error mapistore_poll_changes(struct mapistore_context *mstore_ctx, const char *username, TALLOC_CTX *mem_ctx,
+						     struct mapistore_change **listp, size_t *np)
+{
+	MAPISTORE_RETVAL_IF(!mstore_ctx || !mstore_ctx->conn_info, MAPISTORE_ERR_NOT_INITIALIZED, NULL);
+	MAPISTORE_RETVAL_IF(!username || !mstore_ctx->conn_info->username || strcmp(username, mstore_ctx->conn_info->username) != 0,
+			    MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	return mapistore_backend_poll_changes(mstore_ctx->conn_info, mem_ctx, listp, np);
 }
 
 _PUBLIC_ enum mapistore_error mapistore_create_root_folder(const char *username, enum mapistore_context_role ctx_role, uint64_t fid, const char *name, TALLOC_CTX *mem_ctx, char **mapistore_urip)
@@ -1902,10 +1927,14 @@ _PUBLIC_ enum MAPISTATUS mapistore_error_to_mapi(enum mapistore_error mapistore_
 		mapi_err = MAPI_E_NO_ACCESS;
 		break;
 	case MAPISTORE_ERR_CONN_REFUSED:
-		mapi_err = MAPI_E_CALL_FAILED;
+		/* the store behind the backend is down: Outlook retries a network error later */
+		mapi_err = ecRpcFailed;
 		break;
 	case MAPISTORE_ERR_NOT_IMPLEMENTED:
 		mapi_err = MAPI_E_NOT_IMPLEMENTED;
+		break;
+	case MAPISTORE_ERR_CONFLICT:
+		mapi_err = MAPI_E_OBJECT_CHANGED;
 		break;
 	default:
 		OC_DEBUG (4, "unknown mapistore error: %.8x", mapistore_err);

@@ -336,6 +336,64 @@ enum mapistore_error mapistore_backend_list_contexts(const char *username, struc
 	return MAPISTORE_SUCCESS;
 }
 
+/* All or nothing: a failure undoes the backends already set, so one forget balances one successful set. */
+enum mapistore_error mapistore_backend_set_credentials(const char *username, const char *password)
+{
+	enum mapistore_error	retval;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!username || !password, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		retval = backends[i].backend->backend.set_credentials(username, password);
+		if (retval != MAPISTORE_SUCCESS) {
+			while (i-- > 0) backends[i].backend->backend.forget_credentials(username);
+			return retval;
+		}
+	}
+	return MAPISTORE_SUCCESS;
+}
+
+/* Every backend forgets; the first failure is returned. */
+enum mapistore_error mapistore_backend_forget_credentials(const char *username)
+{
+	enum mapistore_error	retval = MAPISTORE_SUCCESS, ret;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!username, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		ret = backends[i].backend->backend.forget_credentials(username);
+		if (retval == MAPISTORE_SUCCESS) retval = ret;
+	}
+	return retval;
+}
+
+/* Every backend's changes for the session, in backend order; a failing backend is skipped (its changes wait for
+   the next poll) so the others are still reported. */
+enum mapistore_error mapistore_backend_poll_changes(struct mapistore_connection_info *conn_info, TALLOC_CTX *mem_ctx,
+						    struct mapistore_change **listp, size_t *np)
+{
+	struct mapistore_change	*list = NULL, *part;
+	size_t			n = 0, k;
+	int			i;
+
+	MAPISTORE_RETVAL_IF(!conn_info || !listp || !np, MAPISTORE_ERR_INVALID_PARAMETER, NULL);
+	for (i = 0; i < num_backends; i++) {
+		part = NULL;
+		k = 0;
+		if (backends[i].backend->backend.poll_changes(conn_info, mem_ctx, &part, &k) != MAPISTORE_SUCCESS || !k) {
+			continue;
+		}
+		list = talloc_realloc(mem_ctx, list, struct mapistore_change, n + k);
+		MAPISTORE_RETVAL_IF(!list, MAPISTORE_ERR_NO_MEMORY, NULL);
+		memcpy(list + n, part, k * sizeof *part);
+		for (; k > 0; k--, n++) (void) talloc_steal(list, list[n].uri);
+		talloc_free(part);
+	}
+	*listp = list;
+	*np = n;
+	return MAPISTORE_SUCCESS;
+}
+
 /**
    \details Create backend context
 
@@ -404,6 +462,10 @@ enum mapistore_error mapistore_backend_create_root_folder(const char *username, 
 
 	for (i = 0; retval == MAPISTORE_ERR_NOT_FOUND && i < num_backends; i++) {
 		retval = backends[i].backend->backend.create_root_folder(username, ctx_role, fid, name, mem_ctx, mapistore_urip);
+		/* A backend without this op (defaults) must not hide the ones loaded after it. */
+		if (retval == MAPISTORE_ERR_NOT_IMPLEMENTED) {
+			retval = MAPISTORE_ERR_NOT_FOUND;
+		}
 	}
 
 	return retval;

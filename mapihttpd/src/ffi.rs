@@ -28,6 +28,7 @@ mod linked {
         pub(super) fn oc_emsmdb_init(smb_conf_path: *const c_char) -> u32;
         pub(super) fn oc_emsmdb_connect(
             username: *const c_char,
+            password: *const c_char,
             user_dn: *const c_char,
             flags: u32,
             code_page: u32,
@@ -52,6 +53,10 @@ mod linked {
             mailbox: *const c_char,
             delimiter: c_char,
             kind: u32,
+            pending: *mut u32,
+        ) -> u32;
+        pub(super) fn oc_emsmdb_poll_changes(
+            session: *mut OcEmsmdbSession,
             pending: *mut u32,
         ) -> u32;
         pub(super) fn oc_emsmdb_imap_watch_params(
@@ -120,8 +125,9 @@ mod linked {
 
     /// Returns the session with its display name and DN prefix.
     pub fn connect(req: &ConnectParams) -> Result<(Session, String, String), u32> {
-        let (Ok(username), Ok(user_dn)) = (
+        let (Ok(username), Ok(password), Ok(user_dn)) = (
             CString::new(req.username.as_str()),
+            CString::new(req.password.expose()),
             CString::new(req.user_dn.as_str()),
         ) else {
             return Err(MAPI_E_INVALID_PARAMETER);
@@ -134,6 +140,7 @@ mod linked {
         let status = unsafe {
             oc_emsmdb_connect(
                 username.as_ptr(),
+                password.as_ptr(),
                 user_dn.as_ptr(),
                 req.flags,
                 req.code_page,
@@ -209,6 +216,14 @@ mod linked {
             };
             status == 0 && pending == 1
         }
+
+        /// Queues the notifications for what other clients changed; true when this call queued some.
+        pub fn poll_changes(&mut self) -> bool {
+            let mut pending = 0u32;
+            // SAFETY: the handle is live (owned by self); pending points at a live local.
+            let status = unsafe { oc_emsmdb_poll_changes(self.ptr.as_ptr(), &mut pending) };
+            status == 0 && pending == 1
+        }
     }
 }
 
@@ -276,6 +291,7 @@ mod tests {
         let conf = CString::new(conf).unwrap();
         let req = ConnectParams {
             username: "user".into(),
+            password: crate::auth::Password::from("pw"),
             user_dn: "/o=example.invalid/cn=user".into(),
             flags: 0,
             code_page: 1252,
@@ -305,6 +321,10 @@ mod tests {
         };
         assert_eq!((status, len), (EC_RPC_FAILED, 0));
         assert_eq!(out, [0xEE; 16]);
+        let mut pending = 7u32;
+        // SAFETY: a NULL session is rejected before pending is written; pending is a live local.
+        let status = unsafe { linked::oc_emsmdb_poll_changes(std::ptr::null_mut(), &mut pending) };
+        assert_eq!((status, pending), (0x8007_0057, 7));
         // SAFETY: disconnecting NULL is a no-op.
         unsafe { linked::oc_emsmdb_disconnect(std::ptr::null_mut()) };
 

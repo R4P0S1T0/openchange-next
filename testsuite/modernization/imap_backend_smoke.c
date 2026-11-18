@@ -2845,8 +2845,10 @@ static int test_rules_inbox(void)
     id1 = id;
     CHECK(imap_sieve_get(&tunnel, "alice@example.invalid", root, &script) == 0 && script);
     CHECK(strstr(script, "if header :contains \"subject\" \"x\" {\n  fileinto :create \"INBOX/R1\";\n}\n"));
-    /* the rule runs at delivery (sieve-test, when installed) */
-    if (access("/usr/bin/sieve-test", X_OK) == 0) {
+    /* the rule runs at delivery (sieve-test, when installed; Dovecot refuses mail access as root, as in CI) */
+    if (geteuid() == 0) {
+        fprintf(stderr, "running as root: sieve-test delivery check skipped\n");
+    } else if (access("/usr/bin/sieve-test", X_OK) == 0) {
         char *sp = talloc_asprintf(root, "%s/outlook-test.sieve", fixture), *mp = talloc_asprintf(root, "%s/msg.eml", fixture);
         char *cmd = talloc_asprintf(root, "/usr/bin/sieve-test -c %s/dovecot.conf %s %s 2>&1 | grep -q 'INBOX/R1'", fixture, sp, mp);
         CHECK(write_file(sp, script, 0644) == 0);
