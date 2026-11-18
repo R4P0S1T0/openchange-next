@@ -108,6 +108,7 @@ struct dav_message {
 	   of a save without PCL (Outlook reopens a contact to upload an offline edit) */
 	uint64_t		given_fp[DAV_F_COUNT];
 	bool			has_given;
+	uint64_t		held_cn;	/* after a merged save without keys: the change Outlook holds */
 	bool			full;		/* purged: the upload carries the whole message, absent = removed */
 	struct dav_attachment	*photo;		/* the contact picture Outlook attached */
 };
@@ -148,9 +149,11 @@ void *dav_change_value(TALLOC_CTX *, struct dav_context *, const char *uri, cons
 time_t dav_etag_time(struct dav_context *, const char *norm, const char *etag);
 /* After a PUT of the card of mid at href: the item list and the indexing follow (a new href takes the MID). */
 enum mapistore_error dav_item_put(struct dav_context *, uint64_t mid, const char *href, const char *etag, struct dav_card *);
-/* The state at uri is Outlook's change (its keys), or a merge of it (a server change whose PCL includes it). */
+/* The state at uri is Outlook's change (its keys), or a merge of it (a server change whose PCL includes it).
+   Without keys (a save of an opened message) Outlook's change gets a number of its own; *held: the change
+   Outlook now holds when the stored state is a later merge, else 0. */
 void dav_change_record(struct dav_context *, const char *uri, const char *etag, const struct Binary_r *ck,
-		       const struct Binary_r *pcl, bool merged);
+		       const struct Binary_r *pcl, bool merged, uint64_t *held);
 enum mapistore_error dav_folder_set_properties(struct dav_folder *, struct SRow *);
 uint64_t *dav_i8(TALLOC_CTX *, uint64_t);
 uint32_t *dav_long(TALLOC_CTX *, uint32_t);

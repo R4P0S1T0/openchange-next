@@ -711,15 +711,31 @@ static struct Binary_r *pcl_with(TALLOC_CTX *mem_ctx, const struct Binary_r *pcl
 }
 
 void dav_change_record(struct dav_context *ctx, const char *uri, const char *etag, const struct Binary_r *ck,
-		       const struct Binary_r *pcl, bool merged)
+		       const struct Binary_r *pcl, bool merged, uint64_t *held)
 {
 	TALLOC_CTX		*tmp;
 	enum mapistore_error	ret;
-	uint64_t		cn;
+	uint64_t		cn, own = 0;
 	time_t			when;
 
-	if (!uri || !etag || !ck || !pcl || !(tmp = talloc_new(NULL))) {
-		return;	/* no keys from Outlook (online save): the new ETag is a server change */
+	*held = 0;
+	if (!uri || !etag || !(tmp = talloc_new(NULL))) {
+		return;
+	}
+	if (!ck || !pcl) {
+		/* a save of an opened message carries no keys: Outlook's write is a change of its own, so a merge
+		   that adds to it is a later change Outlook still has to download */
+		if (cn_source(ctx, &own) != MAPISTORE_SUCCESS) {
+			talloc_free(tmp);
+			return;
+		}
+		ck = mapistore_change_value(tmp, ctx->username, uri, &ctx->replica_guid, own, 0, PidTagChangeKey);
+		pcl = mapistore_change_value(tmp, ctx->username, uri, &ctx->replica_guid, own, 0, PidTagPredecessorChangeList);
+		if (!ck || !pcl) {
+			talloc_free(tmp);
+			return;
+		}
+		if (merged) *held = own;
 	}
 	if (!merged) {
 		ret = mapistore_change_record_client(ctx->username, uri, cn_source, ctx, ck, pcl);

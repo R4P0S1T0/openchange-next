@@ -2091,6 +2091,18 @@ static int test_offline_save_reopened_without_pcl(void)
     CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);
     body = stored("op.vcf");
     CHECK(strstr(body, "conflito] celular:") && strstr(body, "999") && strstr(body, "222"));
+    {
+        /* the merge added what Outlook does not hold: what Outlook reads back after the save is its own
+           change, and the stored version a later one, so its next sync brings the merged card */
+        enum MAPITAGS kt[] = { PidTagChangeNumber, PidTagChangeKey };
+        struct mapistore_property_data held[2], now[2];
+        void *fresh;
+        CHECK(B.properties.get_properties(msg, root, 2, kt, held) == MAPISTORE_SUCCESS && !held[0].error && !held[1].error);
+        CHECK(B.folder.open_message(f, root, mid, false, &fresh) == MAPISTORE_SUCCESS);
+        CHECK(B.properties.get_properties(fresh, root, 2, kt, now) == MAPISTORE_SUCCESS && !now[0].error && !now[1].error);
+        CHECK(*(uint64_t *) now[0].data > *(uint64_t *) held[0].data);
+        CHECK(memcmp(((struct Binary_r *) now[1].data)->lpb, ((struct Binary_r *) held[1].data)->lpb, 22) != 0);
+    }
     backend_down();
     return 0;
 }

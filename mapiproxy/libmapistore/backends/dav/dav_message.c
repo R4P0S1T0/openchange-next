@@ -236,7 +236,15 @@ enum mapistore_error dav_message_properties(struct dav_message *m, TALLOC_CTX *m
 				data[i].data = (void *) get_SPropValue_data(&m->props->lpProps[j]);
 			}
 		}
-		if (m->href) data[i].data = dav_item_value(mem_ctx, m->folder, m->mid, m->href, m->etag, m->card, tags[i]);
+		if (m->href && m->held_cn && (tags[i] == PidTagChangeNumber || tags[i] == PidTagChangeKey ||
+					      tags[i] == PidTagPredecessorChangeList)) {
+			/* Outlook holds its own write, not the merge stored after it: the next sync brings that */
+			data[i].data = mapistore_change_value(mem_ctx, m->folder->ctx->username,
+							      dav_item_uri(mem_ctx, m->folder->ctx, m->href),
+							      &m->folder->ctx->replica_guid, m->held_cn, 0, tags[i]);
+		} else if (m->href) {
+			data[i].data = dav_item_value(mem_ctx, m->folder, m->mid, m->href, m->etag, m->card, tags[i]);
+		}
 		data[i].error = data[i].data ? MAPISTORE_SUCCESS : MAPISTORE_ERR_NOT_FOUND;
 	}
 	return MAPISTORE_SUCCESS;
@@ -756,7 +764,7 @@ static enum mapistore_error save(void *message, TALLOC_CTX *mem_ctx)
 		return MAPISTORE_SUCCESS;
 	}
 	dav_change_record(ctx, dav_item_uri(tmp, ctx, norm), etag, m->client_ck, m->client_pcl,
-			  !outlook_holds(tmp, c, m->card, v, p));
+			  !outlook_holds(tmp, c, m->card, v, p), &m->held_cn);
 	ret = dav_item_put(ctx, m->mid, path, etag, c);
 	if (ret != MAPISTORE_SUCCESS) {
 		OC_DEBUG(1, "DAV backend: index of mid 0x%"PRIx64" not updated (%s)\n", m->mid, mapistore_errstr(ret));
