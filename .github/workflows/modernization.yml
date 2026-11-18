@@ -28,11 +28,18 @@ jobs:
           check libsubunit-dev libetpan-dev dovecot-imapd dovecot-managesieved dovecot-sieve
           libcurl4-gnutls-dev libexpat1-dev libgnutls28-dev
       - uses: actions/checkout@v4
+      # download.samba.org drops connections at times: the checked PIDL tree is cached
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/samba-4.22.10/pidl
+          key: samba-4.22.10-pidl-e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34
       - name: Fetch matching-generation PIDL source
         run: |
-          curl --fail --location --retry 3 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz
-          printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
-          tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
+          if [ ! -d /tmp/samba-4.22.10/pidl ]; then
+            curl --fail --location --retry 5 --retry-all-errors --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz
+            printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
+            tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
+          fi
           echo /tmp/samba-4.22.10/pidl >> "$GITHUB_PATH"
           echo PERL5LIB=/tmp/samba-4.22.10/pidl/lib >> "$GITHUB_ENV"
       - run: ./autogen.sh && ./configure --with-samba=/usr --prefix="$RUNNER_TEMP/openchange"
