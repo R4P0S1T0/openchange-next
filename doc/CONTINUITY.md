@@ -8,9 +8,9 @@
 - Repository cleanup merged on 2026-11-16: legacy components outside the new
   direction were removed; they remain at tag `legacy-2026-11`
   ([design](../docs/superpowers/specs/2026-11-16-repo-cleanup-design.md)).
-- M6 slice 1 (Outlook contacts in SOGo over CardDAV) is on branch `m6-contacts`, deployed on
-  the lab and accepted on 2026-11-18 except one open case (offline delete of a contact edited
-  elsewhere); see [MODERNIZATION.md](MODERNIZATION.md#m6-slice-1-outlook-contacts-in-sogo-over-carddav-2026-11-18).
+- M6 slice 1 (Outlook contacts in SOGo over CardDAV) is merged on `main`, deployed on the lab
+  and accepted on 2026-11-18 except one open case (offline delete of a contact edited
+  elsewhere); CI is green again (the native job had failed since 2026-11-16); see [MODERNIZATION.md](MODERNIZATION.md#m6-slice-1-outlook-contacts-in-sogo-over-carddav-2026-11-18).
   Next: that open case, then the calendar slice over CalDAV, free/busy and meeting requests.
 - Open findings: ghost OpenFolder requests for fids 0xa517…/0xa917… seen on
   2026-11-16 (not stored anywhere on the server, not reproduced since); StageB
