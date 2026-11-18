@@ -462,6 +462,10 @@ enum mapistore_error mapistore_backend_create_root_folder(const char *username, 
 
 	for (i = 0; retval == MAPISTORE_ERR_NOT_FOUND && i < num_backends; i++) {
 		retval = backends[i].backend->backend.create_root_folder(username, ctx_role, fid, name, mem_ctx, mapistore_urip);
+		/* A backend without this op (defaults) must not hide the ones loaded after it. */
+		if (retval == MAPISTORE_ERR_NOT_IMPLEMENTED) {
+			retval = MAPISTORE_ERR_NOT_FOUND;
+		}
 	}
 
 	return retval;
