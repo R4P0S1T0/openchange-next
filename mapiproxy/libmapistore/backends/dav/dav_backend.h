@@ -104,6 +104,10 @@ struct dav_message {
 	/* Outlook's write */
 	struct SRow		*props;		/* set since the last save */
 	struct Binary_r		*client_ck, *client_pcl;
+	/* the version Outlook had been given before this open, when the server's changed since: the base
+	   of a save without PCL (Outlook reopens a contact to upload an offline edit) */
+	uint64_t		given_fp[DAV_F_COUNT];
+	bool			has_given;
 	bool			full;		/* purged: the upload carries the whole message, absent = removed */
 	struct dav_attachment	*photo;		/* the contact picture Outlook attached */
 };

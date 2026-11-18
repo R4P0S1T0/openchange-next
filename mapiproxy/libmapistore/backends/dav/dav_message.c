@@ -209,6 +209,14 @@ static enum mapistore_error open_message(void *folder, TALLOC_CTX *mem_ctx, uint
 	m->folder = f;
 	m->mid = mid;
 	m->card = it->card;
+	{
+		char *given_etag = NULL;
+
+		if (dav_fp_get(ctx->fp, m, ctx->username, it->norm, m->given_fp, &given_etag) == MAPISTORE_SUCCESS &&
+		    given_etag && strcmp(given_etag, it->etag) != 0) {
+			m->has_given = true;
+		}
+	}
 	record_fingerprints(ctx, it->norm, it->etag, it->card);
 	*messagep = m;
 	return MAPISTORE_SUCCESS;
@@ -659,6 +667,8 @@ static enum mapistore_error merge_put(struct dav_message *m, struct dav_http *h,
 				       &base_etag) == MAPISTORE_SUCCESS) {
 			base = fp;
 		}
+	} else if (m->has_given) {
+		base = m->given_fp;
 	} else if (!m->full && m->card) {
 		dav_fp_card(st->fp_key, st->fp_key_len, m->card, fp);
 		base = fp;

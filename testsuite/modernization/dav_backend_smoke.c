@@ -2070,6 +2070,31 @@ static int test_second_save_same_handle(void)
     return 0;
 }
 
+/* Lab 18/11: Outlook uploads an offline edit by opening the contact again (OpenMessage, no PCL) after
+   webmail changed the same field: the base is what Outlook was given before, so neither value is lost. */
+static int test_offline_save_reopened_without_pcl(void)
+{
+    struct dav_folder *f;
+    uint64_t mid, cn;
+    void *msg;
+    char *body;
+
+    CHECK(!backend_up());
+    if (put("op.vcf", WCARD("op", "a@x.test", "111"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "op", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);	/* Outlook syncs it */
+    CHECK(!ctl("edit?path=" WBOOK "op.vcf&set=TEL;TYPE=CELL:999"));	/* webmail, while Outlook is offline */
+    if (row_of(f, "op", &mid, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, mid, true, &msg) == MAPISTORE_SUCCESS);	/* Outlook back online */
+    CHECK(B.properties.set_properties(msg, props(1, PidTagMobileTelephoneNumber, "222")) == MAPISTORE_SUCCESS);
+    CHECK(B.message.save(msg, root) == MAPISTORE_SUCCESS);
+    body = stored("op.vcf");
+    CHECK(strstr(body, "conflito] celular:") && strstr(body, "999") && strstr(body, "222"));
+    backend_down();
+    return 0;
+}
+
 /* Task 8: a session's poll reports what changed since that session's last poll (its first only learns the
    state), so every session of the user hears of a change. */
 static int poll_has(struct mapistore_connection_info *s, size_t want, const char *uri, int kind)
@@ -2200,7 +2225,7 @@ int main(int argc, char **argv)
         || test_save_concurrent_edit_merged() || test_save_412_three_times_conflict()
         || test_save_after_remote_delete_recreates() || test_delete_after_remote_edit_survives()
         || test_folder_create_rename_delete() || test_delete_personal_denied() || test_stale_client_never_reverts()
-        || test_books_are_subfolders() || test_second_save_same_handle()
+        || test_books_are_subfolders() || test_second_save_same_handle() || test_offline_save_reopened_without_pcl()
         || test_poll_reports_contents_and_books() || test_sync_throttled_until_poll()) { fake_stop(); return 1; }
     printf("dav backend smoke: ok\n");
     talloc_free(root);
