@@ -128,7 +128,11 @@ mod tests {
             tokio::spawn(supervise(srv.clone(), rx, POLL_EVERY));
             srv.poll.session_started(7, Arc::default());
             tokio::time::sleep(Duration::from_secs(1)).await;
-            assert_eq!(polls(&srv, 7), 1, "the first poll takes the state at the start");
+            assert_eq!(
+                polls(&srv, 7),
+                1,
+                "the first poll takes the state at the start"
+            );
             tokio::time::sleep(POLL_EVERY).await;
             assert_eq!(polls(&srv, 7), 2);
             tokio::time::sleep(POLL_EVERY).await;
