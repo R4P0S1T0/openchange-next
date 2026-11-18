@@ -234,6 +234,9 @@ class H(BaseHTTPRequestHandler):
                 names = {n: False for n in book["items"]}
             out = ""
             for n, removed in names.items():
+                # SOGo 5.12 leaves lists out of listings for a client that sends no User-Agent
+                if not self.headers.get("User-Agent") and n in book["items"] and book["items"][n][0].lstrip().startswith("BEGIN:VLIST"):
+                    continue
                 if removed or n not in book["items"]:
                     out += gone_resp(key, n)
                 else:

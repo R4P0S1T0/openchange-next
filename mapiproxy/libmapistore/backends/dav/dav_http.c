@@ -204,6 +204,8 @@ static enum mapistore_error dav_do(struct dav_http *h, const char *method, const
 	curl_easy_reset(h->curl);
 	curl_easy_setopt(h->curl, CURLOPT_URL, url);
 	curl_easy_setopt(h->curl, CURLOPT_NOSIGNAL, 1L);
+	/* SOGo leaves VLIST lists out of listings for a client without a User-Agent. */
+	curl_easy_setopt(h->curl, CURLOPT_USERAGENT, "openchange-mapistore-dav/" PACKAGE_VERSION);
 #if LIBCURL_VERSION_NUM >= 0x075500
 	curl_easy_setopt(h->curl, CURLOPT_PROTOCOLS_STR, "http,https");
 #else
