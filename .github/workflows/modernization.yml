@@ -36,7 +36,7 @@ jobs:
       - name: Fetch matching-generation PIDL source
         run: |
           if [ ! -d /tmp/samba-4.22.10/pidl ]; then
-            if curl --fail --location --retry 3 --retry-all-errors --max-time 300 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz; then
+            if curl --fail --location --retry 1 --retry-all-errors --connect-timeout 20 --max-time 180 --output /tmp/samba.tar.gz https://download.samba.org/pub/samba/stable/samba-4.22.10.tar.gz; then
               printf '%s  %s\n' e601437cde4845a42e7818379cd0ad5fc4fa518a7cf5284cc0a2657e79b30c34 /tmp/samba.tar.gz | sha256sum --check
               tar -xzf /tmp/samba.tar.gz -C /tmp samba-4.22.10/pidl
             else
