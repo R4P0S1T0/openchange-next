@@ -281,6 +281,9 @@ static const struct dav_named_tags fake_tags = {
     .work_country = 0x810F0000 | PT_UNICODE, .work_po_box = 0x81100000 | PT_UNICODE,
     .dl_name = 0x81110000 | PT_UNICODE, .dl_members = 0x81120000 | PT_MV_BINARY,
     .dl_one_off_members = 0x81130000 | PT_MV_BINARY, .dl_checksum = 0x81140000 | PT_LONG,
+    .email_original_display_name = { 0x81150000 | PT_UNICODE, 0x81160000 | PT_UNICODE, 0x81170000 | PT_UNICODE },
+    .email_original_entryid = { 0x81180000 | PT_BINARY, 0x81190000 | PT_BINARY, 0x811A0000 | PT_BINARY },
+    .abp_email_list = 0x811B0000 | PT_MV_LONG, .abp_array_type = 0x811C0000 | PT_LONG,
 };
 
 #define M5 "16F4F4-6AFC4800-5-3CFB6140"
@@ -377,6 +380,15 @@ static int test_map_contact_full(void)
     CHECK(!strcmp(str_prop(c, NULL, fake_tags.email_display_name[0]),
                   "Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo (conceicao@exemplo.test)"));
     CHECK(!strcmp(str_prop(c, NULL, fake_tags.email_address_type[2]), "SMTP"));
+    /* what Outlook's contacts address book and the form title need (MS-OXOCNTC 2.2.1.2.x) */
+    CHECK(!strcmp(str_prop(c, NULL, PidTagSubject), "Dra. Concei\xc3\xa7\xc3\xa3o \xc3\x82ngela Exemplo"));
+    CHECK(!strcmp(str_prop(c, NULL, fake_tags.email_original_display_name[1]), "conceicao.casa@exemplo.test"));
+    CHECK(dav_card_get_prop(root, c, &fake_tags, NULL, fake_tags.email_original_entryid[0], &v) == MAPISTORE_SUCCESS
+          && ((struct Binary_r *) v)->cb > 20);
+    CHECK(dav_card_get_prop(root, c, &fake_tags, NULL, fake_tags.abp_array_type, &v) == MAPISTORE_SUCCESS
+          && *(uint32_t *) v == 7);
+    CHECK(dav_card_get_prop(root, c, &fake_tags, NULL, fake_tags.abp_email_list, &v) == MAPISTORE_SUCCESS
+          && ((struct LongArray_r *) v)->cValues == 3 && ((struct LongArray_r *) v)->lpl[2] == 2);
     CHECK(!strcmp(str_prop(c, NULL, PidTagBusinessTelephoneNumber), "+55 11 3000-0002"));
     CHECK(!strcmp(str_prop(c, NULL, PidTagHomeTelephoneNumber), "+55 11 3000-0003"));
     CHECK(!strcmp(str_prop(c, NULL, PidTagMobileTelephoneNumber), "+55 11 90000-0001"));

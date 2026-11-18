@@ -1258,7 +1258,7 @@ static const enum MAPITAGS folder_candidates[] = {
 };
 
 static const enum MAPITAGS message_candidates[] = {
-	PidTagMessageClass, PidTagDisplayName, PidTagSurname, PidTagGivenName, PidTagMiddleName, PidTagDisplayNamePrefix,
+	PidTagMessageClass, PidTagDisplayName, PidTagSubject, PidTagNormalizedSubject, PidTagSurname, PidTagGivenName, PidTagMiddleName, PidTagDisplayNamePrefix,
 	PidTagGeneration, PidTagBusinessTelephoneNumber, PidTagHomeTelephoneNumber, PidTagMobileTelephoneNumber,
 	PidTagBusinessFaxNumber, PidTagCompanyName, PidTagDepartmentName, PidTagTitle, PidTagBody, PidTagBusinessHomePage,
 	PidTagHomeAddressPostOfficeBox, PidTagHomeAddressStreet, PidTagHomeAddressCity, PidTagHomeAddressStateOrProvince,

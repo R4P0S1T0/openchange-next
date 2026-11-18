@@ -35,6 +35,8 @@ struct dav_named_tags {
 	uint32_t	file_under, has_picture;
 	uint32_t	work_street, work_city, work_state, work_postal_code, work_country, work_po_box;
 	uint32_t	dl_name, dl_members, dl_one_off_members, dl_checksum;
+	/* read-only, derived from the e-mails: what Outlook's contacts address book lists */
+	uint32_t	email_original_display_name[3], email_original_entryid[3], abp_email_list, abp_array_type;
 };
 
 /* Maps a list member's card UID to the Message EntryID of that contact and back (NULL: unknown). */

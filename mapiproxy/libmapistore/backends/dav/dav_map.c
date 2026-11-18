@@ -677,7 +677,7 @@ _PUBLIC_ enum mapistore_error dav_card_get_prop(TALLOC_CTX *mem, const struct da
 	*value = NULL;
 	if (tag == PidTagMessageClass) {
 		v = talloc_strdup(mem, list ? "IPM.DistList" : "IPM.Contact");
-	} else if (tag == PidTagDisplayName) {
+	} else if (tag == PidTagDisplayName || tag == PidTagSubject || tag == PidTagNormalizedSubject) {
 		v = dav_field_get(mem, c, list ? DAV_F_LIST_NAME : DAV_F_FN);
 	} else if (tag == PidTagBirthday) {
 		v = birthday(mem, dav_field_get(mem, c, DAV_F_BDAY));
@@ -689,6 +689,21 @@ _PUBLIC_ enum mapistore_error dav_card_get_prop(TALLOC_CTX *mem, const struct da
 		s = dav_field_get(mem, c, DAV_F_N_FAMILY);
 		s2 = dav_field_get(mem, c, DAV_F_N_GIVEN);
 		v = s && s2 ? talloc_asprintf(mem, "%s, %s", s, s2) : s ? s : s2 ? s2 : dav_field_get(mem, c, DAV_F_FN);
+	} else if (!list && (tg == t->abp_array_type || tg == t->abp_email_list)) {
+		/* which Email1-3 slots hold an address: bit i / entry i is slot i */
+		uint32_t slots[3], k = 0, bits = 0;
+		struct LongArray_r *a;
+		for (i = 0; i < 3; i++) {
+			if (dav_field_get(mem, c, DAV_F_EMAIL1 + i)) { slots[k++] = i; bits |= 1u << i; }
+		}
+		if (!k) return MAPISTORE_ERR_NOT_FOUND;
+		if (tg == t->abp_array_type) {
+			v = ulong_value(mem, bits);
+		} else if ((a = talloc_zero(mem, struct LongArray_r)) && (a->lpl = talloc_memdup(a, slots, k * sizeof *slots))) {
+			a->cValues = k;
+			v = a;
+		}
+		if (!v) return MAPISTORE_ERR_NO_MEMORY;
 	} else if (list && (tg == t->dl_members || tg == t->dl_one_off_members || tg == t->dl_checksum)) {
 		struct BinaryArray_r *m, *o;
 		if (!list_entries(mem, c, r, &m, &o)) return MAPISTORE_ERR_NO_MEMORY;
@@ -707,11 +722,18 @@ _PUBLIC_ enum mapistore_error dav_card_get_prop(TALLOC_CTX *mem, const struct da
 		}
 	} else {
 		for (i = 0; !list && i < 3; i++) {
-			if (tg != t->email_display_name[i] && tg != t->email_address_type[i]) continue;
+			if (tg != t->email_display_name[i] && tg != t->email_address_type[i] &&
+			    tg != t->email_original_display_name[i] && tg != t->email_original_entryid[i]) continue;
 			if (!(s = dav_field_get(mem, c, DAV_F_EMAIL1 + i))) return MAPISTORE_ERR_NOT_FOUND;
 			s2 = dav_field_get(mem, c, DAV_F_FN);
-			v = tg == t->email_address_type[i] ? talloc_strdup(mem, "SMTP")
-				: s2 ? talloc_asprintf(mem, "%s (%s)", s2, s) : s;
+			if (tg == t->email_original_entryid[i]) {
+				if (!(v = one_off(mem, s2, s))) return MAPISTORE_ERR_NO_MEMORY;
+			} else if (tg == t->email_original_display_name[i]) {
+				v = s;
+			} else {
+				v = tg == t->email_address_type[i] ? talloc_strdup(mem, "SMTP")
+					: s2 ? talloc_asprintf(mem, "%s (%s)", s2, s) : s;
+			}
 			break;
 		}
 		if (i == 3 || list) {
@@ -920,6 +942,10 @@ _PUBLIC_ enum mapistore_error dav_named_tags_resolve(struct namedprops_context *
 		{ 0x804a, PT_UNICODE, &t->work_po_box }, { 0x8053, PT_UNICODE, &t->dl_name },
 		{ 0x8055, PT_MV_BINARY, &t->dl_members }, { 0x8054, PT_MV_BINARY, &t->dl_one_off_members },
 		{ 0x804c, PT_LONG, &t->dl_checksum },
+		{ 0x8084, PT_UNICODE, &t->email_original_display_name[0] }, { 0x8094, PT_UNICODE, &t->email_original_display_name[1] },
+		{ 0x80a4, PT_UNICODE, &t->email_original_display_name[2] }, { 0x8085, PT_BINARY, &t->email_original_entryid[0] },
+		{ 0x8095, PT_BINARY, &t->email_original_entryid[1] }, { 0x80a5, PT_BINARY, &t->email_original_entryid[2] },
+		{ 0x8028, PT_MV_LONG, &t->abp_email_list }, { 0x8029, PT_LONG, &t->abp_array_type },
 	};
 	enum mapistore_error ret;
 	size_t i;
