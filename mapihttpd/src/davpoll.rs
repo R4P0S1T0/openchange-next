@@ -53,7 +53,9 @@ impl PollManager {
     }
 }
 
-/// Runs one task per session: a poll every `every`, the first one `every` after the start.
+/// Runs one task per session: a poll every `every`, the first one at the start. That first one only takes
+/// the state, so a change made while the session starts (an upload merged with another client's edit) is
+/// reported by the next one instead of being taken as the starting state.
 pub async fn supervise<A, B>(srv: Arc<Server<A, B>>, rx: PollReceiver, every: Duration)
 where
     A: Authenticator + 'static,
@@ -66,7 +68,7 @@ where
             Msg::Start(id, signal) => {
                 let srv = srv.clone();
                 let task = tokio::spawn(async move {
-                    let mut tick = interval_at(Instant::now() + every, every);
+                    let mut tick = interval_at(Instant::now(), every);
                     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
@@ -126,20 +128,22 @@ mod tests {
             tokio::spawn(supervise(srv.clone(), rx, POLL_EVERY));
             srv.poll.session_started(7, Arc::default());
             tokio::time::sleep(Duration::from_secs(1)).await;
-            assert_eq!(polls(&srv, 7), 0, "the first poll waits a full interval");
-            tokio::time::sleep(POLL_EVERY).await;
-            assert_eq!(polls(&srv, 7), 1);
+            assert_eq!(polls(&srv, 7), 1, "the first poll takes the state at the start");
             tokio::time::sleep(POLL_EVERY).await;
             assert_eq!(polls(&srv, 7), 2);
+            tokio::time::sleep(POLL_EVERY).await;
+            assert_eq!(polls(&srv, 7), 3);
             srv.poll.session_ended(7);
             tokio::time::sleep(POLL_EVERY * 3).await;
-            assert_eq!(polls(&srv, 7), 2);
+            assert_eq!(polls(&srv, 7), 3);
         });
     }
 
     #[test]
     fn test_poll_pending_wakes_notification_wait() {
         let (srv, rx) = started();
+        // the first poll (at the start) only learns the state; the next one finds a change
+        srv.backend.polls.lock().unwrap().push_back(false);
         srv.backend.polls.lock().unwrap().push_back(true);
         let signal: Arc<SessionSignal> = Arc::default();
         let (woke, waited) = paused().block_on(async {
