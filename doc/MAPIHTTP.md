@@ -256,6 +256,35 @@ reading in Outlook never marks a message read on the server (M4). If Dovecot
 cannot be reached, logon still succeeds with the folders already known. No
 subject, address, body or password is logged.
 
+## CardDAV contacts (M6 slice 1)
+
+`mapistore_dav.so` (`--enable-mapistore-dav`; needs `libcurl4-gnutls-dev`,
+`libexpat1-dev` and `libgnutls28-dev`, the GnuTLS curl because `libetpan-dev`
+depends on it) is installed in `$(libdir)/mapistore_backends` with the other
+backends. It shows the user's SOGo address books as Outlook contacts folders:
+`personal` is Outlook's Contacts and every other book a subfolder of it;
+directory books (the domain's SQL source) are left to the address book (NSPI).
+Contacts and contact lists (VLIST) are read and written in both directions;
+the merge rules are in the M6 design. smb.conf `[global]`:
+
+| Option | Default / purpose |
+| --- | --- |
+| `mapistore:dav_url` | Required; the user's address-book home, `%u` is the MAPI user name, e.g. `https://mail.example.invalid/SOGo/dav/%u/Contacts/`. Unset: the backend loads inert |
+| `mapistore:dav_fingerprint_key_file` | Required; 32 random bytes keying the per-field fingerprints: `head -c 32 /dev/urandom > /etc/openchange/dav-fingerprint.key && chown openchange: … && chmod 600 …` |
+
+The user's own Basic credentials (checked by Dovecot at Connect) are kept in
+session memory only and sent to SOGo; nothing in SOGo is configured. With TOTP
+enabled for an account, SOGo still accepts the plain password over DAV (lab,
+2026-11-18). Fingerprints (keyed hashes and ETags, never contact data) live in
+the indexing MariaDB (`mapistore:indexing_backend`), tables
+`dav_fingerprints` and `dav_fingerprint_versions`, created on first use.
+The backend sends a User-Agent: SOGo leaves lists and extra books out of
+listings for a client without one.
+
+The struct of mapistore backends changed in M6: reinstall `libmapistore` and
+every backend together (`make install` does), and copy `liboc_emsmdb.so` and
+`bin/openchange-mapihttpd`, which `make install` does not install.
+
 ## Validation limits
 
 Unit tests use fake backends, in-memory HTTP streams and a local fake Dovecot

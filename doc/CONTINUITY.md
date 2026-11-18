@@ -1,6 +1,6 @@
-# Development continuity — 2026-11-16
+# Development continuity — 2026-11-18
 
-## Current state — 2026-11-16
+## Current state — 2026-11-18
 
 - M1–M5 are done and merged on `main` (M5: cached mode with live changes,
   accepted in the lab with Outlook on 2026-11-16). Details per milestone are in
@@ -8,9 +8,10 @@
 - Repository cleanup merged on 2026-11-16: legacy components outside the new
   direction were removed; they remain at tag `legacy-2026-11`
   ([design](../docs/superpowers/specs/2026-11-16-repo-cleanup-design.md)).
-- Next: M6, calendar and contacts stored in SOGo over CalDAV/CardDAV, free/busy
-  and meeting requests (see the roadmap). The read-only calendar plan in
-  `docs/plans/2026-10-30-mapistore-dav-calendar-readonly.md` is its first slice.
+- M6 slice 1 (Outlook contacts in SOGo over CardDAV) is on branch `m6-contacts`, deployed on
+  the lab and accepted on 2026-11-18 except one open case (offline delete of a contact edited
+  elsewhere); see [MODERNIZATION.md](MODERNIZATION.md#m6-slice-1-outlook-contacts-in-sogo-over-carddav-2026-11-18).
+  Next: that open case, then the calendar slice over CalDAV, free/busy and meeting requests.
 - Open findings: ghost OpenFolder requests for fids 0xa517…/0xa917… seen on
   2026-11-16 (not stored anywhere on the server, not reproduced since); StageB
   is indexed twice (0x0717a1 and 0x0717a2); a folder deleted with `doveadm

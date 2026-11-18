@@ -589,6 +589,53 @@ Limits:
 - One watcher per user on the C worker thread; the cost per change is one folder property read
   per open deep hierarchy table.
 
+## M6 slice 1: Outlook contacts in SOGo over CardDAV (2026-11-18)
+
+Branch `m6-contacts` (spec `docs/superpowers/specs/2026-11-17-m6-contacts-carddav-design.md`, plan
+`docs/superpowers/plans/2026-11-17-m6-contacts-carddav.md`). Lab acceptance on 2026-11-18 with
+Outlook 16.0.19127 (classic Microsoft 365, cached mode) on the TSplus test host, account `teste@`:
+
+| Test | Result |
+| --- | --- |
+| 1 Existing contacts, photo, list and books appear; books created on either side appear on the other | Pass |
+| 1b A webmail list expands to its members in a new mail; a group made in Outlook is a VLIST in SOGo | Pass |
+| 2 Create, edit and delete in Outlook reach SOGo (delete: Outlook's refused move to Deleted Items falls back to copy + delete) | Pass |
+| 3 Create, edit and delete in webmail reach an open Outlook in about a minute | Pass |
+| 4 A phone-only field (`X-` line, pager number) survives an Outlook edit | Pass |
+| 5 Offline: different fields on both sides are both kept; the same field: the later edit wins, the other value is a NOTE line, and the merged card reaches the Outlook that uploaded | Pass |
+| 5 Offline delete in Outlook + webmail edit | Partly: the contact survives in SOGo (and every other client), but the Outlook that deleted it keeps only its copy in Deleted Items |
+| 6 SOGo stopped: mail keeps working; a contact created meanwhile stays in Outlook and is uploaded on the folder's next sync | Pass |
+| 7 TOTP enabled: DAV accepts the plain password (webmail asks for the code) | Pass (DAV bypasses the second factor, SOGo's behaviour) |
+
+The password never appears in the journal. Fixed during the acceptance (all with tests):
+
+- the backend sends a User-Agent: SOGo 5.12 leaves lists and extra books out of listings
+  for a client without one (`0e32dcca`);
+- fingerprints were kept in memory only (the indexing URL was read from the wrong field), so
+  merge bases were lost on every restart (`3c021bc3`);
+- a backend without `create_root_folder` hid the ones loaded after it, so folders Outlook
+  creates failed once the dav backend was installed (`2eedba61`);
+- a store that is down answers uploads with a network error, so Outlook retries instead of
+  filing the item under Local Failures (`9ca72839`);
+- contacts carry what Outlook's contacts address book needs (address-book provider
+  properties, original display names and entry IDs, subject) (`148bcae3`);
+- an offline edit Outlook uploads by reopening the contact (no PredecessorChangeList) merges
+  from the version Outlook had been given, not the one current at the reopen (`2e5e5fe3`);
+- the merged card is a change after Outlook's own, so it reaches that Outlook (`1ca463c8`),
+  and a session's first CardDAV poll runs at Connect, so a change made while the session
+  starts is notified (`b84e9af3`).
+
+Open:
+
+- offline delete in Outlook of a contact edited elsewhere: the contact stays in SOGo, but that
+  Outlook does not show it again in Contacts (it never sends the delete after its refused move);
+- delete is per user, not per client: a PC offline that deletes version 1 after another PC was
+  given version 2 deletes version 2;
+- a contact created while SOGo is down is uploaded on the folder's next sync, not when SOGo
+  returns;
+- the member FN Outlook writes is `Name (address)`; the indexing still allocates a second fid for
+  some folders (also seen for IMAP folders before M6).
+
 ## Status on 2026-10-28
 
 The complete default native build and selected Python components now build/run with modern
