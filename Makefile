@@ -161,7 +161,8 @@ LIBMAPI_SO_VERSION = 0
 
 libmapi:	idl					\
 		libmapi/version.h			\
-		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)
+		libmapi.$(SHLIBEXT).$(PACKAGE_VERSION)	\
+		libmapi.$(SHLIBEXT).$(LIBMAPI_SO_VERSION)
 
 libmapi-install:	libmapi			\
 			libmapi-installpc	\
