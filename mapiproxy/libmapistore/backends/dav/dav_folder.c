@@ -1305,8 +1305,21 @@ static enum mapistore_error folder_properties(struct dav_folder *f, TALLOC_CTX *
 			}
 			break;
 		case PidTagContentUnreadCount:
+		case PidTagDeletedCountTotal:
 			set(d, dav_long(mem_ctx, 0));
 			break;
+		/* Columns of Outlook's deep hierarchy table: a row without them is a change Outlook does not act on
+		   (emsmdb fills them for provisioned folders, so personal has its own). */
+		case PidTagFolderFlags:
+			set(d, dav_long(mem_ctx, FolderFlags_IPM | FolderFlags_Normal));
+			break;
+		case PidTagHierRev: {
+			/* a book has no subfolders: one time per process, kept apart from the folder's own change */
+			char *key = talloc_asprintf(mem_ctx, "%s#hierarchy", ctx->uri);
+
+			if (key) set(d, dav_change_value(mem_ctx, ctx, key, "books are flat", PidTagLastModificationTime));
+			break;
+		}
 		case PidTagSubfolders: {
 			struct dav_folder **children;
 			uint32_t n = 0;

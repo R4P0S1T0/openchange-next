@@ -643,13 +643,15 @@ Fixed on 2026-11-23, reproducing the open case in the lab (`807cd4cd`, `80f75b3f
   cutting the URI to `dav://contacts/`), so Outlook's sync of them failed on every session
   (0x8004010F in Sync Issues) and their contacts never reached it. emsmdb now asks the backend
   for the parent when the URI does not give one, and maps it to the folder Outlook knows.
+- a change in an extra book reached Outlook only when a session started: the poll notified the
+  book's row, but the row lacked PidTagHierRev, PidTagFolderFlags and PidTagDeletedCountTotal
+  (emsmdb fills them for provisioned folders only), and Outlook ignored it. The dav backend now
+  gives them; a contact created in webmail in an extra book reaches an open Outlook live.
 
 Open:
 
 - an online delete (ImportDeletes, no PredecessorChangeList) still names the version Outlook
   was last given; per client, a PC that was given version 2 and deletes it deletes version 2;
-- a change in an extra book (subfolder of Contacts) reaches Outlook when its session starts, not
-  live: the poll notifies the book's row, but Outlook does not resync it (it does for Contacts);
 - a server change that only this server knows of (a contact given a new ID) reaches other
   sessions of the same user open at the time only after they end;
 - a contact created while SOGo is down is uploaded on the folder's next sync, not when SOGo
