@@ -35,6 +35,36 @@ static struct dav_fpstore *fpstore;
 static int sync_window = 10;
 static unsigned generation;
 
+/* Changes made here that the server does not show (a card given a new ID): counted per user and book, and
+   folded into the book's state, so the folder's change number moves and every session's poll reports it. */
+struct local_mark {
+	struct local_mark	*prev, *next;
+	char			*key;	/* user, then book URI */
+	unsigned		n;
+};
+static struct local_mark *local_marks;
+
+static struct local_mark *local_find(const char *user, const char *uri, bool add)
+{
+	struct local_mark	*m;
+	char			*key = talloc_asprintf(NULL, "%s\n%s", user, uri);
+
+	for (m = local_marks; key && m && strcmp(m->key, key) != 0; m = m->next);
+	if (!m && key && add && (m = talloc_zero(NULL, struct local_mark))) {
+		m->key = talloc_steal(m, key);
+		key = NULL;
+		DLIST_ADD(local_marks, m);
+	}
+	talloc_free(key);
+	return m;
+}
+
+static unsigned local_changes(const char *user, const char *uri)
+{
+	struct local_mark *m = local_find(user, uri, false);
+	return m ? m->n : 0;
+}
+
 void dav_backend_set_sync_window(int seconds)
 {
 	sync_window = seconds;
@@ -929,17 +959,47 @@ static enum mapistore_error delete_folder(void *folder)
 	return ret == MAPISTORE_ERR_NOT_FOUND ? MAPISTORE_SUCCESS : ret;
 }
 
-/* Outlook deletes the version it was last shown (If-Match): a card changed on another client since is
-   kept, and its newer version reaches Outlook again on the next sync (nothing lost wins over delete). */
-static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
+/* Outlook dropped mid, but the card changed elsewhere since: it stays, under a new ID. Outlook never shows
+   again an ID it deleted, whatever its change number, so the card comes back as a new one: the old ID is
+   reported deleted, and the version kept takes a change number Outlook has not seen.
+   shortcut: another session open on the same book keeps the old ID until it ends; fine for one PC per user. */
+static enum mapistore_error item_reissue(struct dav_context *ctx, TALLOC_CTX *tmp, const char *norm, uint64_t mid)
 {
-	struct dav_folder	*f = folder;
+	struct indexing_context	*ictx = ctx->ictx;
+	struct dav_item		*it;
+	struct local_mark	*m;
+	char			*uri = dav_item_uri(tmp, ctx, norm);
+	uint64_t		nmid;
+	enum mapistore_error	ret;
+
+	if (!uri) return MAPISTORE_ERR_NO_MEMORY;
+	ret = dav_context_resync(ctx);
+	if (ret != MAPISTORE_SUCCESS) return ret;
+	if (!(it = item_find(ctx, norm, NULL))) return MAPISTORE_SUCCESS;	/* gone meanwhile */
+	if (!ictx->del_fmid || (ret = ictx->del_fmid(ictx, ctx->username, mid, MAPISTORE_PERMANENT_DELETE)) != MAPISTORE_SUCCESS ||
+	    (ret = fmid_for_uri(ctx, uri, &nmid)) != MAPISTORE_SUCCESS) {
+		OC_DEBUG(1, "DAV backend: %s not given a new ID (%s)\n", norm, mapistore_errstr(ret));
+		return ret ? ret : MAPISTORE_ERR_NOT_IMPLEMENTED;
+	}
+	it->mid = nmid;
+	if (!deleted_add(ctx, mid)) return MAPISTORE_ERR_NO_MEMORY;
+	if ((m = local_find(ctx->username, ctx->uri, true))) m->n++;
+	/* the same URI and version would keep the change number Outlook already took */
+	dav_change_value(tmp, ctx, uri, talloc_asprintf(tmp, "%s reissued", it->etag), PidTagChangeNumber);
+	return MAPISTORE_SUCCESS;
+}
+
+/* Outlook drops the version it had: the one its move's PCL names (an empty PCL names none), else the one it
+   was last shown. A card changed on another client since is kept (If-Match) and comes back to Outlook
+   (item_reissue): nothing lost wins over delete. */
+static enum mapistore_error remove_card(struct dav_folder *f, uint64_t mid, const struct Binary_r *pcl)
+{
 	struct dav_context	*ctx;
 	struct dav_item		*it;
 	struct dav_http		*h;
 	TALLOC_CTX		*tmp;
 	uint64_t		fp[DAV_F_COUNT];
-	char			*etag = NULL, *norm, *uri;
+	char			*etag = NULL, *norm;
 	enum mapistore_error	ret;
 
 	if (!f || f->type != DAV_OBJ_FOLDER) {
@@ -957,18 +1017,17 @@ static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t f
 		talloc_free(tmp);
 		return MAPISTORE_ERR_NO_MEMORY;
 	}
-	if (dav_fp_get(ctx->fp, tmp, ctx->username, norm, fp, &etag) != MAPISTORE_SUCCESS) {
+	if (pcl) {
+		if (dav_fp_version_get(ctx->fp, tmp, ctx->username, norm, pcl, fp, &etag) != MAPISTORE_SUCCESS) etag = NULL;
+	} else if (dav_fp_get(ctx->fp, tmp, ctx->username, norm, fp, &etag) != MAPISTORE_SUCCESS) {
 		etag = talloc_strdup(tmp, it->etag);
 	}
-	h = dav_context_http(ctx, tmp);
-	ret = h ? dav_delete(h, it->href, etag) : MAPISTORE_ERR_CONN_REFUSED;
+	h = etag ? dav_context_http(ctx, tmp) : NULL;
+	/* no etag: a version we never gave Outlook, so the card is kept */
+	ret = !etag ? MAPISTORE_ERR_CONFLICT : h ? dav_delete(h, it->href, etag) : MAPISTORE_ERR_CONN_REFUSED;
 	if (ret == MAPISTORE_ERR_CONFLICT) {
 		OC_DEBUG(3, "DAV backend: %s changed elsewhere; Outlook's delete dropped\n", norm);
-		/* a fresh change number on the next read, whatever Outlook was shown */
-		uri = dav_item_uri(tmp, ctx, norm);
-		dav_change_value(tmp, ctx, uri, talloc_asprintf(tmp, "%s kept", etag), PidTagChangeNumber);
-		dav_context_resync(ctx);
-		ret = MAPISTORE_SUCCESS;
+		ret = item_reissue(ctx, tmp, norm, mid);
 	} else if (ret == MAPISTORE_SUCCESS || ret == MAPISTORE_ERR_NOT_FOUND) {
 		/* a tombstone: every other client of the user learns the deletion too */
 		if (dav_fp_tombstone(ctx->fp, ctx->username, norm) != MAPISTORE_SUCCESS) {
@@ -978,6 +1037,35 @@ static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t f
 		ret = MAPISTORE_SUCCESS;
 	}
 	talloc_free(tmp);
+	return ret;
+}
+
+static enum mapistore_error delete_message(void *folder, uint64_t mid, uint8_t flags)
+{
+	return remove_card(folder, mid, NULL);
+}
+
+/* Messages Outlook moved to another store's folder leave this one (no target: that store refused them, so
+   Outlook copies them there itself); each move's PCL names the version Outlook had. Moves within this store
+   and copies are not handled. */
+static enum mapistore_error move_copy_messages(void *target_folder, void *source_folder, TALLOC_CTX *mem_ctx,
+					       uint32_t count, uint64_t *src_mids, uint64_t *t_mids,
+					       struct Binary_r **change_keys, struct Binary_r **predecessors,
+					       uint8_t want_copy)
+{
+	static const struct Binary_r	none;
+	enum mapistore_error		ret = MAPISTORE_SUCCESS;
+	uint32_t			i;
+
+	if (target_folder || want_copy || !source_folder || ((struct dav_folder *) source_folder)->type != DAV_OBJ_FOLDER) {
+		return MAPISTORE_ERR_DENIED;
+	}
+	if (count && !src_mids) {
+		return MAPISTORE_ERR_INVALID_PARAMETER;
+	}
+	for (i = 0; ret == MAPISTORE_SUCCESS && i < count; i++) {
+		ret = remove_card(source_folder, src_mids[i], predecessors && predecessors[i] ? predecessors[i] : &none);
+	}
 	return ret;
 }
 
@@ -1172,8 +1260,8 @@ static char *book_displayname(struct dav_context *ctx)
 /* The folder's state for ICS: the sync token, or every ETag when the server keeps no token. */
 static char *folder_state(TALLOC_CTX *mem_ctx, struct dav_context *ctx)
 {
-	char	*s = talloc_asprintf(mem_ctx, "%zu %s %s", ctx->nitems, ctx->token ? ctx->token : "",
-				     book_displayname(ctx) ? ctx->displayname : "");
+	char	*s = talloc_asprintf(mem_ctx, "%zu %s %s %u", ctx->nitems, ctx->token ? ctx->token : "",
+				     book_displayname(ctx) ? ctx->displayname : "", local_changes(ctx->username, ctx->uri));
 	size_t	i;
 
 	for (i = 0; s && !ctx->token && i < ctx->nitems; i++) {
@@ -1516,6 +1604,10 @@ static enum mapistore_error dav_poll_changes(struct mapistore_connection_info *c
 		for (j = 0; ret == MAPISTORE_SUCCESS && j < p->nbooks && strcmp(p->books[j].norm, now[i].norm) != 0; j++);
 		old = ret == MAPISTORE_SUCCESS && j < p->nbooks ? &p->books[j] : NULL;
 		now[i].state = book_state(now, h, &books[i]);
+		if (now[i].state) {
+			now[i].state = talloc_asprintf_append_buffer(now[i].state, " local %u",
+								      local_changes(conn_info->username, now[i].uri));
+		}
 		/* unreadable now: as last seen, so nothing is reported for it */
 		if (!now[i].state && old && old->state) now[i].state = talloc_strdup(now, old->state);
 		if (!p->primed || ret != MAPISTORE_SUCCESS) continue;
@@ -1564,6 +1656,7 @@ void dav_folder_fill(struct mapistore_backend *backend)
 	backend->folder.create_folder = create_folder;
 	backend->folder.delete = delete_folder;
 	backend->folder.delete_message = delete_message;
+	backend->folder.move_copy_messages = move_copy_messages;
 	backend->folder.open_table = open_table;
 	backend->folder.get_child_count = get_child_count;
 	backend->folder.get_deleted_fmids = get_deleted_fmids;

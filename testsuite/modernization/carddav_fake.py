@@ -12,6 +12,7 @@ set replaces the lines with LINE's name and parameters, or adds LINE),
 /_ctl/invalidate_token (the next sync with a token gets 403 valid-sync-token; real SOGo
 answers 207 with the full state instead).
 A PUT with If-None-Match: * on an existing card answers 412 (RFC 4918); real SOGo ignores it and overwrites (204).
+A DELETE ignores If-Match and deletes (204), as real SOGo does (seen 2026-11-23): the client checks the ETag.
 """
 import os
 import re
@@ -179,10 +180,7 @@ class H(BaseHTTPRequestHandler):
         if m == "DELETE":
             if not item:
                 return self.send(404)
-            im = self.headers.get("If-Match")
-            if im and im != item[1]:
-                return self.send(412)
-            del book["items"][name]
+            del book["items"][name]	# as SOGo 5.12: If-Match is not checked on DELETE
             bump(book, name, True)
             return self.send(204)
         if m == "PUT":
