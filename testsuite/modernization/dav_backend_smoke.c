@@ -2137,6 +2137,17 @@ static int test_books_are_subfolders(void)
     CHECK((g = book("work")) != NULL && g->fid == fid_work);
     CHECK(B.properties.get_properties(g, root, 3, cols, sd3) == MAPISTORE_SUCCESS && sd3[2].error == 0
           && *(uint64_t *)sd3[2].data == f->fid);
+    /* the columns of Outlook's deep hierarchy table: a row missing them is a change Outlook ignores */
+    {
+        enum MAPITAGS row[] = { PidTagFolderFlags, PidTagDeletedCountTotal, PidTagHierRev };
+        struct mapistore_property_data r1[3], r2[3];
+        CHECK(B.properties.get_properties(g, root, 3, row, r1) == MAPISTORE_SUCCESS && !r1[0].error && !r1[1].error && !r1[2].error);
+        CHECK(*(uint32_t *)r1[0].data == (FolderFlags_IPM | FolderFlags_Normal) && *(uint32_t *)r1[1].data == 0);
+        CHECK(dav_put(h, root, "/dav/u/Contacts/work/w0.vcf", VC("w0"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
+        CHECK(B.properties.get_properties(g, root, 3, row, r2) == MAPISTORE_SUCCESS && !r2[2].error);
+        CHECK(!memcmp(r1[2].data, r2[2].data, sizeof (struct FILETIME)));	/* no subfolders: it does not move */
+        CHECK(dav_delete(h, "/dav/u/Contacts/work/w0.vcf", NULL) == MAPISTORE_SUCCESS);
+    }
     /* a new session: the same ID */
     CHECK((f = book("personal")) != NULL);
     CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);
