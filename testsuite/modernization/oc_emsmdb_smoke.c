@@ -1408,10 +1408,12 @@ static int test_notify_new_top_level_mailbox(void)
 static const char *poll_contents_uri, *poll_parent_uri;
 static enum mapistore_change_kind poll_parent_kind = MAPISTORE_CHANGE_FOLDER_ADDED;
 static char poll_user[64];
+static int poll_calls;
 static enum mapistore_error fake_poll(struct mapistore_connection_info *ci, TALLOC_CTX *mem,
                                       struct mapistore_change **list, size_t *n)
 {
     struct mapistore_change *c = talloc_zero_array(mem, struct mapistore_change, 3);
+    poll_calls++;
     snprintf(poll_user, sizeof poll_user, "%s", ci && ci->username ? ci->username : "");
     *list = c;
     *n = 0;
@@ -1444,8 +1446,11 @@ static int test_ffi_poll_changes(void)
     CHECK(oc_emsmdb_poll_changes(NULL, &pending) == MAPI_E_INVALID_PARAMETER);
     CHECK(connect_as("alice@example.invalid", ORG_OU "alice-0001", &session, &name, &prefix) == MAPI_E_SUCCESS);
     CHECK(oc_emsmdb_poll_changes(session, NULL) == MAPI_E_INVALID_PARAMETER);
-    /* no deep hierarchy table: nobody to tell */
-    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
+    /* no deep hierarchy table: nobody to tell; yet the first poll takes the starting state, or a change made
+       before Outlook registers its table would become the starting state and never be reported */
+    poll_calls = 0;
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0 && poll_calls == 1);
+    CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0 && poll_calls == 1);
     CHECK(open_hierarchy(session, TableFlags_Depth | TableFlags_SuppressNotifications) != 0);
     CHECK(oc_emsmdb_poll_changes(session, &pending) == MAPI_E_SUCCESS && pending == 0);
     CHECK(strcmp(poll_user, "alice@example.invalid") == 0);

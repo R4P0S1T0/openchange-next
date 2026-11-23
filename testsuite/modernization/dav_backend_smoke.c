@@ -601,6 +601,24 @@ static int test_map_list_members(void)
     return 0;
 }
 
+/* A list with no members (Outlook saves one): no member properties at all, as Exchange gives; an empty
+   multivalued property makes Outlook fail the whole folder's sync (E_INVALIDARG). */
+static int test_map_list_empty(void)
+{
+    static const char in[] = "BEGIN:VLIST\r\nUID:e\r\nVERSION:1.0\r\nFN:Vazia\r\nEND:VLIST\r\n";
+    struct dav_card *c = dav_card_parse(root, in, strlen(in));
+    int two = 2;
+    struct dav_member_resolver r = { &two, fake_eid, fake_uid };
+    void *v;
+
+    CHECK(c);
+    CHECK(!strcmp(str_prop(c, &r, PidTagMessageClass), "IPM.DistList"));
+    CHECK(dav_card_get_prop(root, c, &fake_tags, &r, fake_tags.dl_members, &v) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(dav_card_get_prop(root, c, &fake_tags, &r, fake_tags.dl_one_off_members, &v) == MAPISTORE_ERR_NOT_FOUND);
+    CHECK(dav_card_get_prop(root, c, &fake_tags, &r, fake_tags.dl_checksum, &v) == MAPISTORE_SUCCESS && *(uint32_t *)v == 0);
+    return 0;
+}
+
 static int test_photo_cap(void)
 {
     struct SPropValue p[2];
@@ -973,7 +991,19 @@ static enum mapistore_error fi_allocate(struct indexing_context *c, const char *
     *fmid = fidx.next++;
     return MAPISTORE_SUCCESS;
 }
-static struct indexing_context ictx = { .add_fmid = fi_add_fmid, .update_fmid = fi_update_fmid, .list_folders = fi_list_folders, .get_uri = fi_get_uri, .get_fmid = fi_get_fmid,
+static enum mapistore_error fi_del_fmid(struct indexing_context *c, const char *u, uint64_t fmid, uint8_t flags)
+{
+    size_t i;
+    for (i = 0; i < fidx.n; i++) {
+        if (fidx.fmid[i] == fmid) {
+            fidx.fmid[i] = fidx.fmid[--fidx.n];
+            fidx.uri[i] = fidx.uri[fidx.n];
+            return MAPISTORE_SUCCESS;
+        }
+    }
+    return MAPISTORE_SUCCESS;
+}
+static struct indexing_context ictx = { .add_fmid = fi_add_fmid, .del_fmid = fi_del_fmid, .update_fmid = fi_update_fmid, .list_folders = fi_list_folders, .get_uri = fi_get_uri, .get_fmid = fi_get_fmid,
                                         .allocate_fmid = fi_allocate };
 
 /* Named properties: the mapped ID of a PSETID_Address LID is the LID itself. */
@@ -1854,7 +1884,7 @@ static int test_delete_after_remote_edit_survives(void)
 {
     struct dav_folder *f, *f2;
     struct UI8Array_r *ids;
-    uint64_t mid, mid_g, cn, cn2, dcn, fp[DAV_F_COUNT];
+    uint64_t mid, mid2, mid_g, cn, cn2, dcn, fp[DAV_F_COUNT];
     char *etag;
     void *msg;
 
@@ -1865,13 +1895,15 @@ static int test_delete_after_remote_edit_survives(void)
     CHECK(B.folder.open_message(f, root, mid, false, &msg) == MAPISTORE_SUCCESS);
     CHECK(B.folder.open_message(f, root, mid_g, false, &msg) == MAPISTORE_SUCCESS);
     CHECK(!ctl("edit?path=" WBOOK "ds.vcf&set=NOTE:editado%20no%20celular"));
-    /* Outlook deletes the version it saw: dropped, the newer one comes back */
+    /* Outlook deletes the version it saw: dropped, the newer one comes back under a new ID (Outlook never
+       shows again an ID it deleted, whatever its change number) */
     CHECK(B.folder.delete_message(f, mid, 0) == MAPISTORE_SUCCESS);
     CHECK(stored("ds.vcf") && strstr(stored("ds.vcf"), "NOTE:editado no celular"));
-    if (row_of(f, "ds", &cn2, &cn2, NULL)) return 1;
-    CHECK(cn2 != cn);
+    if (row_of(f, "ds", &mid2, &cn2, NULL)) return 1;
+    CHECK(mid2 && mid2 != mid && cn2 != cn);
     CHECK(dav_fp_get(f->ctx->fp, root, "u", WBOOK "ds.vcf", fp, &etag) == MAPISTORE_SUCCESS);
-    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && !has_id(ids, mid));
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS && has_id(ids, mid));
+    CHECK(!has_id(ids, mid2));
     /* unchanged elsewhere: deleted; its row a tombstone, so a later session of the user (another PC) learns it */
     CHECK(B.folder.delete_message(f, mid_g, 0) == MAPISTORE_SUCCESS);
     CHECK(stored("dg.vcf") == NULL);
@@ -1888,6 +1920,77 @@ static int test_delete_after_remote_edit_survives(void)
     CHECK(B.folder.open_message(f, root, mid, true, &msg) == MAPISTORE_SUCCESS);
     CHECK(B.folder.delete_message(f, mid, 0) == MAPISTORE_SUCCESS);
     CHECK(stored("do.vcf") == NULL);
+    backend_down();
+    return 0;
+}
+
+static int poll_has(struct mapistore_connection_info *s, size_t want, const char *uri, int kind);
+
+/* The change key Outlook holds for an opened message, as the PCL it sends with a move. */
+static struct Binary_r *pcl_of(void *msg)
+{
+    enum MAPITAGS kt[] = { PidTagChangeKey };
+    struct mapistore_property_data d[1];
+    struct Binary_r *ck, *pcl;
+    if (B.properties.get_properties(msg, root, 1, kt, d) != MAPISTORE_SUCCESS || d[0].error) return NULL;
+    ck = d[0].data;
+    if (!(pcl = talloc_zero(root, struct Binary_r)) || !(pcl->lpb = talloc_array(pcl, uint8_t, ck->cb + 1))) return NULL;
+    pcl->cb = ck->cb + 1;
+    pcl->lpb[0] = ck->cb;
+    memcpy(pcl->lpb + 1, ck->lpb, ck->cb);
+    return pcl;
+}
+
+/* What Outlook deleted offline it moves, once back, to Deleted Items: another store, which refuses it, so emsmdb
+   tells this one the messages left (no target). The move's PCL names the version Outlook deleted: unchanged since,
+   the card goes; edited elsewhere since, it stays, under a new ID, since Outlook already took the edit and dropped
+   it for its pending delete. */
+static int test_move_out_after_offline_delete(void)
+{
+    struct dav_folder *f, *f2;
+    struct UI8Array_r *ids;
+    struct Binary_r *pl, *pk;
+    uint64_t ml, mk, mk2, cn, cnk, dcn, dst = 0x9999;
+    struct mapistore_connection_info *s = talloc_zero(root, struct mapistore_connection_info);
+    void *msg;
+
+    CHECK(!backend_up());
+    if (put("ml.vcf", VC("ml")) || put("mk.vcf", VC("mk"))) return 1;
+    CHECK((f = book("personal")) != NULL);
+    if (row_of(f, "ml", &ml, &cn, NULL) || row_of(f, "mk", &mk, &cn, NULL)) return 1;
+    CHECK(B.folder.open_message(f, root, ml, false, &msg) == MAPISTORE_SUCCESS && (pl = pcl_of(msg)));
+    CHECK(B.folder.open_message(f, root, mk, false, &msg) == MAPISTORE_SUCCESS && (pk = pcl_of(msg)));
+    CHECK(!ctl("edit?path=" WBOOK "mk.vcf&set=NOTE:editado%20no%20webmail"));	/* while Outlook is offline */
+    /* back online, Outlook downloads first: it is given the edit */
+    if (row_of(f, "mk", &mk2, &cnk, NULL)) return 1;
+    CHECK(mk2 == mk && B.folder.open_message(f, root, mk, false, &msg) == MAPISTORE_SUCCESS);
+    CHECK(B.folder.move_copy_messages(NULL, f, root, 1, &ml, &dst, NULL, &pl, false) == MAPISTORE_SUCCESS);
+    CHECK(stored("ml.vcf") == NULL);
+    s->username = talloc_strdup(s, "u");
+    if (poll_has(s, 0, NULL, 0)) return 1;
+    CHECK(B.folder.move_copy_messages(NULL, f, root, 1, &mk, &dst, NULL, &pk, false) == MAPISTORE_SUCCESS);
+    CHECK(stored("mk.vcf") && strstr(stored("mk.vcf"), "NOTE:editado no webmail"));
+    if (row_of(f, "mk", &mk2, &cn, NULL)) return 1;
+    CHECK(mk2 && mk2 != mk && cn != cnk);
+    CHECK(B.folder.get_deleted_fmids(f, root, MAPISTORE_MESSAGE_TABLE, 0, &ids, &dcn) == MAPISTORE_SUCCESS);
+    CHECK(has_id(ids, mk) && has_id(ids, ml) && !has_id(ids, mk2));
+    /* nothing changed on the server, yet the card is new to Outlook: the session is told to sync the book */
+    if (poll_has(s, 1, "dav://contacts/personal/", MAPISTORE_CHANGE_CONTENTS) || poll_has(s, 0, NULL, 0)) return 1;
+    /* the new ID holds in the next session; a message already gone is no error */
+    CHECK((f2 = book("personal")) != NULL);
+    if (row_of(f2, "mk", &mk, &cn, NULL)) return 1;
+    CHECK(mk == mk2);
+    CHECK(B.folder.move_copy_messages(NULL, f2, root, 1, &ml, &dst, NULL, &pl, false) == MAPISTORE_SUCCESS);
+    /* moves within the store and copies are not handled here */
+    CHECK(B.folder.move_copy_messages(f2, f, root, 1, &mk, &dst, NULL, NULL, false) == MAPISTORE_ERR_DENIED);
+    CHECK(B.folder.move_copy_messages(NULL, f, root, 1, &mk, &dst, NULL, NULL, true) == MAPISTORE_ERR_DENIED);
+    CHECK(stored("mk.vcf") != NULL);
+    /* a move naming no version we gave Outlook keeps the card */
+    if (row_of(f2, "mk", &mk, &cn, NULL)) return 1;
+    CHECK(B.folder.move_copy_messages(NULL, f2, root, 1, &mk, &dst, NULL, NULL, false) == MAPISTORE_SUCCESS);
+    CHECK(stored("mk.vcf") != NULL);
+    if (row_of(f2, "mk", &mk2, &cn, NULL)) return 1;
+    CHECK(mk2 && mk2 != mk);
     backend_down();
     return 0;
 }
@@ -2005,7 +2108,7 @@ static int test_books_are_subfolders(void)
     struct dav_http *h;
     enum MAPITAGS cols[] = { PidTagFolderId, PidTagDisplayName, PidTagParentFolderId, PidTagContainerClass };
     enum MAPITAGS sub[] = { PidTagSubfolders };
-    struct mapistore_property_data *d, sd[1];
+    struct mapistore_property_data *d, sd[1], sd3[3];
     struct UI8Array_r *ids;
     uint64_t fid_work, dcn;
     uint32_t n;
@@ -2030,6 +2133,10 @@ static int test_books_are_subfolders(void)
     CHECK(dav_put(h, root, "/dav/u/Contacts/work/w1.vcf", VC("w1"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
     CHECK(B.folder.get_child_count(g, MAPISTORE_MESSAGE_TABLE, &n) == MAPISTORE_SUCCESS && n == 1);
     CHECK(B.folder.get_child_count(g, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 0);
+    /* opened on its own (emsmdb opening it by ID from the store): personal is still its parent */
+    CHECK((g = book("work")) != NULL && g->fid == fid_work);
+    CHECK(B.properties.get_properties(g, root, 3, cols, sd3) == MAPISTORE_SUCCESS && sd3[2].error == 0
+          && *(uint64_t *)sd3[2].data == f->fid);
     /* a new session: the same ID */
     CHECK((f = book("personal")) != NULL);
     CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);
@@ -2223,7 +2330,7 @@ int main(int argc, char **argv)
         || test_vcard_roundtrip_untouched() || test_vcard_folding_utf8() || test_vcard_escape()
         || test_vcard_set_keeps_unknown() || test_vlist_parse()
         || test_vcard_trailing_data_rejected() || test_map_contact_full() || test_map_props_to_fields_roundtrip()
-        || test_field_set_no_line_injection() || test_map_list_members() || test_photo_cap()
+        || test_field_set_no_line_injection() || test_map_list_members() || test_map_list_empty() || test_photo_cap()
         || test_http_list_books() || test_http_sync_incremental() || test_http_sync_invalid_token_full()
         || test_http_put_if_match_412() || test_http_put_if_none_match_exists() || test_http_sogo_fixtures() || test_href_norm()
         || test_http_hrefs_under_book() || test_http_401_denied()
@@ -2236,6 +2343,7 @@ int main(int argc, char **argv)
         || test_merge_keeps_unknown_lines() || test_fp_keyed() || test_save_new_contact_put()
         || test_save_concurrent_edit_merged() || test_save_412_three_times_conflict()
         || test_save_after_remote_delete_recreates() || test_delete_after_remote_edit_survives()
+        || test_move_out_after_offline_delete()
         || test_folder_create_rename_delete() || test_delete_personal_denied() || test_stale_client_never_reverts()
         || test_books_are_subfolders() || test_second_save_same_handle() || test_offline_save_reopened_without_pcl()
         || test_poll_reports_contents_and_books() || test_sync_throttled_until_poll()) { fake_stop(); return 1; }

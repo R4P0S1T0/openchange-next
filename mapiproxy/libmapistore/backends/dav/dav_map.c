@@ -717,6 +717,9 @@ _PUBLIC_ enum mapistore_error dav_card_get_prop(TALLOC_CTX *mem, const struct da
 			}
 			if (!cat) return MAPISTORE_ERR_NO_MEMORY;
 			v = ulong_value(mem, calculateCRC(cat, 0, total));
+		} else if (!m->cValues) {
+			/* no members: no property, as Exchange; an empty multivalue fails Outlook's whole folder sync */
+			return MAPISTORE_ERR_NOT_FOUND;
 		} else {
 			v = tg == t->dl_members ? m : o;
 		}

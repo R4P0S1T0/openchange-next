@@ -603,7 +603,7 @@ Outlook 16.0.19127 (classic Microsoft 365, cached mode) on the TSplus test host,
 | 3 Create, edit and delete in webmail reach an open Outlook in about a minute | Pass |
 | 4 A phone-only field (`X-` line, pager number) survives an Outlook edit | Pass |
 | 5 Offline: different fields on both sides are both kept; the same field: the later edit wins, the other value is a NOTE line, and the merged card reaches the Outlook that uploaded | Pass |
-| 5 Offline delete in Outlook + webmail edit | Partly: the contact survives in SOGo (and every other client), but the Outlook that deleted it keeps only its copy in Deleted Items |
+| 5 Offline delete in Outlook (+ webmail edit) | Pass on 2026-11-23: an unedited contact goes from SOGo; one edited elsewhere stays in SOGo and comes back to that Outlook in about a minute (its copy also in Deleted Items) |
 | 6 SOGo stopped: mail keeps working; a contact created meanwhile stays in Outlook and is uploaded on the folder's next sync | Pass |
 | 7 TOTP enabled: DAV accepts the plain password (webmail asks for the code) | Pass (DAV bypasses the second factor, SOGo's behaviour) |
 
@@ -625,12 +625,33 @@ The password never appears in the journal. Fixed during the acceptance (all with
   and a session's first CardDAV poll runs at Connect, so a change made while the session
   starts is notified (`b84e9af3`).
 
+Fixed on 2026-11-23, reproducing the open case in the lab (`807cd4cd`, `80f75b3f`):
+
+- an offline delete never reached SOGo: Outlook uploads it as a move to Deleted Items, the IMAP
+  store refuses it and Outlook only copies the contact. A refused move now tells the source
+  store the message left; the dav backend deletes the version the move's PredecessorChangeList
+  names, so one edited elsewhere since is kept;
+- SOGo 5.12 ignores If-Match on DELETE (204 on a stale ETag): every delete went through, edits
+  elsewhere included. The backend checks the current ETag before deleting;
+- Outlook never shows again an ID it deleted, whatever its change number: a contact kept against
+  Outlook's delete comes back under a new ID, and the poll tells the session;
+- a list with no members gave empty multivalued member properties, and Outlook failed the
+  whole Contacts sync (E_INVALIDARG): no contact reached it until the list was gone;
+- a session's first poll was skipped until Outlook registered its notification table, so a
+  contact created in that minute became the starting state and was never notified.
+- the extra books could not be opened by ID from the store (their parent was worked out by
+  cutting the URI to `dav://contacts/`), so Outlook's sync of them failed on every session
+  (0x8004010F in Sync Issues) and their contacts never reached it. emsmdb now asks the backend
+  for the parent when the URI does not give one, and maps it to the folder Outlook knows.
+
 Open:
 
-- offline delete in Outlook of a contact edited elsewhere: the contact stays in SOGo, but that
-  Outlook does not show it again in Contacts (it never sends the delete after its refused move);
-- delete is per user, not per client: a PC offline that deletes version 1 after another PC was
-  given version 2 deletes version 2;
+- an online delete (ImportDeletes, no PredecessorChangeList) still names the version Outlook
+  was last given; per client, a PC that was given version 2 and deletes it deletes version 2;
+- a change in an extra book (subfolder of Contacts) reaches Outlook when its session starts, not
+  live: the poll notifies the book's row, but Outlook does not resync it (it does for Contacts);
+- a server change that only this server knows of (a contact given a new ID) reaches other
+  sessions of the same user open at the time only after they end;
 - a contact created while SOGo is down is uploaded on the folder's next sync, not when SOGo
   returns;
 - the member FN Outlook writes is `Name (address)`; the indexing still allocates a second fid for

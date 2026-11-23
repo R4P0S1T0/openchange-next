@@ -3260,6 +3260,15 @@ _PUBLIC_ enum MAPISTATUS EcDoRpc_RopSyncImportMessageMove(TALLOC_CTX *mem_ctx,
 							  &change_key, &predecessor_change_list, false);
 		if (ret != MAPISTORE_SUCCESS) {
 			OC_DEBUG(3, "ImportMessageMove of mid 0x%"PRIx64" refused: %s\n", sourceMID, mapistore_errstr(ret));
+			/* The target's store cannot take another store's message, so Outlook copies it there itself: the
+			   message still leaves its own store, which keeps it if it changed since the version Outlook moved
+			   (the PCL). The refusal stands, so Outlook goes on with its copy. */
+			if (ret == MAPISTORE_ERR_DENIED) {
+				enum mapistore_error left = mapistore_folder_move_copy_messages(emsmdbp_ctx->mstore_ctx,
+					emsmdbp_get_contextID(source_folder_object), NULL, source_folder_object->backend_object,
+					mem_ctx, 1, &sourceMID, &destMID, &change_key, &predecessor_change_list, false);
+				OC_DEBUG(3, "mid 0x%"PRIx64" leaving its store: %s\n", sourceMID, mapistore_errstr(left));
+			}
 			mapi_repl->error_code = mapistore_error_to_mapi(ret);
 			talloc_free(source_folder_object);
 			goto end;

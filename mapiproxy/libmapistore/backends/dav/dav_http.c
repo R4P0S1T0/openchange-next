@@ -636,6 +636,17 @@ enum mapistore_error dav_delete(struct dav_http *h, const char *href, const char
 	enum mapistore_error err;
 
 	if (!header_safe(if_match)) return MAPISTORE_ERR_INVALID_PARAMETER;
+	if (if_match) {
+		/* SOGo deletes whatever If-Match says (5.12, 204 on a stale ETag): check the current one first.
+		   shortcut: an edit landing between the GET and the DELETE is lost; servers that honour If-Match close it. */
+		char *body = NULL, *etag = NULL;
+
+		err = dav_get(h, h, href, &body, &etag);
+		if (err == MAPISTORE_SUCCESS && (!etag || strcmp(etag, if_match) != 0)) err = MAPISTORE_ERR_CONFLICT;
+		talloc_free(body);
+		talloc_free(etag);
+		if (err != MAPISTORE_SUCCESS) return err;
+	}
 	im = if_match ? talloc_asprintf(h, "If-Match: %s", if_match) : NULL;
 	hdrs[0] = im;
 	err = simple(h, "DELETE", href, hdrs, NULL);
