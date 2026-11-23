@@ -61,6 +61,7 @@ struct emsmdbp_context {
 
 	/* M5 (emsmdbp_notify.c): deep hierarchy tables Outlook keeps open, and the RopNotify replies for them */
 	struct emsmdbp_notify_table		*notify_tables;
+	bool					poll_primed;	/* the backends' poll took its starting state */
 	struct emsmdbp_notify_entry		*notify_queue;
 	struct emsmdbp_hierrev			*hierrev;	/* folders whose subfolders changed in this session */
 	uint32_t				notify_room;	/* bytes the Execute in progress may still add; 0 = no bound */

@@ -443,17 +443,29 @@ _PUBLIC_ int emsmdbp_notify_poll_changes(struct emsmdbp_context *ctx)
 	uint64_t		fid;
 	int			queued = 0;
 
-	if (!ctx || !ctx->notify_tables || !ctx->username) return 0;	/* nobody to tell: no need to ask */
+	if (!ctx || !ctx->username) return 0;
+	/* Nobody to tell: no need to ask, once the first poll took the starting state. Taken later (when Outlook
+	   registers its table), a change made meanwhile would be that state and never reported. */
+	if (!ctx->notify_tables && ctx->poll_primed) return 0;
 	tmp = talloc_new(NULL);
 	if (!tmp) return 0;
 	if (mapistore_poll_changes(ctx->mstore_ctx, ctx->username, tmp, &changes, &n) != MAPISTORE_SUCCESS) n = 0;
+	ctx->poll_primed = true;
+	if (!ctx->notify_tables) n = 0;
 	for (i = 0; i < n; i++) {
-		if (emsmdbp_get_fid_from_uri(ctx, changes[i].uri, &fid) != MAPI_E_SUCCESS) continue;
-		if (changes[i].kind != MAPISTORE_CHANGE_CONTENTS) {
-			queued += emsmdbp_notify_hierarchy_changed(ctx, fid);
-		} else {
-			queued += emsmdbp_notify_folder_changed(ctx, fid, EMSMDBP_FOLDER_MODIFIED);
+		int q;
+
+		if (emsmdbp_get_fid_from_uri(ctx, changes[i].uri, &fid) != MAPI_E_SUCCESS) {
+			OC_DEBUG(3, "poll: change %d on %s, no folder ID\n", changes[i].kind, changes[i].uri);
+			continue;
 		}
+		if (changes[i].kind != MAPISTORE_CHANGE_CONTENTS) {
+			q = emsmdbp_notify_hierarchy_changed(ctx, fid);
+		} else {
+			q = emsmdbp_notify_folder_changed(ctx, fid, EMSMDBP_FOLDER_MODIFIED);
+		}
+		OC_DEBUG(3, "poll: change %d on %s (fid 0x%"PRIx64"): %d notification(s)\n", changes[i].kind, changes[i].uri, fid, q);
+		queued += q;
 	}
 	talloc_free(tmp);
 	return queued;
