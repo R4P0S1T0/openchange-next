@@ -1,6 +1,6 @@
-# Development continuity — 2026-11-18
+# Development continuity — 2026-11-23
 
-## Current state — 2026-11-18
+## Current state — 2026-11-23
 
 - M1–M5 are done and merged on `main` (M5: cached mode with live changes,
   accepted in the lab with Outlook on 2026-11-16). Details per milestone are in
@@ -9,9 +9,10 @@
   direction were removed; they remain at tag `legacy-2026-11`
   ([design](../docs/superpowers/specs/2026-11-16-repo-cleanup-design.md)).
 - M6 slice 1 (Outlook contacts in SOGo over CardDAV) is merged on `main`, deployed on the lab
-  and accepted on 2026-11-18 except one open case (offline delete of a contact edited
-  elsewhere); CI is green again (the native job had failed since 2026-11-16); see [MODERNIZATION.md](MODERNIZATION.md#m6-slice-1-outlook-contacts-in-sogo-over-carddav-2026-11-18).
-  Next: that open case, then the calendar slice over CalDAV, free/busy and meeting requests.
+  and accepted on 2026-11-18; the open case (offline delete of a contact edited elsewhere) was
+  fixed on 2026-11-23 on branch `m6-kiko`, with four more bugs it uncovered; see [MODERNIZATION.md](MODERNIZATION.md#m6-slice-1-outlook-contacts-in-sogo-over-carddav-2026-11-18).
+  Next: the extra books' parent (their sync fails by ID), then the calendar slice over CalDAV,
+  free/busy and meeting requests.
 - Open findings: ghost OpenFolder requests for fids 0xa517…/0xa917… seen on
   2026-11-16 (not stored anywhere on the server, not reproduced since); StageB
   is indexed twice (0x0717a1 and 0x0717a2); a folder deleted with `doveadm
