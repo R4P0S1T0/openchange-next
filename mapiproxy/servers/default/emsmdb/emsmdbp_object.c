@@ -637,6 +637,48 @@ static char *emsmdbp_compute_parent_uri(TALLOC_CTX *mem_ctx, char *uri)
 	return parent_uri;
 }
 
+/* A folder the backend places elsewhere than its URI says (dav: the other books, flat on the server, sit under
+   personal): the parent its root names when opened on its own. */
+static enum mapistore_error emsmdbp_backend_parent_fid(struct emsmdbp_context *emsmdbp_ctx, const char *owner,
+						       const char *uri, uint64_t fid, uint64_t *parent_fidp)
+{
+	enum MAPITAGS			tag = PidTagParentFolderId;
+	struct mapistore_property_data	data;
+	TALLOC_CTX			*tmp;
+	uint32_t			context_id;
+	void				*root;
+	enum mapistore_error		ret;
+
+	ret = mapistore_search_context_by_uri(emsmdbp_ctx->mstore_ctx, uri, &context_id, &root);
+	if (ret == MAPISTORE_SUCCESS) {
+		ret = mapistore_add_context_ref_count(emsmdbp_ctx->mstore_ctx, context_id);
+	} else {
+		ret = mapistore_add_context(emsmdbp_ctx->mstore_ctx, owner, uri, fid, &context_id, &root);
+	}
+	if (ret != MAPISTORE_SUCCESS) return MAPISTORE_ERR_NOT_FOUND;
+	tmp = talloc_new(NULL);
+	ret = tmp ? mapistore_properties_get_properties(emsmdbp_ctx->mstore_ctx, context_id, root, tmp, 1, &tag, &data)
+		  : MAPISTORE_ERR_NO_MEMORY;
+	if (ret == MAPISTORE_SUCCESS && (data.error != MAPISTORE_SUCCESS || !data.data || !*(uint64_t *) data.data)) {
+		ret = MAPISTORE_ERR_NOT_FOUND;
+	}
+	if (ret == MAPISTORE_SUCCESS) {
+		uint64_t	pfid = *(uint64_t *) data.data;
+		char		*parent_uri;
+		bool		soft_deleted;
+
+		/* the folder Outlook knows for that URI: the indexing may hold a second ID for it */
+		*parent_fidp = pfid;
+		if (mapistore_indexing_record_get_uri(emsmdbp_ctx->mstore_ctx, owner, tmp, pfid, &parent_uri, &soft_deleted) == MAPISTORE_SUCCESS &&
+		    emsmdbp_get_fid_from_uri(emsmdbp_ctx, parent_uri, &pfid) == MAPISTORE_SUCCESS) {
+			*parent_fidp = pfid;
+		}
+	}
+	talloc_free(tmp);
+	mapistore_del_context(emsmdbp_ctx->mstore_ctx, context_id);
+	return ret;
+}
+
 static enum MAPISTATUS emsmdbp_get_parent_fid(struct emsmdbp_context *emsmdbp_ctx,
 					      struct emsmdbp_object *mailbox_object,
 					      uint64_t fid, uint64_t *parent_fidp)
@@ -669,6 +711,9 @@ static enum MAPISTATUS emsmdbp_get_parent_fid(struct emsmdbp_context *emsmdbp_ct
 		}
 		else {
 			ret = MAPISTORE_ERR_NOT_FOUND;
+		}
+		if (ret != MAPISTORE_SUCCESS) {
+			ret = emsmdbp_backend_parent_fid(emsmdbp_ctx, mailbox->owner_username, uri, fid, parent_fidp);
 		}
 	}
 	retval = mapistore_error_to_mapi(ret);

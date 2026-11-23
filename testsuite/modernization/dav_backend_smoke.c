@@ -2108,7 +2108,7 @@ static int test_books_are_subfolders(void)
     struct dav_http *h;
     enum MAPITAGS cols[] = { PidTagFolderId, PidTagDisplayName, PidTagParentFolderId, PidTagContainerClass };
     enum MAPITAGS sub[] = { PidTagSubfolders };
-    struct mapistore_property_data *d, sd[1];
+    struct mapistore_property_data *d, sd[1], sd3[3];
     struct UI8Array_r *ids;
     uint64_t fid_work, dcn;
     uint32_t n;
@@ -2133,6 +2133,10 @@ static int test_books_are_subfolders(void)
     CHECK(dav_put(h, root, "/dav/u/Contacts/work/w1.vcf", VC("w1"), NULL, NULL, false, NULL) == MAPISTORE_SUCCESS);
     CHECK(B.folder.get_child_count(g, MAPISTORE_MESSAGE_TABLE, &n) == MAPISTORE_SUCCESS && n == 1);
     CHECK(B.folder.get_child_count(g, MAPISTORE_FOLDER_TABLE, &n) == MAPISTORE_SUCCESS && n == 0);
+    /* opened on its own (emsmdb opening it by ID from the store): personal is still its parent */
+    CHECK((g = book("work")) != NULL && g->fid == fid_work);
+    CHECK(B.properties.get_properties(g, root, 3, cols, sd3) == MAPISTORE_SUCCESS && sd3[2].error == 0
+          && *(uint64_t *)sd3[2].data == f->fid);
     /* a new session: the same ID */
     CHECK((f = book("personal")) != NULL);
     CHECK(B.folder.open_table(f, root, MAPISTORE_FOLDER_TABLE, 1, &t, &n) == MAPISTORE_SUCCESS && n == 1);

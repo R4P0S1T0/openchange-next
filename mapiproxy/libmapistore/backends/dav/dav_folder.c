@@ -375,6 +375,11 @@ static enum mapistore_error dav_create_context(TALLOC_CTX *mem_ctx, struct mapis
 		talloc_free(ctx);
 		return ret;
 	}
+	/* Opened on its own (by ID from the store), another book still sits under personal: flat on the
+	   server, so its URI does not say so. */
+	if (!is_personal(ctx) && fmid_for_uri(ctx, DAV_CONTACTS_URI "personal/", &ctx->root->parent_fid) != MAPISTORE_SUCCESS) {
+		ctx->root->parent_fid = 0;
+	}
 	*backend_object = ctx->root;
 	return MAPISTORE_SUCCESS;
 }

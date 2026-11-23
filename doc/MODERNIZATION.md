@@ -639,14 +639,17 @@ Fixed on 2026-11-23, reproducing the open case in the lab (`807cd4cd`, `80f75b3f
   whole Contacts sync (E_INVALIDARG): no contact reached it until the list was gone;
 - a session's first poll was skipped until Outlook registered its notification table, so a
   contact created in that minute became the starting state and was never notified.
+- the extra books could not be opened by ID from the store (their parent was worked out by
+  cutting the URI to `dav://contacts/`), so Outlook's sync of them failed on every session
+  (0x8004010F in Sync Issues) and their contacts never reached it. emsmdb now asks the backend
+  for the parent when the URI does not give one, and maps it to the folder Outlook knows.
 
 Open:
 
 - an online delete (ImportDeletes, no PredecessorChangeList) still names the version Outlook
   was last given; per client, a PC that was given version 2 and deletes it deletes version 2;
-- the extra books (subfolders of Contacts) cannot be opened by ID from the store: their parent
-  is worked out by cutting the URI (`dav://contacts/`), not personal, so Outlook's sync of
-  those folders fails (0x8004010F in Sync Issues) on every session;
+- a change in an extra book (subfolder of Contacts) reaches Outlook when its session starts, not
+  live: the poll notifies the book's row, but Outlook does not resync it (it does for Contacts);
 - a server change that only this server knows of (a contact given a new ID) reaches other
   sessions of the same user open at the time only after they end;
 - a contact created while SOGo is down is uploaded on the folder's next sync, not when SOGo
